@@ -1,6 +1,6 @@
 const SEASON_START = new Date("2026-08-21T20:00:00+01:00");
 const SEASON_START_DATE = "2026-08-21";
-const APP_BUILD = "20260709n";
+const APP_BUILD = "20260709o";
 const API = window.PREM_API || null;
 const STORAGE = {
   uid: "prem_oracle_uid",
@@ -907,7 +907,7 @@ function leagueView() {
           <div class="league-code"><span>League code</span><strong>${state.code}</strong></div>
           <button class="secondary wide" type="button" data-share-league="${state.code}">Invite mates</button>
           ${state.owner === uid() ? `<button class="link-danger" type="button" data-delete-league="${state.code}">Delete league</button>` : ""}
-          <table class="table league-table"><thead><tr><th>Player</th><th>Move</th><th>Pts</th><th>Exact</th></tr></thead>
+          <table class="table league-table"><thead><tr><th>Player</th><th></th><th>Pts</th><th>Exact</th></tr></thead>
             <tbody>${(state.table || []).map((row, index) => `<tr><td>${row.rank || index + 1}. ${escapeHTML(row.nick)}</td><td>${movementBadge(row)}</td><td>${row.pts}</td><td>${row.exact}</td></tr>`).join("")}</tbody></table>
           ${(state.reveals || []).length ? `<h3>Latest reveals</h3>${state.reveals.slice(0, 8).map(revealCard).join("")}` : `<p class="muted">Picks reveal here after kick-off.</p>`}
           <button class="whatsapp-share wide" type="button" data-export-league-table="${state.code}">Share table to WhatsApp</button>

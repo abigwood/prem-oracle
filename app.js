@@ -1,6 +1,6 @@
 const SEASON_START = new Date("2026-08-21T20:00:00+01:00");
 const SEASON_START_DATE = "2026-08-21";
-const APP_BUILD = "20260709k";
+const APP_BUILD = "20260709l";
 const API = window.PREM_API || null;
 const STORAGE = {
   uid: "prem_oracle_uid",
@@ -524,8 +524,8 @@ function probabilityStrip(match) {
   const columns = `${home}fr ${draw}fr ${away}fr`;
   const homeSeg = teamSegmentColours(TEAM_MARKERS[match.player1] || PROB_FALLBACK_MARKER);
   const awaySeg = teamSegmentColours(TEAM_MARKERS[match.player2] || PROB_FALLBACK_MARKER);
-  return `<div class="oracle-prob" aria-label="Oracle likelihood: ${escapeHTML(match.player1)} ${home}%, draw ${draw}%, ${escapeHTML(match.player2)} ${away}%">
-    <div class="prob-title"><span>Oracle likelihood</span><em>Illustrative</em></div>
+  return `<div class="oracle-prob" aria-label="Oracle forecast: ${escapeHTML(match.player1)} ${home}%, draw ${draw}%, ${escapeHTML(match.player2)} ${away}%">
+    <div class="prob-title"><span>Oracle forecast</span><em>Illustrative</em></div>
     <div class="prob-values" style="grid-template-columns:${columns}">
       <span class="home" style="color:${homeSeg.text}">${home}%</span>
       <span class="draw">${draw}%</span>

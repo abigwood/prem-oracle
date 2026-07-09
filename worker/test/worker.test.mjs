@@ -72,6 +72,49 @@ test("manual settlement preserves previous fixture results", async () => {
   }
 });
 
+test("stats endpoint reports totals and weekly actives behind STATS_SECRET", async () => {
+  const now = Date.now();
+  const week = 7 * 24 * 60 * 60 * 1000;
+  const store = new Map([
+    ["user:u1", JSON.stringify({ nickname: "A" })],
+    ["user:u2", JSON.stringify({ nickname: "B" })],
+    ["user:u3", JSON.stringify({ nickname: "C" })],
+    ["league:ABC", JSON.stringify({ code: "ABC" })],
+    ["league:XYZ", JSON.stringify({ code: "XYZ" })],
+    ["picks:m1", JSON.stringify({ u1: { p1: 1, p2: 0, ts: now - 1000 }, u2: { p1: 2, p2: 2, ts: now - week - 1000 } })],
+    ["picks:m2", JSON.stringify({ u1: { p1: 0, p2: 0, ts: now - 2000 }, u3: { p1: 1, p2: 1, ts: now - 100 } })],
+    // Unrelated prefixes must not be counted.
+    ["push:u1", JSON.stringify({ token: "t" })],
+    ["recovery:ace-ball-mint", JSON.stringify("u1")],
+    ["results", JSON.stringify({})],
+  ]);
+  const env = {
+    STATS_SECRET: "s3cret",
+    KV: {
+      async get(key) { return store.has(key) ? JSON.parse(store.get(key)) : null; },
+      async put(key, value) { store.set(key, value); },
+      async list({ prefix = "", cursor } = {}) {
+        const keys = [...store.keys()].filter((key) => key.startsWith(prefix)).map((name) => ({ name }));
+        return { keys, list_complete: true, cursor: cursor || "" };
+      },
+    },
+  };
+
+  const forbidden = await worker.fetch(new Request("https://worker.test/stats"), env);
+  assert.equal(forbidden.status, 403);
+
+  const wrongSecret = await worker.fetch(new Request("https://worker.test/stats?secret=nope"), env);
+  assert.equal(wrongSecret.status, 403);
+
+  const response = await worker.fetch(new Request("https://worker.test/stats?secret=s3cret"), env);
+  assert.equal(response.status, 200);
+  const data = await response.json();
+  assert.equal(data.users, 3);
+  assert.equal(data.leagues, 2);
+  assert.equal(data.picks, 4);
+  assert.equal(data.activeUsers, 2);
+});
+
 test("push token endpoint stores native registration token", async () => {
   const store = new Map();
   const env = {

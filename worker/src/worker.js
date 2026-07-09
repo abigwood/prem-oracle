@@ -242,6 +242,45 @@ async function settle(env, body) {
   return json({ ok: true, matches: Object.keys(next).length, settlement: "manual" }, 200, env);
 }
 
+async function listAllKeys(env, prefix) {
+  const names = [];
+  let cursor;
+  for (;;) {
+    const page = await env.KV.list({ prefix, cursor });
+    names.push(...page.keys.map((key) => key.name));
+    if (page.list_complete) break;
+    cursor = page.cursor;
+  }
+  return names;
+}
+
+async function stats(env, url) {
+  if (!env.STATS_SECRET || url.searchParams.get("secret") !== env.STATS_SECRET) return json({ error: "forbidden" }, 403, env);
+  const [userKeys, leagueKeys, pickKeys] = await Promise.all([
+    listAllKeys(env, "user:"),
+    listAllKeys(env, "league:"),
+    listAllKeys(env, "picks:"),
+  ]);
+  const weekAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
+  const pickMaps = await Promise.all(pickKeys.map((key) => kvGet(env, key)));
+  let picksSaved = 0;
+  const activeUsers = new Set();
+  for (const map of pickMaps) {
+    if (!map || typeof map !== "object") continue;
+    for (const [uid, pick] of Object.entries(map)) {
+      picksSaved++;
+      if (pick && Number(pick.ts) >= weekAgo) activeUsers.add(uid);
+    }
+  }
+  return json({
+    ok: true,
+    users: userKeys.length,
+    leagues: leagueKeys.length,
+    picks: picksSaved,
+    activeUsers: activeUsers.size,
+  }, 200, env);
+}
+
 const NOTIFIED_TTL_S = 2 * 24 * 60 * 60;
 
 const kickoffTime = (startAt) =>
@@ -291,6 +330,7 @@ export default {
         if (path === "/fixtures") return await getFixtures(env, request);
         if (path === "/picks") return await getUserPicks(env, url);
         if (path === "/state") return await state(env, url);
+        if (path === "/stats") return await stats(env, url);
       }
       if (request.method === "POST") {
         const body = await request.json().catch(() => ({}));

@@ -1,0 +1,12 @@
+name = "prem-oracle-window"
+main = "src/worker.js"
+compatibility_date = "2026-06-25"
+
+[vars]
+FIXTURES_URL = "https://abigwood.github.io/prem-oracle/data/fixtures.json"
+ALLOWED_ORIGIN = "https://abigwood.github.io"
+
+[[kv_namespaces]]
+binding = "KV"
+id = "4d6fa971722242a69e1644725ef2b11b"
+preview_id = "b9f71204465f4ea38be82bd2359e70e9"

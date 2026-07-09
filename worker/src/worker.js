@@ -1,6 +1,7 @@
 import {
   buildReveals,
   computeTableWithMovement,
+  fixturesNeedingNotification,
   isVoided,
   matchLocked,
   makeCode,
@@ -10,6 +11,7 @@ import {
   normaliseResult,
   validFootballScore,
 } from "./logic.js";
+import { apnsConfigured, sendPush } from "./apns.js";
 
 let fixtureCache = null;
 let fixtureCacheAt = 0;
@@ -240,9 +242,43 @@ async function settle(env, body) {
   return json({ ok: true, matches: Object.keys(next).length, settlement: "manual" }, 200, env);
 }
 
+const NOTIFIED_TTL_S = 2 * 24 * 60 * 60;
+
+const kickoffTime = (startAt) =>
+  new Intl.DateTimeFormat("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: "Europe/London" })
+    .format(new Date(startAt));
+
+async function notifyKickoffs(env) {
+  if (!apnsConfigured(env)) return;
+  const now = Date.now();
+  const matchList = await fixtures(env);
+  const notified = await env.KV.list({ prefix: "notified:" });
+  const notifiedIds = new Set(notified.keys.map((key) => key.name.slice("notified:".length)));
+  const pending = fixturesNeedingNotification(matchList, notifiedIds, now);
+  if (!pending.length) return;
+
+  const pushKeys = await env.KV.list({ prefix: "push:" });
+  const tokens = (await Promise.all(pushKeys.keys.map(async (key) => {
+    const record = await kvGet(env, key.name);
+    return record?.token ? { uid: key.name.slice("push:".length), token: record.token } : null;
+  }))).filter(Boolean);
+
+  for (const match of pending) {
+    const body = `⚽ ${match.player1} v ${match.player2} kicks off at ${kickoffTime(match.startAt)} — lock in your prediction!`;
+    const payload = { aps: { alert: body, sound: "default" } };
+    await Promise.all(tokens.map(async ({ uid, token }) => {
+      try {
+        const response = await sendPush(token, payload, env);
+        if (response.status === 410) await env.KV.delete(`push:${uid}`);
+      } catch { /* transient APNs failure; retried next cron tick */ }
+    }));
+    await env.KV.put(`notified:${match.id}`, "1", { expirationTtl: NOTIFIED_TTL_S });
+  }
+}
+
 export default {
   async scheduled(_event, env, ctx) {
-    ctx.waitUntil(Promise.resolve());
+    ctx.waitUntil(notifyKickoffs(env));
   },
   async fetch(request, env) {
     if (request.method === "OPTIONS") return new Response(null, { headers: cors(env) });

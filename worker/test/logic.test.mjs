@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildReveals, computeTable, computeTableWithMovement, normaliseResult, scorePick, validFootballScore, windowState } from "../src/logic.js";
+import { buildReveals, computeTable, computeTableWithMovement, fixturesNeedingNotification, normaliseResult, scorePick, validFootballScore, windowState } from "../src/logic.js";
 
 test("football scores validate from 0-0 to 9-9", () => {
   assert.equal(validFootballScore(0, 0), true);
@@ -64,6 +64,23 @@ test("standings include movement after the latest completed match", () => {
     ["Aaron", 2, 3, 1],
     ["Adam", 3, 1, -2],
   ]);
+});
+
+test("kick-off notifier selects only imminent, un-notified, confirmed fixtures", () => {
+  const now = Date.parse("2026-08-21T18:00:00Z");
+  const min = 60 * 1000;
+  const matches = [
+    { id: "soon", player1: "Arsenal", player2: "Chelsea", startAt: new Date(now + 30 * min).toISOString() },
+    { id: "edge", player1: "Spurs", player2: "Fulham", startAt: new Date(now + 60 * min).toISOString() },
+    { id: "far", player1: "Everton", player2: "Leeds", startAt: new Date(now + 90 * min).toISOString() },
+    { id: "started", player1: "Villa", player2: "Wolves", startAt: new Date(now - 5 * min).toISOString() },
+    { id: "done", player1: "Brentford", player2: "Luton", startAt: new Date(now + 20 * min).toISOString() },
+    { id: "tbc", player1: "Newcastle", player2: null, startAt: new Date(now + 25 * min).toISOString() },
+    { id: "nodate", player1: "Palace", player2: "Brighton", startAt: undefined },
+  ];
+  const notified = new Set(["done"]);
+  const picked = fixturesNeedingNotification(matches, notified, now).map((match) => match.id);
+  assert.deepEqual(picked.sort(), ["edge", "soon"]);
 });
 
 test("reveals stay hidden before start and expose all members after start", () => {

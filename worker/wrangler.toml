@@ -2,6 +2,9 @@ name = "prem-oracle-window"
 main = "src/worker.js"
 compatibility_date = "2026-06-25"
 
+[triggers]
+crons = ["*/15 * * * *"]
+
 [vars]
 FIXTURES_URL = "https://abigwood.github.io/prem-oracle/data/fixtures.json"
 ALLOWED_ORIGIN = "https://abigwood.github.io"

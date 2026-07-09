@@ -142,3 +142,16 @@ export const normRecovery = (value) =>
   String(value || "").toLowerCase().trim().replace(/[^a-z]+/g, "-").replace(/^-+|-+$/g, "");
 
 export const normNick = (value) => String(value || "").trim().slice(0, 24) || "Anon";
+
+// Selects fixtures kicking off within the next `windowMs` (default 60 minutes)
+// whose id is not already present in `notifiedIds`. Fixtures that have already
+// started, lack a parseable start time, or have unconfirmed players are skipped.
+export function fixturesNeedingNotification(matches, notifiedIds, nowMs, windowMs = 60 * 60 * 1000) {
+  return (matches || []).filter((match) => {
+    if (!match?.player1 || !match?.player2) return false;
+    const startMs = Date.parse(match.startAt);
+    if (!Number.isFinite(startMs)) return false;
+    if (startMs < nowMs || startMs > nowMs + windowMs) return false;
+    return !notifiedIds.has(String(match.id));
+  });
+}

@@ -1,6 +1,6 @@
 const SEASON_START = new Date("2026-08-21T20:00:00+01:00");
 const SEASON_START_DATE = "2026-08-21";
-const APP_BUILD = "20260709j";
+const APP_BUILD = "20260709k";
 const API = window.PREM_API || null;
 const STORAGE = {
   uid: "prem_oracle_uid",
@@ -370,6 +370,9 @@ function hero() {
 }
 
 function installNotice() {
+  // Inside the Capacitor native shell there is nothing to "add to home screen".
+  // (The web build also exposes window.Capacitor, so gate on isNativePlatform.)
+  if (window.Capacitor?.isNativePlatform?.()) return "";
   const standalone = matchMedia("(display-mode: standalone)").matches || navigator.standalone;
   if (standalone) return "";
   return `<div class="notice install-notice"><span class="notice-icon">📱</span><div><strong>Home Screen app</strong><p>On iPhone: Safari, Share, Add to Home Screen.</p></div></div>`;

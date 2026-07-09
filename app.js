@@ -1,6 +1,6 @@
 const SEASON_START = new Date("2026-08-21T20:00:00+01:00");
 const SEASON_START_DATE = "2026-08-21";
-const APP_BUILD = "20260709l";
+const APP_BUILD = "20260709m";
 const API = window.PREM_API || null;
 const STORAGE = {
   uid: "prem_oracle_uid",
@@ -572,15 +572,15 @@ function shortTeam(name) {
 function formGuide(match) {
   return `<div class="form-guide" aria-label="Recent form guide">
     <div class="form-note">Illustrative form until live team feeds are connected</div>
-    ${teamFormRow(match.player1, "Home")}
-    ${teamFormRow(match.player2, "Away")}
+    ${teamFormRow(match.player1)}
+    ${teamFormRow(match.player2)}
   </div>`;
 }
 
-function teamFormRow(team, label) {
+function teamFormRow(team) {
   const form = TEAM_INTEL[team]?.form || "------";
   return `<div class="form-row">
-    <div class="form-team"><strong>${escapeHTML(shortTeam(team))}</strong><span>${label}</span></div>
+    <div class="form-team"><strong>${escapeHTML(shortTeam(team))}</strong></div>
     <div class="form-dots">${[...form].map((result) => `<span class="form-dot ${formClass(result)}">${escapeHTML(result)}</span>`).join("")}</div>
   </div>`;
 }

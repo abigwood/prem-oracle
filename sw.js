@@ -1,5 +1,5 @@
-const CACHE = "prem-oracle-v1-20260709l";
-const ASSETS = ["./", "index.html", "reset-cache.html", "styles.css?v=20260709l", "app.js?v=20260709l", "vendor/capacitor/capacitor.js", "vendor/capacitor/push-notifications.js", "data/fixtures.json", "icon.svg", "icons/icon-192.png", "icons/icon-512.png", "icons/apple-touch-icon.png", "manifest.webmanifest"];
+const CACHE = "prem-oracle-v1-20260709m";
+const ASSETS = ["./", "index.html", "reset-cache.html", "styles.css?v=20260709m", "app.js?v=20260709m", "vendor/capacitor/capacitor.js", "vendor/capacitor/push-notifications.js", "data/fixtures.json", "icon.svg", "icons/icon-192.png", "icons/icon-512.png", "icons/apple-touch-icon.png", "manifest.webmanifest"];
 
 self.addEventListener("install", event => {
   event.waitUntil(caches.open(CACHE).then(cache => Promise.allSettled(ASSETS.map(asset => cache.add(new Request(asset, { cache: "reload" }))))));

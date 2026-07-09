@@ -1,6 +1,6 @@
 const SEASON_START = new Date("2026-08-21T20:00:00+01:00");
 const SEASON_START_DATE = "2026-08-21";
-const APP_BUILD = "20260709o";
+const APP_BUILD = "20260709p";
 const API = window.PREM_API || null;
 const STORAGE = {
   uid: "prem_oracle_uid",
@@ -897,6 +897,7 @@ function leagueView() {
     return `<div class="section-head"><div><span class="eyebrow">Private predictor leagues</span><h2>Play against your mates</h2></div></div>${flash()}${controls}${restore}`;
   }
   const state = leagueState;
+  const isOwner = state && !state.error && state.owner === uid();
   const content = !state
     ? `<div class="empty"><strong>Loading league...</strong></div>`
     : state.error
@@ -906,9 +907,9 @@ function leagueView() {
           <h2>${escapeHTML(state.name)}</h2>
           <div class="league-code"><span>League code</span><strong>${state.code}</strong></div>
           <button class="secondary wide" type="button" data-share-league="${state.code}">Invite mates</button>
-          ${state.owner === uid() ? `<button class="link-danger" type="button" data-delete-league="${state.code}">Delete league</button>` : ""}
-          <table class="table league-table"><thead><tr><th>Player</th><th></th><th>Pts</th><th>Exact</th></tr></thead>
-            <tbody>${(state.table || []).map((row, index) => `<tr><td>${row.rank || index + 1}. ${escapeHTML(row.nick)}</td><td>${movementBadge(row)}</td><td>${row.pts}</td><td>${row.exact}</td></tr>`).join("")}</tbody></table>
+          ${isOwner ? `<button class="link-danger" type="button" data-delete-league="${state.code}">Delete league</button>` : ""}
+          <table class="table league-table"><thead><tr><th>Player</th><th></th><th>Pts</th><th>Exact</th>${isOwner ? "<th></th>" : ""}</tr></thead>
+            <tbody>${(state.table || []).map((row, index) => `<tr><td>${row.rank || index + 1}. ${escapeHTML(row.nick)}</td><td>${movementBadge(row)}</td><td>${row.pts}</td><td>${row.exact}</td>${isOwner ? `<td class="kick-cell">${row.uid && row.uid !== state.owner ? `<button class="kick-btn" type="button" data-kick-league="${state.code}" data-kick-uid="${escapeHTML(row.uid)}" aria-label="Remove ${escapeHTML(row.nick)}">×</button>` : ""}</td>` : ""}</tr>`).join("")}</tbody></table>
           ${(state.reveals || []).length ? `<h3>Latest reveals</h3>${state.reveals.slice(0, 8).map(revealCard).join("")}` : `<p class="muted">Picks reveal here after kick-off.</p>`}
           <button class="whatsapp-share wide" type="button" data-export-league-table="${state.code}">Share table to WhatsApp</button>
         </section>`;
@@ -1028,6 +1029,23 @@ document.addEventListener("click", async (event) => {
       removeStoredLeague(code);
       pruneStoredLeagueNames();
       setFlash(`Deleted ${name}`);
+      await loadLeagueState();
+    } catch (error) {
+      setFlash(error.message, "error");
+    }
+    render();
+    return;
+  }
+  const kick = event.target.closest("[data-kick-league]");
+  if (kick) {
+    const code = kick.dataset.kickLeague;
+    const memberUid = kick.dataset.kickUid;
+    const name = (leagueState?.code === code ? leagueState.name : leagueNames[code]) || code;
+    const nick = leagueState?.table?.find((row) => row.uid === memberUid)?.nick || "this member";
+    if (!confirm(`Remove ${nick} from ${name}? Their picks aren't affected and they can rejoin with the code.`)) return;
+    try {
+      await api("/league/kick", { uid: uid(), code, memberUid });
+      setFlash(`Removed ${nick}`);
       await loadLeagueState();
     } catch (error) {
       setFlash(error.message, "error");

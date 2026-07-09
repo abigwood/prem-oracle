@@ -107,6 +107,59 @@ test("manual settle deletes a fixture result when passed null", async () => {
   }
 });
 
+test("owner can kick a member without affecting the league or others", async () => {
+  const store = new Map();
+  const env = {
+    KV: {
+      async get(key) { return store.has(key) ? JSON.parse(store.get(key)) : null; },
+      async put(key, value) { store.set(key, value); },
+      async delete(key) { store.delete(key); },
+    },
+  };
+  const post = (path, body) => worker.fetch(new Request(`https://worker.test${path}`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  }), env);
+
+  const created = await (await post("/league", { uid: "owner", nickname: "Owner" })).json();
+  const code = created.code;
+  await post("/join", { uid: "m2", code, nickname: "Two" });
+  await post("/join", { uid: "m3", code, nickname: "Three" });
+
+  const leagues = async (uid) => (await env.KV.get(`user:${uid}`))?.leagues || [];
+  const league = () => env.KV.get(`league:${code}`);
+
+  // Unknown league -> 404.
+  assert.equal((await post("/league/kick", { uid: "owner", code: "ZZZZZZ", memberUid: "m2" })).status, 404);
+  // Non-owner -> 403.
+  const forbidden = await post("/league/kick", { uid: "m2", code, memberUid: "m3" });
+  assert.equal(forbidden.status, 403);
+  assert.equal((await forbidden.json()).error, "only the league owner can remove members");
+  // Kicking the owner -> 400.
+  const ownerKick = await post("/league/kick", { uid: "owner", code, memberUid: "owner" });
+  assert.equal(ownerKick.status, 400);
+  assert.equal((await ownerKick.json()).error, "the owner cannot be removed");
+  // Unknown member -> 404.
+  const missing = await post("/league/kick", { uid: "owner", code, memberUid: "ghost" });
+  assert.equal(missing.status, 404);
+  assert.equal((await missing.json()).error, "member not found");
+
+  // All the failed attempts left the roster intact.
+  assert.deepEqual((await league()).members.sort(), ["m2", "m3", "owner"]);
+
+  // Owner kicks m2 -> 200, gone from league + its own list, others untouched.
+  const response = await post("/league/kick", { uid: "owner", code, memberUid: "m2" });
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { ok: true, code, removed: "m2" });
+  const after = await league();
+  assert.deepEqual(after.members.sort(), ["m3", "owner"]);
+  assert.equal(after.names.m2, undefined);
+  assert.equal(after.joinedAt.m2, undefined);
+  assert.deepEqual(await leagues("m2"), []);
+  assert.deepEqual(await leagues("m3"), [code]);
+  assert.deepEqual(await leagues("owner"), [code]);
+});
+
 test("owner can delete a league, stripping the code from every member", async () => {
   const store = new Map();
   const env = {

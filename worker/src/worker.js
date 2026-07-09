@@ -154,6 +154,30 @@ async function deleteLeague(env, body) {
   return json({ ok: true, code }, 200, env);
 }
 
+async function kickMember(env, body) {
+  const uid = String(body.uid || "").trim();
+  const code = String(body.code || "").trim().toUpperCase();
+  const memberUid = String(body.memberUid || "").trim();
+  if (!uid || !code || !memberUid) return json({ error: "uid, code and memberUid required" }, 400, env);
+  const league = await kvGet(env, `league:${code}`);
+  if (!league) return json({ error: "league not found" }, 404, env);
+  if (uid !== league.owner) return json({ error: "only the league owner can remove members" }, 403, env);
+  if (memberUid === league.owner) return json({ error: "the owner cannot be removed" }, 400, env);
+  if (!(league.members || []).includes(memberUid)) return json({ error: "member not found" }, 404, env);
+  league.members = league.members.filter((entry) => entry !== memberUid);
+  if (league.names) delete league.names[memberUid];
+  if (league.joinedAt) delete league.joinedAt[memberUid];
+  const user = await kvGet(env, `user:${memberUid}`);
+  if (user?.leagues?.includes(code)) {
+    user.leagues = user.leagues.filter((entry) => entry !== code);
+  }
+  await Promise.all([
+    kvPut(env, `league:${code}`, league),
+    user ? kvPut(env, `user:${memberUid}`, user) : Promise.resolve(),
+  ]);
+  return json({ ok: true, code, removed: memberUid }, 200, env);
+}
+
 async function restore(env, body) {
   const recovery = normRecovery(body.code);
   const uid = await kvGet(env, `recovery:${recovery}`);
@@ -359,6 +383,7 @@ export default {
         if (path === "/league") return await createLeague(env, body);
         if (path === "/join") return await joinLeague(env, body);
         if (path === "/league/delete") return await deleteLeague(env, body);
+        if (path === "/league/kick") return await kickMember(env, body);
         if (path === "/restore") return await restore(env, body);
         if (path === "/pick") return await savePick(env, body);
         if (path === "/push-token") return await savePushToken(env, body);

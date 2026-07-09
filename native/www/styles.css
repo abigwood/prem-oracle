@@ -720,6 +720,21 @@ main {
   cursor: pointer;
 }
 .link-danger:hover { text-decoration: underline; }
+.kick-cell { width: 1%; text-align: right; padding-left: 4px; }
+.kick-btn {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  color: #c4122e;
+  background: transparent;
+  font-size: 1rem;
+  line-height: 1;
+  opacity: .55;
+  cursor: pointer;
+}
+.kick-btn:hover { opacity: 1; background: rgba(196, 18, 46, .1); }
 .reveal-card { margin-bottom: 10px; }
 .reveal-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px; }
 .reveal-head span { color: var(--purple); font-size: .75rem; font-weight: 900; }

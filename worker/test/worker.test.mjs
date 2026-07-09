@@ -2,6 +2,18 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import worker, { mergeResultOverlay } from "../src/worker.js";
 
+function memoryKV(store = new Map()) {
+  return {
+    async get(key) { return store.has(key) ? JSON.parse(store.get(key)) : null; },
+    async put(key, value) { store.set(key, value); },
+    async delete(key) { store.delete(key); },
+    async list({ prefix = "", cursor } = {}) {
+      const keys = [...store.keys()].filter((key) => key.startsWith(prefix)).sort().map((name) => ({ name }));
+      return { keys, list_complete: true, cursor: cursor || "" };
+    },
+  };
+}
+
 test("official completed result beats stale live overlay", () => {
   const official = { id: "m1", tour: "men", status: "complete", result: [2, 3], lockAt: "old" };
   const overlay = { status: "live", result: null, lockAt: "newer" };
@@ -109,13 +121,7 @@ test("manual settle deletes a fixture result when passed null", async () => {
 
 test("owner can kick a member without affecting the league or others", async () => {
   const store = new Map();
-  const env = {
-    KV: {
-      async get(key) { return store.has(key) ? JSON.parse(store.get(key)) : null; },
-      async put(key, value) { store.set(key, value); },
-      async delete(key) { store.delete(key); },
-    },
-  };
+  const env = { KV: memoryKV(store) };
   const post = (path, body) => worker.fetch(new Request(`https://worker.test${path}`, {
     method: "POST",
     body: JSON.stringify(body),
@@ -127,7 +133,10 @@ test("owner can kick a member without affecting the league or others", async () 
   await post("/join", { uid: "m3", code, nickname: "Three" });
 
   const leagues = async (uid) => (await env.KV.get(`user:${uid}`))?.leagues || [];
-  const league = () => env.KV.get(`league:${code}`);
+  const memberUids = () => [...store.keys()]
+    .filter((key) => key.startsWith(`member:${code}:`))
+    .map((key) => key.slice(`member:${code}:`.length))
+    .sort();
 
   // Unknown league -> 404.
   assert.equal((await post("/league/kick", { uid: "owner", code: "ZZZZZZ", memberUid: "m2" })).status, 404);
@@ -145,16 +154,14 @@ test("owner can kick a member without affecting the league or others", async () 
   assert.equal((await missing.json()).error, "member not found");
 
   // All the failed attempts left the roster intact.
-  assert.deepEqual((await league()).members.sort(), ["m2", "m3", "owner"]);
+  assert.deepEqual(memberUids(), ["m2", "m3", "owner"]);
 
   // Owner kicks m2 -> 200, gone from league + its own list, others untouched.
   const response = await post("/league/kick", { uid: "owner", code, memberUid: "m2" });
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), { ok: true, code, removed: "m2" });
-  const after = await league();
-  assert.deepEqual(after.members.sort(), ["m3", "owner"]);
-  assert.equal(after.names.m2, undefined);
-  assert.equal(after.joinedAt.m2, undefined);
+  assert.deepEqual(memberUids(), ["m3", "owner"]);
+  assert.equal(store.has(`member:${code}:m2`), false);
   assert.deepEqual(await leagues("m2"), []);
   assert.deepEqual(await leagues("m3"), [code]);
   assert.deepEqual(await leagues("owner"), [code]);
@@ -162,13 +169,7 @@ test("owner can kick a member without affecting the league or others", async () 
 
 test("owner can delete a league, stripping the code from every member", async () => {
   const store = new Map();
-  const env = {
-    KV: {
-      async get(key) { return store.has(key) ? JSON.parse(store.get(key)) : null; },
-      async put(key, value) { store.set(key, value); },
-      async delete(key) { store.delete(key); },
-    },
-  };
+  const env = { KV: memoryKV(store) };
   const post = (path, body) => worker.fetch(new Request(`https://worker.test${path}`, {
     method: "POST",
     body: JSON.stringify(body),
@@ -198,9 +199,74 @@ test("owner can delete a league, stripping the code from every member", async ()
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), { ok: true, code });
   assert.equal(await env.KV.get(`league:${code}`), null);
+  assert.equal([...store.keys()].some((key) => key.startsWith(`member:${code}:`)), false);
   assert.deepEqual(await leagues("owner"), []);
   assert.deepEqual(await leagues("m2"), []);
   assert.deepEqual(await leagues("m3"), []);
+});
+
+test("simultaneous joins write independent member keys", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({ fixtures: [] }), { status: 200 });
+  const store = new Map();
+  const env = {
+    FIXTURES_URL: "https://example.com/fixtures.json",
+    KV: memoryKV(store),
+  };
+  const post = (path, body) => worker.fetch(new Request(`https://worker.test${path}`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  }), env);
+  try {
+    const created = await (await post("/league", { uid: "owner", nickname: "Owner" })).json();
+    const code = created.code;
+    const joiners = Array.from({ length: 6 }, (_, index) => ({
+      uid: `member-${index + 1}`,
+      nickname: `Member ${index + 1}`,
+    }));
+
+    const responses = await Promise.all(joiners.map((body) => post("/join", { ...body, code })));
+    assert.deepEqual(responses.map((response) => response.status), Array(joiners.length).fill(200));
+
+    const memberKeys = [...store.keys()]
+      .filter((key) => key.startsWith(`member:${code}:`))
+      .map((key) => key.slice(`member:${code}:`.length))
+      .sort();
+    assert.deepEqual(memberKeys, ["member-1", "member-2", "member-3", "member-4", "member-5", "member-6", "owner"]);
+    assert.equal((await env.KV.get(`league:${code}`)).members, undefined);
+
+    const state = await (await worker.fetch(new Request(`https://worker.test/state?code=${code}`), env)).json();
+    assert.deepEqual(state.table.map((row) => row.uid).sort(), memberKeys);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("state still reads legacy embedded league members", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({ fixtures: [] }), { status: 200 });
+  const store = new Map([
+    ["league:LEGACY", JSON.stringify({
+      code: "LEGACY",
+      name: "Legacy League",
+      owner: "owner",
+      members: ["owner", "m2"],
+      names: { owner: "Owner", m2: "Two" },
+      joinedAt: { owner: 1, m2: 2 },
+    })],
+  ]);
+  const env = {
+    FIXTURES_URL: "https://example.com/fixtures.json",
+    KV: memoryKV(store),
+  };
+  try {
+    const response = await worker.fetch(new Request("https://worker.test/state?code=LEGACY"), env);
+    assert.equal(response.status, 200);
+    const state = await response.json();
+    assert.deepEqual(state.table.map((row) => row.uid).sort(), ["m2", "owner"]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("stats endpoint reports totals and weekly actives behind STATS_SECRET", async () => {

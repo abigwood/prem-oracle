@@ -28,6 +28,8 @@ const json = (body, status, env) =>
 const kvGet = (env, key) => env.KV.get(key, "json");
 const kvPut = (env, key, value) => env.KV.put(key, JSON.stringify(value));
 const randomBytes = (n) => crypto.getRandomValues(new Uint8Array(n));
+const leagueMemberPrefix = (code) => `member:${code}:`;
+const leagueMemberKey = (code, uid) => `${leagueMemberPrefix(code)}${uid}`;
 
 export function mergeResultOverlay(match, overlay) {
   if (!overlay) return match;
@@ -78,12 +80,38 @@ async function ensureUser(env, uid, nickname) {
 }
 
 async function members(env, league) {
-  const users = await Promise.all((league.members || []).map((uid) => kvGet(env, `user:${uid}`)));
-  return (league.members || []).map((uid, index) => ({
-    uid,
-    nick: league.names?.[uid] || users[index]?.nickname || "Anon",
-    since: league.joinedAt?.[uid] || 0,
-  }));
+  const code = String(league.code || "").toUpperCase();
+  const found = new Map();
+  if (code && env.KV.list) {
+    let cursor;
+    do {
+      const page = await env.KV.list({ prefix: leagueMemberPrefix(code), cursor });
+      const rows = await Promise.all(page.keys.map(async (key) => {
+        const value = await kvGet(env, key.name);
+        const uid = key.name.slice(leagueMemberPrefix(code).length);
+        return value ? { uid, ...value } : null;
+      }));
+      for (const row of rows) {
+        if (row?.uid) found.set(row.uid, {
+          uid: row.uid,
+          nick: row.nick || "Anon",
+          since: row.since || row.joinedAt || 0,
+        });
+      }
+      cursor = page.cursor;
+      if (page.list_complete) break;
+    } while (cursor);
+  }
+  for (const uid of league.members || []) {
+    if (found.has(uid)) continue;
+    const user = await kvGet(env, `user:${uid}`);
+    found.set(uid, {
+      uid,
+      nick: league.names?.[uid] || user?.nickname || "Anon",
+      since: league.joinedAt?.[uid] || 0,
+    });
+  }
+  return [...found.values()].sort((a, b) => (a.since || 0) - (b.since || 0) || a.nick.localeCompare(b.nick));
 }
 
 async function allPicks(env, ids) {
@@ -109,11 +137,10 @@ async function createLeague(env, body) {
   const name = String(body.name || "Saturday Super 6").trim().slice(0, 40);
   const now = Date.now();
   await kvPut(env, `league:${code}`, {
-    code, name, owner: uid, members: [uid],
-    names: { [uid]: user.nickname || "Anon" },
-    joinedAt: { [uid]: now },
+    code, name, owner: uid,
     createdAt: now,
   });
+  await kvPut(env, leagueMemberKey(code, uid), { nick: user.nickname || "Anon", since: now });
   user.leagues = [...new Set([...(user.leagues || []), code])];
   await kvPut(env, `user:${uid}`, user);
   return json({ ok: true, code, name, recovery: user.recovery }, 200, env);
@@ -126,13 +153,13 @@ async function joinLeague(env, body) {
   const league = await kvGet(env, `league:${code}`);
   if (!league) return json({ error: "league not found" }, 404, env);
   const user = await ensureUser(env, uid, body.nickname);
-  if (!league.members.includes(uid)) league.members.push(uid);
-  league.names ||= {};
-  league.joinedAt ||= {};
-  league.names[uid] = user.nickname || "Anon";
-  league.joinedAt[uid] ||= Date.now();
+  const existing = await kvGet(env, leagueMemberKey(code, uid));
+  await kvPut(env, leagueMemberKey(code, uid), {
+    nick: user.nickname || existing?.nick || "Anon",
+    since: existing?.since || league.joinedAt?.[uid] || Date.now(),
+  });
   user.leagues = [...new Set([...(user.leagues || []), code])];
-  await Promise.all([kvPut(env, `league:${code}`, league), kvPut(env, `user:${uid}`, user)]);
+  await kvPut(env, `user:${uid}`, user);
   return json({ ok: true, code, name: league.name, recovery: user.recovery }, 200, env);
 }
 
@@ -143,13 +170,14 @@ async function deleteLeague(env, body) {
   const league = await kvGet(env, `league:${code}`);
   if (!league) return json({ error: "league not found" }, 404, env);
   if (uid !== league.owner) return json({ error: "only the league owner can delete it" }, 403, env);
-  const members = league.members || [];
-  await Promise.all(members.map(async (memberUid) => {
+  const memberList = await members(env, league);
+  await Promise.all(memberList.map(async ({ uid: memberUid }) => {
     const user = await kvGet(env, `user:${memberUid}`);
     if (!user?.leagues?.includes(code)) return;
     user.leagues = user.leagues.filter((entry) => entry !== code);
     await kvPut(env, `user:${memberUid}`, user);
   }));
+  await Promise.all(memberList.map(({ uid: memberUid }) => env.KV.delete(leagueMemberKey(code, memberUid))));
   await env.KV.delete(`league:${code}`);
   return json({ ok: true, code }, 200, env);
 }
@@ -163,8 +191,10 @@ async function kickMember(env, body) {
   if (!league) return json({ error: "league not found" }, 404, env);
   if (uid !== league.owner) return json({ error: "only the league owner can remove members" }, 403, env);
   if (memberUid === league.owner) return json({ error: "the owner cannot be removed" }, 400, env);
-  if (!(league.members || []).includes(memberUid)) return json({ error: "member not found" }, 404, env);
-  league.members = league.members.filter((entry) => entry !== memberUid);
+  const existing = await kvGet(env, leagueMemberKey(code, memberUid));
+  const legacyMember = (league.members || []).includes(memberUid);
+  if (!existing && !legacyMember) return json({ error: "member not found" }, 404, env);
+  league.members = (league.members || []).filter((entry) => entry !== memberUid);
   if (league.names) delete league.names[memberUid];
   if (league.joinedAt) delete league.joinedAt[memberUid];
   const user = await kvGet(env, `user:${memberUid}`);
@@ -173,6 +203,7 @@ async function kickMember(env, body) {
   }
   await Promise.all([
     kvPut(env, `league:${code}`, league),
+    env.KV.delete(leagueMemberKey(code, memberUid)),
     user ? kvPut(env, `user:${memberUid}`, user) : Promise.resolve(),
   ]);
   return json({ ok: true, code, removed: memberUid }, 200, env);

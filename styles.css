@@ -708,6 +708,18 @@ main {
   background: #28d7c8;
   font-weight: 900;
 }
+.link-danger {
+  display: block;
+  margin: 8px auto 0;
+  padding: 6px 8px;
+  border: 0;
+  background: transparent;
+  color: #c4122e;
+  font-size: .72rem;
+  font-weight: 800;
+  cursor: pointer;
+}
+.link-danger:hover { text-decoration: underline; }
 .reveal-card { margin-bottom: 10px; }
 .reveal-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px; }
 .reveal-head span { color: var(--purple); font-size: .75rem; font-weight: 900; }

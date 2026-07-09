@@ -1,6 +1,6 @@
 const SEASON_START = new Date("2026-08-21T20:00:00+01:00");
 const SEASON_START_DATE = "2026-08-21";
-const APP_BUILD = "20260709m";
+const APP_BUILD = "20260709n";
 const API = window.PREM_API || null;
 const STORAGE = {
   uid: "prem_oracle_uid",
@@ -906,6 +906,7 @@ function leagueView() {
           <h2>${escapeHTML(state.name)}</h2>
           <div class="league-code"><span>League code</span><strong>${state.code}</strong></div>
           <button class="secondary wide" type="button" data-share-league="${state.code}">Invite mates</button>
+          ${state.owner === uid() ? `<button class="link-danger" type="button" data-delete-league="${state.code}">Delete league</button>` : ""}
           <table class="table league-table"><thead><tr><th>Player</th><th>Move</th><th>Pts</th><th>Exact</th></tr></thead>
             <tbody>${(state.table || []).map((row, index) => `<tr><td>${row.rank || index + 1}. ${escapeHTML(row.nick)}</td><td>${movementBadge(row)}</td><td>${row.pts}</td><td>${row.exact}</td></tr>`).join("")}</tbody></table>
           ${(state.reveals || []).length ? `<h3>Latest reveals</h3>${state.reveals.slice(0, 8).map(revealCard).join("")}` : `<p class="muted">Picks reveal here after kick-off.</p>`}
@@ -1015,6 +1016,23 @@ document.addEventListener("click", async (event) => {
     const text = `Join my Prem Oracle league ${share.dataset.shareLeague}: ${url}`;
     if (navigator.share) await navigator.share({ title: "Prem Oracle", text, url }).catch(() => {});
     else location.href = whatsappUrlFor(text);
+    return;
+  }
+  const del = event.target.closest("[data-delete-league]");
+  if (del) {
+    const code = del.dataset.deleteLeague;
+    const name = (leagueState?.code === code ? leagueState.name : leagueNames[code]) || code;
+    if (!confirm(`Delete ${name}? This removes the league and its table for all members — picks aren't affected.`)) return;
+    try {
+      await api("/league/delete", { uid: uid(), code });
+      removeStoredLeague(code);
+      pruneStoredLeagueNames();
+      setFlash(`Deleted ${name}`);
+      await loadLeagueState();
+    } catch (error) {
+      setFlash(error.message, "error");
+    }
+    render();
     return;
   }
   const exportTable = event.target.closest("[data-export-league-table]");

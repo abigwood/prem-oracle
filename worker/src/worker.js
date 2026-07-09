@@ -136,6 +136,24 @@ async function joinLeague(env, body) {
   return json({ ok: true, code, name: league.name, recovery: user.recovery }, 200, env);
 }
 
+async function deleteLeague(env, body) {
+  const uid = String(body.uid || "").trim();
+  const code = String(body.code || "").trim().toUpperCase();
+  if (!uid || !code) return json({ error: "uid and code required" }, 400, env);
+  const league = await kvGet(env, `league:${code}`);
+  if (!league) return json({ error: "league not found" }, 404, env);
+  if (uid !== league.owner) return json({ error: "only the league owner can delete it" }, 403, env);
+  const members = league.members || [];
+  await Promise.all(members.map(async (memberUid) => {
+    const user = await kvGet(env, `user:${memberUid}`);
+    if (!user?.leagues?.includes(code)) return;
+    user.leagues = user.leagues.filter((entry) => entry !== code);
+    await kvPut(env, `user:${memberUid}`, user);
+  }));
+  await env.KV.delete(`league:${code}`);
+  return json({ ok: true, code }, 200, env);
+}
+
 async function restore(env, body) {
   const recovery = normRecovery(body.code);
   const uid = await kvGet(env, `recovery:${recovery}`);
@@ -340,6 +358,7 @@ export default {
         const body = await request.json().catch(() => ({}));
         if (path === "/league") return await createLeague(env, body);
         if (path === "/join") return await joinLeague(env, body);
+        if (path === "/league/delete") return await deleteLeague(env, body);
         if (path === "/restore") return await restore(env, body);
         if (path === "/pick") return await savePick(env, body);
         if (path === "/push-token") return await savePushToken(env, body);

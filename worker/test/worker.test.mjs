@@ -107,6 +107,49 @@ test("manual settle deletes a fixture result when passed null", async () => {
   }
 });
 
+test("owner can delete a league, stripping the code from every member", async () => {
+  const store = new Map();
+  const env = {
+    KV: {
+      async get(key) { return store.has(key) ? JSON.parse(store.get(key)) : null; },
+      async put(key, value) { store.set(key, value); },
+      async delete(key) { store.delete(key); },
+    },
+  };
+  const post = (path, body) => worker.fetch(new Request(`https://worker.test${path}`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  }), env);
+
+  const created = await (await post("/league", { uid: "owner", nickname: "Owner" })).json();
+  const code = created.code;
+  await post("/join", { uid: "m2", nickname: "Two" });
+  await post("/join", { uid: "m2", code, nickname: "Two" });
+  await post("/join", { uid: "m3", code, nickname: "Three" });
+
+  const leagues = async (uid) => (await env.KV.get(`user:${uid}`))?.leagues || [];
+  assert.deepEqual(await leagues("owner"), [code]);
+  assert.ok((await leagues("m2")).includes(code));
+  assert.ok((await leagues("m3")).includes(code));
+
+  // Unknown code -> 404.
+  assert.equal((await post("/league/delete", { uid: "owner", code: "ZZZZZZ" })).status, 404);
+  // Non-owner -> 403 and the league survives.
+  const forbidden = await post("/league/delete", { uid: "m2", code });
+  assert.equal(forbidden.status, 403);
+  assert.equal((await forbidden.json()).error, "only the league owner can delete it");
+  assert.ok(await env.KV.get(`league:${code}`));
+
+  // Owner delete -> 200, league gone, code stripped from every member.
+  const response = await post("/league/delete", { uid: "owner", code });
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { ok: true, code });
+  assert.equal(await env.KV.get(`league:${code}`), null);
+  assert.deepEqual(await leagues("owner"), []);
+  assert.deepEqual(await leagues("m2"), []);
+  assert.deepEqual(await leagues("m3"), []);
+});
+
 test("stats endpoint reports totals and weekly actives behind STATS_SECRET", async () => {
   const now = Date.now();
   const week = 7 * 24 * 60 * 60 * 1000;

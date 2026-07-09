@@ -4,3 +4,6 @@ __pycache__/
 icons/icon-base.png
 .wrangler/
 worker/.wrangler/
+node_modules/
+ios/App/build/
+ios/Pods/

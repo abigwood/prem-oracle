@@ -19,10 +19,11 @@ class PremOracleTests(unittest.TestCase):
         sw = (ROOT / "sw.js").read_text()
         self.assertIn("Prem Oracle", html)
         self.assertIn("Prem Oracle", manifest)
-        self.assertIn("styles.css?v=20260709h", html)
-        self.assertIn("app.js?v=20260709h", html)
-        self.assertIn("prem-oracle-v1-20260709h", sw)
+        self.assertIn("styles.css?v=20260709i", html)
+        self.assertIn("app.js?v=20260709i", html)
+        self.assertIn("prem-oracle-v1-20260709i", sw)
         self.assertIn("https://prem-oracle-window.abigwood.workers.dev", html)
+        self.assertIn("vendor/capacitor/push-notifications.js", html)
 
     def test_fixture_json_has_full_season(self):
         data = json.loads((ROOT / "data/fixtures.json").read_text())
@@ -65,6 +66,8 @@ class PremOracleTests(unittest.TestCase):
         self.assertIn("Illustrative form", app)
         self.assertIn("fixtureDayDiff(match) > 7", app)
         self.assertIn("flash-error", css)
+        self.assertIn("setupNativePushNotifications", app)
+        self.assertIn("/push-token", app)
         self.assertIn("TEAM_INTEL", app)
         self.assertIn("VENUE_OUTLOOK", app)
         self.assertIn(".team-crest", css)

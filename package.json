@@ -1,0 +1,29 @@
+{
+  "name": "prem-oracle",
+  "version": "1.0.0",
+  "description": "A Premier League 2026/27 score predictor with private leagues.",
+  "private": true,
+  "scripts": {
+    "verify": "python3 -m unittest -v test_app.py && node --check app.js && cd worker && npm test",
+    "native:prepare": "rm -rf native/www && mkdir -p native/www && cp -R index.html reset-cache.html styles.css app.js sw.js manifest.webmanifest icon.svg icons data vendor native/www/",
+    "native:sync": "npm run native:prepare && npx cap sync ios",
+    "native:open": "npx cap open ios"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/abigwood/prem-oracle.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "UNLICENSED",
+  "bugs": {
+    "url": "https://github.com/abigwood/prem-oracle/issues"
+  },
+  "homepage": "https://github.com/abigwood/prem-oracle#readme",
+  "dependencies": {
+    "@capacitor/cli": "8.4.1",
+    "@capacitor/core": "8.4.1",
+    "@capacitor/ios": "8.4.1",
+    "@capacitor/push-notifications": "8.1.1"
+  }
+}

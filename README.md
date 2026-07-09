@@ -44,3 +44,18 @@ python3 -m unittest -v test_app.py
 node --check app.js
 cd worker && npm test
 ```
+
+## Native iOS wrapper
+
+The App Store wrapper is a Capacitor iOS project in `ios/`.
+
+```bash
+npm install
+npm run native:sync
+npm run native:open
+```
+
+Native push registration is wired with `@capacitor/push-notifications`; iOS
+uses `ios/App/App/App.entitlements` and the AppDelegate APNs callbacks. Device
+tokens are stored by the Worker via `/push-token` so kick-off reminders can be
+sent once the APNs sender credentials/result-reminder job are configured.

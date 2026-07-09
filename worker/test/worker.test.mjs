@@ -71,3 +71,19 @@ test("manual settlement preserves previous fixture results", async () => {
     globalThis.fetch = originalFetch;
   }
 });
+
+test("push token endpoint stores native registration token", async () => {
+  const store = new Map();
+  const env = {
+    KV: {
+      async get(key) { return store.has(key) ? JSON.parse(store.get(key)) : null; },
+      async put(key, value) { store.set(key, value); },
+    },
+  };
+  const response = await worker.fetch(new Request("https://worker.test/push-token", {
+    method: "POST",
+    body: JSON.stringify({ uid: "user-1", nickname: "Adam", token: "apns-token", platform: "ios" }),
+  }), env);
+  assert.equal(response.status, 200);
+  assert.equal(JSON.parse(store.get("push:user-1")).token, "apns-token");
+});

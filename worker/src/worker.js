@@ -179,6 +179,19 @@ async function savePick(env, body) {
   return json({ ok: true, matchId, p1, p2 }, 200, env);
 }
 
+async function savePushToken(env, body) {
+  const uid = String(body.uid || "").trim();
+  const token = String(body.token || "").trim();
+  if (!uid || !token) return json({ error: "uid and token required" }, 400, env);
+  await ensureUser(env, uid, body.nickname);
+  await kvPut(env, `push:${uid}`, {
+    token,
+    platform: String(body.platform || "ios").slice(0, 20),
+    updatedAt: Date.now(),
+  });
+  return json({ ok: true }, 200, env);
+}
+
 async function state(env, url) {
   const code = String(url.searchParams.get("code") || "").toUpperCase();
   const league = await kvGet(env, `league:${code}`);
@@ -249,6 +262,7 @@ export default {
         if (path === "/join") return await joinLeague(env, body);
         if (path === "/restore") return await restore(env, body);
         if (path === "/pick") return await savePick(env, body);
+        if (path === "/push-token") return await savePushToken(env, body);
         if (path === "/settle") return await settle(env, body);
       }
       return json({ error: "not found" }, 404, env);

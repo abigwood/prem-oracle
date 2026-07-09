@@ -1,0 +1,17 @@
+{
+  "appId": "com.abigwood.premoracle",
+  "appName": "Prem Oracle",
+  "webDir": "native/www",
+  "bundledWebRuntime": false,
+  "server": {
+    "iosScheme": "premoracle"
+  },
+  "ios": {
+    "contentInset": "automatic"
+  },
+  "plugins": {
+    "PushNotifications": {
+      "presentationOptions": ["badge", "sound", "banner", "list"]
+    }
+  }
+}

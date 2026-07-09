@@ -208,7 +208,7 @@ async function settle(env, body) {
   if (!body.results || typeof body.results !== "object") return json({ error: "results object required" }, 400, env);
   const matchList = await fixtures(env, true);
   const validIds = new Set(matchList.map((match) => match.id));
-  const next = {};
+  const next = { ...((await kvGet(env, "results")) || {}) };
   for (const [matchId, overlay] of Object.entries(body.results)) {
     if (!validIds.has(matchId)) return json({ error: `unknown fixture: ${matchId}` }, 400, env);
     const normalised = normaliseResult(overlay);

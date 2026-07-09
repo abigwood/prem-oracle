@@ -1,6 +1,6 @@
 const SEASON_START = new Date("2026-08-21T20:00:00+01:00");
 const SEASON_START_DATE = "2026-08-21";
-const APP_BUILD = "20260709i";
+const APP_BUILD = "20260709j";
 const API = window.PREM_API || null;
 const STORAGE = {
   uid: "prem_oracle_uid",
@@ -438,6 +438,67 @@ function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
 }
 
+// Background of the .oracle-prob card; contrast is measured against this so the
+// bars and percentage numbers stay readable where they actually sit.
+const PROB_CARD_BG = "#fbfcfe";
+
+function hexToRgb(hex) {
+  const clean = String(hex).replace("#", "");
+  const full = clean.length === 3 ? clean.replace(/./g, (ch) => ch + ch) : clean;
+  const num = parseInt(full, 16);
+  return { r: (num >> 16) & 255, g: (num >> 8) & 255, b: num & 255 };
+}
+
+function rgbToHex({ r, g, b }) {
+  return "#" + [r, g, b].map((value) => clamp(Math.round(value), 0, 255).toString(16).padStart(2, "0")).join("");
+}
+
+function channelLuminance(value) {
+  const s = value / 255;
+  return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+}
+
+function luminance(hex) {
+  const { r, g, b } = hexToRgb(hex);
+  return 0.2126 * channelLuminance(r) + 0.7152 * channelLuminance(g) + 0.0722 * channelLuminance(b);
+}
+
+function contrastRatio(a, b) {
+  const la = luminance(a);
+  const lb = luminance(b);
+  return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05);
+}
+
+function darken(hex, factor) {
+  const { r, g, b } = hexToRgb(hex);
+  return rgbToHex({ r: r * (1 - factor), g: g * (1 - factor), b: b * (1 - factor) });
+}
+
+// Darkens a colour just enough to clear the target contrast against the card,
+// so a team's own colour can be reused for text/outlines without washing out.
+function readableColour(hex, minRatio, background = PROB_CARD_BG) {
+  let out = hex;
+  for (let i = 0; i < 12 && contrastRatio(out, background) < minRatio; i++) out = darken(out, 0.12);
+  return out;
+}
+
+// Resolves how one team's likelihood segment should be painted. White/very light
+// kits (Fulham, Leeds, Spurs) fall back to their border/accent colour, or keep
+// the light fill with a 1px inset outline so the segment never disappears.
+function teamSegmentColours(marker) {
+  const bgTooLight = contrastRatio(marker.bg, PROB_CARD_BG) < 1.6;
+  let fill = marker.bg;
+  let accent = marker.bg;
+  if (bgTooLight) {
+    accent = marker.border;
+    if (contrastRatio(marker.border, PROB_CARD_BG) >= 2) fill = marker.border;
+  }
+  const needsOutline = contrastRatio(fill, PROB_CARD_BG) < 1.6;
+  const outline = readableColour(accent, 3);
+  const text = readableColour(needsOutline ? outline : fill, 4.5);
+  return { fill, needsOutline, outline, text };
+}
+
 function matchProbabilities(match) {
   const home = TEAM_INTEL[match.player1]?.rating ?? 76;
   const away = TEAM_INTEL[match.player2]?.rating ?? 76;
@@ -449,20 +510,28 @@ function matchProbabilities(match) {
   return [homeWin, draw, awayWin].map((value) => Math.round((value / total) * 100));
 }
 
+const PROB_FALLBACK_MARKER = { bg: "#ECFFF5", fg: "#38003C", border: "#B9F8D8" };
+
+function segmentFillStyle(segment) {
+  return `background:${segment.fill}${segment.needsOutline ? `;box-shadow:inset 0 0 0 1px ${segment.outline}` : ""}`;
+}
+
 function probabilityStrip(match) {
   const [home, draw, away] = match.probabilities || matchProbabilities(match);
   const columns = `${home}fr ${draw}fr ${away}fr`;
+  const homeSeg = teamSegmentColours(TEAM_MARKERS[match.player1] || PROB_FALLBACK_MARKER);
+  const awaySeg = teamSegmentColours(TEAM_MARKERS[match.player2] || PROB_FALLBACK_MARKER);
   return `<div class="oracle-prob" aria-label="Oracle likelihood: ${escapeHTML(match.player1)} ${home}%, draw ${draw}%, ${escapeHTML(match.player2)} ${away}%">
     <div class="prob-title"><span>Oracle likelihood</span><em>Illustrative</em></div>
     <div class="prob-values" style="grid-template-columns:${columns}">
-      <span class="home">${home}%</span>
+      <span class="home" style="color:${homeSeg.text}">${home}%</span>
       <span class="draw">${draw}%</span>
-      <span class="away">${away}%</span>
+      <span class="away" style="color:${awaySeg.text}">${away}%</span>
     </div>
     <div class="prob-rail" style="grid-template-columns:${columns}">
-      <i class="home"></i>
+      <i class="home" style="${segmentFillStyle(homeSeg)}"></i>
       <i class="draw"></i>
-      <i class="away"></i>
+      <i class="away" style="${segmentFillStyle(awaySeg)}"></i>
     </div>
     <div class="prob-labels" style="grid-template-columns:${columns}"><span>${escapeHTML(shortTeam(match.player1))}</span><span>Draw</span><span>${escapeHTML(shortTeam(match.player2))}</span></div>
   </div>`;

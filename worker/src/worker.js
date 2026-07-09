@@ -226,6 +226,10 @@ async function settle(env, body) {
   const next = { ...((await kvGet(env, "results")) || {}) };
   for (const [matchId, overlay] of Object.entries(body.results)) {
     if (!validIds.has(matchId)) return json({ error: `unknown fixture: ${matchId}` }, 400, env);
+    if (overlay === null) {
+      delete next[matchId];
+      continue;
+    }
     const normalised = normaliseResult(overlay);
     const status = String(overlay?.status || (normalised ? "complete" : "")).toLowerCase();
     if (!normalised && !["postponed", "cancelled", "abandoned"].includes(status)) {

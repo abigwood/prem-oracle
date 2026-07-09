@@ -72,6 +72,41 @@ test("manual settlement preserves previous fixture results", async () => {
   }
 });
 
+test("manual settle deletes a fixture result when passed null", async () => {
+  const originalFetch = globalThis.fetch;
+  const fixtures = [
+    { id: "md1-001", player1: "Arsenal", player2: "Coventry City", startAt: "2026-08-21T20:00:00+01:00" },
+    { id: "md2-001", player1: "Liverpool", player2: "Nottingham Forest", startAt: "2026-08-29T15:00:00+01:00" },
+  ];
+  globalThis.fetch = async () => new Response(JSON.stringify({ fixtures }), { status: 200 });
+  const store = new Map();
+  const env = {
+    FIXTURES_URL: "https://example.com/fixtures.json",
+    SETTLE_SECRET: "test-secret",
+    KV: {
+      async get(key) { return store.has(key) ? JSON.parse(store.get(key)) : null; },
+      async put(key, value) { store.set(key, value); },
+    },
+  };
+  const settle = (results) => worker.fetch(new Request("https://worker.test/settle", {
+    method: "POST",
+    body: JSON.stringify({ secret: "test-secret", results }),
+  }), env);
+  try {
+    await settle({ "md1-001": { status: "complete", result: [2, 1] } });
+    await settle({ "md2-001": { status: "complete", result: [0, 0] } });
+    assert.deepEqual(Object.keys(JSON.parse(store.get("results"))).sort(), ["md1-001", "md2-001"]);
+
+    const response = await settle({ "md1-001": null });
+    assert.equal(response.status, 200);
+    const results = JSON.parse(store.get("results"));
+    assert.deepEqual(Object.keys(results), ["md2-001"]);
+    assert.deepEqual(results["md2-001"].result, [0, 0]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("stats endpoint reports totals and weekly actives behind STATS_SECRET", async () => {
   const now = Date.now();
   const week = 7 * 24 * 60 * 60 * 1000;

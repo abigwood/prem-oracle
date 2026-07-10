@@ -1,6 +1,6 @@
 const SEASON_START = new Date("2026-08-21T20:00:00+01:00");
 const SEASON_START_DATE = "2026-08-21";
-const APP_BUILD = "20260709s";
+const APP_BUILD = "20260709t";
 const API = window.PREM_API || null;
 const STORAGE = {
   uid: "prem_oracle_uid",
@@ -808,7 +808,9 @@ function matchdayPicker() {
 
 function seasonBanner(state) {
   const played = state.currentMatchday == null ? 38 : Math.max(0, state.currentMatchday - 1);
-  const detail = played === 0 ? `starts Matchday ${state.currentMatchday || 1}` : `after Matchday ${played} of 38`;
+  const detail = state.currentMatchdayHasResults && state.currentMatchday != null
+    ? `Matchday ${state.currentMatchday} in progress`
+    : played === 0 ? `starts Matchday ${state.currentMatchday || 1}` : `after Matchday ${played} of 38`;
   return `<div class="round-banner"><strong>Season 2026/27</strong><span>${detail}</span></div>`;
 }
 

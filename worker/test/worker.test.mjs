@@ -242,6 +242,40 @@ test("simultaneous joins write independent member keys", async () => {
   }
 });
 
+test("state reports when the current matchday has settled fixtures", async () => {
+  const originalFetch = globalThis.fetch;
+  const fixtures = [
+    { id: "md1-001", matchday: 1, player1: "Arsenal", player2: "Chelsea", startAt: "2026-08-21T20:00:00+01:00", status: "complete", result: [2, 1] },
+    { id: "md1-002", matchday: 1, player1: "Everton", player2: "Leeds United", startAt: "2026-08-22T15:00:00+01:00", status: "upcoming", result: null },
+  ];
+  globalThis.fetch = async () => new Response(JSON.stringify({ fixtures }), { status: 200 });
+  const store = new Map([
+    ["league:ROUND1", JSON.stringify({ code: "ROUND1", name: "Round League", owner: "owner" })],
+    ["member:ROUND1:owner", JSON.stringify({ nick: "Owner", since: 0 })],
+  ]);
+  const env = {
+    FIXTURES_URL: "https://example.com/fixtures.json",
+    KV: memoryKV(store),
+  };
+  try {
+    await worker.fetch(new Request("https://worker.test/fixtures?refresh=1"), env);
+    let state = await (await worker.fetch(new Request("https://worker.test/state?code=ROUND1"), env)).json();
+    assert.equal(state.currentMatchday, 1);
+    assert.equal(state.currentMatchdayStatus, "in progress");
+    assert.equal(state.currentMatchdayHasResults, true);
+
+    fixtures[0].status = "upcoming";
+    fixtures[0].result = null;
+    await worker.fetch(new Request("https://worker.test/fixtures?refresh=1"), env);
+    state = await (await worker.fetch(new Request("https://worker.test/state?code=ROUND1"), env)).json();
+    assert.equal(state.currentMatchday, 1);
+    assert.equal(state.currentMatchdayStatus, "in progress");
+    assert.equal(state.currentMatchdayHasResults, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("state still reads legacy embedded league members", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () => new Response(JSON.stringify({ fixtures: [] }), { status: 200 });

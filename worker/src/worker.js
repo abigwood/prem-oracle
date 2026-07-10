@@ -309,11 +309,15 @@ async function state(env, url) {
   const wins = computeRoundWins(memberList, matchList, picks);
   const unplayed = matchList.filter((match) => match.matchday != null && !normaliseResult(match) && !isVoided(match));
   const currentMatchday = unplayed.length ? Math.min(...unplayed.map((match) => match.matchday)) : null;
+  const currentMatchdayFixtures = currentMatchday == null ? [] : matchList.filter((match) => match.matchday === currentMatchday);
+  const currentMatchdayHasResults = currentMatchdayFixtures.some((match) => !!normaliseResult(match));
   return json({
     code,
     name: league.name,
     owner: league.owner,
     currentMatchday,
+    currentMatchdayStatus: currentMatchday == null ? "complete" : roundStatus(currentMatchdayFixtures),
+    currentMatchdayHasResults,
     table: computeTableWithMovement(memberList, completed, picks).map((row) => ({ ...row, wins: wins[row.uid] || 0 })),
     reveals: buildReveals(memberList, matchList, picks, Date.now()).slice(0, 20),
   }, 200, env);

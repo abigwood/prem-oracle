@@ -1,6 +1,6 @@
 const SEASON_START = new Date("2026-08-21T20:00:00+01:00");
 const SEASON_START_DATE = "2026-08-21";
-const APP_BUILD = "20260709q";
+const APP_BUILD = "20260709r";
 const API = window.PREM_API || null;
 const STORAGE = {
   uid: "prem_oracle_uid",
@@ -91,6 +91,10 @@ let leagueCodes = readJSON(STORAGE.leagues, []);
 let leagueNames = readJSON(STORAGE.leagueNames, {});
 let activeLeague = localStorage.getItem(STORAGE.activeLeague) || leagueCodes[0] || "";
 let leagueState = null;
+let leagueTab = "matchday";
+let selectedMatchday = null;
+let roundState = null;
+let matchdayPickerOpen = false;
 let busyMatch = "";
 let flashMessage = "";
 let flashTone = "success";
@@ -189,12 +193,17 @@ async function syncUserPicks(replace = false) {
   localStorage.setItem(STORAGE.picks, JSON.stringify(picks));
 }
 
+function leagueSupportsRounds(state) {
+  return !!state && !state.error && "currentMatchday" in state;
+}
+
 async function loadLeagueState() {
-  if (!activeLeague || !API) { leagueState = null; return; }
+  if (!activeLeague || !API) { leagueState = null; roundState = null; return; }
   try {
     leagueState = await api(`/state?code=${encodeURIComponent(activeLeague)}`);
     saveLeagueName(leagueState.code, leagueState.name);
   } catch (error) {
+    roundState = null;
     if (/league not found/i.test(error.message)) {
       removeStoredLeague(activeLeague);
       if (activeLeague) return loadLeagueState();
@@ -202,6 +211,22 @@ async function loadLeagueState() {
       return;
     }
     leagueState = { error: error.message, code: activeLeague };
+    return;
+  }
+  if (leagueSupportsRounds(leagueState)) {
+    if (selectedMatchday == null) selectedMatchday = leagueState.currentMatchday || 38;
+    if (leagueTab === "matchday") await loadRoundState();
+  } else {
+    leagueTab = "season"; // Old worker cache: fall back to the season-only UI.
+  }
+}
+
+async function loadRoundState() {
+  if (!activeLeague || !API || selectedMatchday == null) { roundState = null; return; }
+  try {
+    roundState = await api(`/state?code=${encodeURIComponent(activeLeague)}&md=${selectedMatchday}`);
+  } catch (error) {
+    roundState = { error: error.message };
   }
 }
 
@@ -241,6 +266,8 @@ function removeStoredLeague(code) {
 
 function setActiveLeague(code, refresh = true) {
   activeLeague = code || "";
+  selectedMatchday = null;
+  roundState = null;
   if (activeLeague) localStorage.setItem(STORAGE.activeLeague, activeLeague);
   else localStorage.removeItem(STORAGE.activeLeague);
   if (refresh) loadLeagueState().then(render);
@@ -673,9 +700,15 @@ function todayView() {
     title = md === 1 ? "Opening matchday" : "Next matchday";
     subtitle = `Matchday ${md}`;
   }
+  const homeMatchday = dayMatches[0]?.matchday ?? nextMatchday();
+  const roundFixtures = fixtures.filter((fixture) => fixture.matchday === homeMatchday);
+  const pickedCount = roundFixtures.filter((fixture) => picks[fixture.id]).length;
+  const progress = roundFixtures.length
+    ? `<p class="pick-progress">You've picked ${pickedCount} of ${roundFixtures.length}</p>`
+    : "";
   return `${hero()}${installNotice()}${inviteCode && !leagueCodes.includes(inviteCode) ? `<div class="notice invite-notice"><span class="notice-icon">🏆</span><div><strong>League invitation: ${inviteCode}</strong><p>Open the League tab to join.</p></div></div>` : ""}${fixtureNotice()}
     <div class="section-head">
-      <div><span class="eyebrow">Next up</span><h2>${title}</h2><p>${subtitle}</p></div>
+      <div><span class="eyebrow">Next up · Game ${homeMatchday} of 38</span><h2>${title}</h2><p>${subtitle}</p>${progress}</div>
     </div>
     ${dayMatches.map(matchCard).join("")}`;
 }
@@ -738,9 +771,77 @@ function leagueTableText(state) {
     const rank = row.rank || index + 1;
     const movement = Number(row.movement || 0);
     const marker = movement > 0 ? `▲${movement}` : movement < 0 ? `▼${Math.abs(movement)}` : "-";
-    return `${rank}. ${row.nick} ${marker} - ${row.pts} pts (${row.exact} exact)`;
+    return `${rank}. ${row.nick} ${marker} - ${row.pts} pts (${row.exact} exact)${row.wins ? ` 🏆x${row.wins}` : ""}`;
   });
   return `Prem Oracle league table - ${state.name}\nUpdated ${updated}\n\n${rows.join("\n")}\n\nJoin with code ${state.code}`;
+}
+
+function winnerNames(round) {
+  return (round?.winners || [])
+    .map((winnerUid) => (round.table || []).find((row) => row.uid === winnerUid)?.nick)
+    .filter(Boolean)
+    .join(" & ");
+}
+
+function roundShareText(state, round) {
+  const head = round.complete
+    ? `🏆 Matchday ${round.matchday}: won by ${winnerNames(round) || "nobody"}`
+    : `🏆 Matchday ${round.matchday} · in progress`;
+  const rows = (round.table || []).map((row, index) => `${row.rank || index + 1}. ${row.nick} - ${row.pts} pts (${row.exact} exact)`);
+  return `${head}\n\n${rows.join("\n")}\n\nJoin with code ${state.code}`;
+}
+
+function roundToggle() {
+  const md = selectedMatchday || leagueState?.currentMatchday || 1;
+  return `<div class="round-toggle">
+    <button type="button" class="round-seg${leagueTab === "matchday" ? " active" : ""}" data-round-tab="matchday">Matchday ${md} ▾</button>
+    <button type="button" class="round-seg${leagueTab === "season" ? " active" : ""}" data-round-tab="season">Season</button>
+  </div>`;
+}
+
+function matchdayPicker() {
+  if (!matchdayPickerOpen) return "";
+  const md = selectedMatchday || 1;
+  return `<div class="md-picker">${Array.from({ length: 38 }, (_, i) => i + 1).map((n) =>
+    `<button type="button" class="md-cell${n === md ? " active" : ""}" data-round-md="${n}">${n}</button>`).join("")}</div>`;
+}
+
+function seasonBanner(state) {
+  const played = state.currentMatchday == null ? 38 : Math.max(0, state.currentMatchday - 1);
+  return `<div class="round-banner"><strong>Season 2026/27</strong><span>after Matchday ${played} of 38</span></div>`;
+}
+
+function roundBanner(round) {
+  const md = round.matchday;
+  if (round.complete) {
+    const names = winnerNames(round);
+    return `<div class="round-banner is-success"><strong>Matchday ${md} complete — won by ${names ? escapeHTML(names) : "nobody"} 🏆</strong><span>Game ${md} of 38 · all fixtures settled</span></div>`;
+  }
+  if (!round.status || round.status === "in progress") {
+    return `<div class="round-banner"><strong>Game ${md} of 38 · in progress</strong></div>`;
+  }
+  return `<div class="round-banner is-pending"><strong>Game ${md} of 38 · ${escapeHTML(round.status)}</strong></div>`;
+}
+
+function roundTableHtml(round) {
+  const winners = new Set(round.complete ? round.winners || [] : []);
+  return `<table class="table round-standings"><thead><tr><th>Player</th><th>Pts</th><th>Exact</th></tr></thead>
+    <tbody>${(round.table || []).map((row, index) =>
+      `<tr><td>${row.rank || index + 1}. ${escapeHTML(row.nick)}${winners.has(row.uid) ? ` <span class="crown" aria-label="Round winner">👑</span>` : ""}</td><td>${row.pts}</td><td>${row.exact}</td></tr>`
+    ).join("")}</tbody></table>`;
+}
+
+function seasonTableHtml(state, isOwner, withWins) {
+  return `<table class="table league-table"><thead><tr><th>Player</th><th></th><th>Pts</th><th>Exact</th>${withWins ? `<th class="wins-col" aria-label="Weekly wins">🏆</th>` : ""}${isOwner ? "<th></th>" : ""}</tr></thead>
+    <tbody>${(state.table || []).map((row, index) =>
+      `<tr><td>${row.rank || index + 1}. ${escapeHTML(row.nick)}</td><td>${movementBadge(row)}</td><td>${row.pts}</td><td>${row.exact}</td>${withWins ? `<td class="wins-col">${row.wins || 0}</td>` : ""}${isOwner ? `<td class="kick-cell">${row.uid && row.uid !== state.owner ? `<button class="kick-btn" type="button" data-kick-league="${state.code}" data-kick-uid="${escapeHTML(row.uid)}" aria-label="Remove ${escapeHTML(row.nick)}">×</button>` : ""}</td>` : ""}</tr>`
+    ).join("")}</tbody></table>`;
+}
+
+function leagueRevealsHtml(state) {
+  return (state.reveals || []).length
+    ? `<h3>Latest reveals</h3>${state.reveals.slice(0, 8).map(revealCard).join("")}`
+    : `<p class="muted">Picks reveal here after kick-off.</p>`;
 }
 
 function whatsappUrlFor(text) {
@@ -898,6 +999,24 @@ function leagueView() {
   }
   const state = leagueState;
   const isOwner = state && !state.error && state.owner === uid();
+  const supportsRounds = leagueSupportsRounds(state);
+  const showMatchday = supportsRounds && leagueTab === "matchday";
+  const shareLabel = showMatchday && roundState && !roundState.error && roundState.matchday != null
+    ? `Share Matchday ${roundState.matchday} result`
+    : "Share table to WhatsApp";
+  let inner;
+  if (showMatchday) {
+    inner = !roundState
+      ? `<div class="empty"><strong>Loading matchday…</strong></div>`
+      : roundState.error
+        ? `<div class="empty"><strong>${escapeHTML(roundState.error)}</strong></div>`
+        : `${roundBanner(roundState)}${roundTableHtml(roundState)}`;
+  } else if (supportsRounds) {
+    inner = `${seasonBanner(state)}${seasonTableHtml(state, isOwner, true)}${leagueRevealsHtml(state)}`;
+  } else if (state && !state.error) {
+    // Resilient fallback: an old worker response without round data.
+    inner = `${seasonTableHtml(state, isOwner, false)}${leagueRevealsHtml(state)}`;
+  }
   const content = !state
     ? `<div class="empty"><strong>Loading league...</strong></div>`
     : state.error
@@ -908,10 +1027,9 @@ function leagueView() {
           <div class="league-code"><span>League code</span><strong>${state.code}</strong></div>
           <button class="secondary wide" type="button" data-share-league="${state.code}">Invite mates</button>
           ${isOwner ? `<button class="link-danger" type="button" data-delete-league="${state.code}">Delete league</button>` : ""}
-          <table class="table league-table"><thead><tr><th>Player</th><th></th><th>Pts</th><th>Exact</th>${isOwner ? "<th></th>" : ""}</tr></thead>
-            <tbody>${(state.table || []).map((row, index) => `<tr><td>${row.rank || index + 1}. ${escapeHTML(row.nick)}</td><td>${movementBadge(row)}</td><td>${row.pts}</td><td>${row.exact}</td>${isOwner ? `<td class="kick-cell">${row.uid && row.uid !== state.owner ? `<button class="kick-btn" type="button" data-kick-league="${state.code}" data-kick-uid="${escapeHTML(row.uid)}" aria-label="Remove ${escapeHTML(row.nick)}">×</button>` : ""}</td>` : ""}</tr>`).join("")}</tbody></table>
-          ${(state.reveals || []).length ? `<h3>Latest reveals</h3>${state.reveals.slice(0, 8).map(revealCard).join("")}` : `<p class="muted">Picks reveal here after kick-off.</p>`}
-          <button class="whatsapp-share wide" type="button" data-export-league-table="${state.code}">Share table to WhatsApp</button>
+          ${supportsRounds ? `${roundToggle()}${matchdayPicker()}` : ""}
+          ${inner}
+          <button class="whatsapp-share wide" type="button" data-export-league-table="${state.code}">${shareLabel}</button>
         </section>`;
   return `<div class="section-head"><div><span class="eyebrow">Private predictor leagues</span><h2>League table</h2></div></div>${flash()}${leagueSwitcher()}${content}${controls}${restore}`;
 }
@@ -1011,6 +1129,34 @@ document.addEventListener("click", async (event) => {
   if (filter) { matchdayFilter = filter.dataset.filter; render(); return; }
   const league = event.target.closest("[data-league]");
   if (league) { setActiveLeague(league.dataset.league); return; }
+  const roundTab = event.target.closest("[data-round-tab]");
+  if (roundTab) {
+    if (roundTab.dataset.roundTab === "matchday") {
+      if (leagueTab === "matchday") { matchdayPickerOpen = !matchdayPickerOpen; render(); return; }
+      leagueTab = "matchday";
+      matchdayPickerOpen = false;
+      render();
+      if (!roundState || roundState.error || roundState.matchday !== selectedMatchday) {
+        await loadRoundState();
+        render();
+      }
+      return;
+    }
+    leagueTab = "season";
+    matchdayPickerOpen = false;
+    render();
+    return;
+  }
+  const roundMd = event.target.closest("[data-round-md]");
+  if (roundMd) {
+    selectedMatchday = Number(roundMd.dataset.roundMd);
+    leagueTab = "matchday";
+    matchdayPickerOpen = false;
+    render();
+    await loadRoundState();
+    render();
+    return;
+  }
   const share = event.target.closest("[data-share-league]");
   if (share) {
     const url = `${location.origin}${location.pathname}?league=${share.dataset.shareLeague}`;
@@ -1054,18 +1200,25 @@ document.addEventListener("click", async (event) => {
     return;
   }
   const exportTable = event.target.closest("[data-export-league-table]");
-  if (exportTable && leagueState?.table?.length) {
-    setFlash("Building share card.");
-    render();
-    try {
-      await shareLeagueTableGraphic(leagueState);
-      setFlash("Share card ready.");
-    } catch {
-      const text = leagueTableText(leagueState);
-      location.href = whatsappUrlFor(text);
-      setFlash("Opened WhatsApp share text.");
+  if (exportTable) {
+    if (leagueTab === "matchday" && roundState && !roundState.error && roundState.table?.length) {
+      const text = roundShareText(leagueState, roundState);
+      if (navigator.share) await navigator.share({ title: "Prem Oracle", text }).catch(() => {});
+      else location.href = whatsappUrlFor(text);
+      return;
     }
-    render();
+    if (leagueState?.table?.length) {
+      setFlash("Building share card.");
+      render();
+      try {
+        await shareLeagueTableGraphic(leagueState);
+        setFlash("Share card ready.");
+      } catch {
+        location.href = whatsappUrlFor(leagueTableText(leagueState));
+        setFlash("Opened WhatsApp share text.");
+      }
+      render();
+    }
     return;
   }
   const scoreWindow = event.target.closest("[data-score-window]");

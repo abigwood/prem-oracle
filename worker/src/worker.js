@@ -1,5 +1,7 @@
 import {
   buildReveals,
+  computeRoundTable,
+  computeRoundWins,
   computeTableWithMovement,
   fixturesNeedingNotification,
   isVoided,
@@ -9,6 +11,9 @@ import {
   normNick,
   normRecovery,
   normaliseResult,
+  roundComplete,
+  roundStatus,
+  roundWinners,
   validFootballScore,
 } from "./logic.js";
 import { apnsConfigured, sendPush } from "./apns.js";
@@ -280,13 +285,36 @@ async function state(env, url) {
       startMs: Date.parse(match.lockAt || match.startAt) || 0,
       result: normaliseResult(match),
       voided: isVoided(match),
+      matchday: match.matchday,
     }))
     .filter((match) => match.result || match.voided);
+
+  const mdParam = url.searchParams.get("md");
+  const md = mdParam == null ? null : Number(mdParam);
+  if (md != null && Number.isInteger(md) && md > 0) {
+    const roundFixtures = matchList.filter((match) => match.matchday === md);
+    const table = computeRoundTable(memberList, completed, picks, md).map((row, index) => ({ ...row, rank: index + 1 }));
+    return json({
+      code,
+      name: league.name,
+      owner: league.owner,
+      matchday: md,
+      table,
+      status: roundStatus(roundFixtures),
+      complete: roundComplete(roundFixtures),
+      winners: roundWinners(memberList, roundFixtures, picks),
+    }, 200, env);
+  }
+
+  const wins = computeRoundWins(memberList, matchList, picks);
+  const unplayed = matchList.filter((match) => match.matchday != null && !normaliseResult(match) && !isVoided(match));
+  const currentMatchday = unplayed.length ? Math.min(...unplayed.map((match) => match.matchday)) : null;
   return json({
     code,
     name: league.name,
     owner: league.owner,
-    table: computeTableWithMovement(memberList, completed, picks),
+    currentMatchday,
+    table: computeTableWithMovement(memberList, completed, picks).map((row) => ({ ...row, wins: wins[row.uid] || 0 })),
     reveals: buildReveals(memberList, matchList, picks, Date.now()).slice(0, 20),
   }, 200, env);
 }

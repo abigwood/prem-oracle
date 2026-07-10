@@ -75,6 +75,70 @@ export function computeTableWithMovement(members, completed, picksByMatch) {
   });
 }
 
+function matchToCompleted(match) {
+  return {
+    id: match.id,
+    startMs: Date.parse(match.lockAt || match.startAt) || 0,
+    result: normaliseResult(match),
+    voided: isVoided(match),
+    matchday: match.matchday,
+  };
+}
+
+// One matchday's standings. Same scoring/sort as the season table, restricted to
+// fixtures of `matchday`. `completed` is the season-shaped array (each carrying a
+// `matchday`), so callers reuse the mapping they already built.
+export function computeRoundTable(members, completed, picksByMatch, matchday) {
+  return computeTable(members, completed.filter((match) => match.matchday === matchday), picksByMatch);
+}
+
+// A round is complete once every non-void fixture has a result. Cancelled/abandoned
+// fixtures (isVoided) are exempt; a postponed fixture is non-void without a result,
+// so it keeps the round open until it is replayed.
+export function roundComplete(roundFixtures) {
+  return roundFixtures.length > 0 && roundFixtures.every((match) => normaliseResult(match) || isVoided(match));
+}
+
+// Human-facing completion label for one round's fixtures.
+export function roundStatus(roundFixtures) {
+  if (!roundFixtures.length) return "no fixtures";
+  const pending = roundFixtures.filter((match) => !normaliseResult(match) && !isVoided(match));
+  if (!pending.length) return "complete";
+  const postponed = pending.filter((match) => String(match.status || "").toLowerCase() === "postponed");
+  if (postponed.length === pending.length) {
+    return `${postponed.length} ${postponed.length === 1 ? "fixture" : "fixtures"} pending`;
+  }
+  return "in progress";
+}
+
+// Winners of a completed round: every member sharing the top score (shared wins
+// allowed). No winner while the round is incomplete or nobody has scored.
+export function roundWinners(members, roundFixtures, picksByMatch) {
+  if (!roundComplete(roundFixtures)) return [];
+  const table = computeTable(members, roundFixtures.map(matchToCompleted), picksByMatch);
+  const top = table.length ? table[0].pts : 0;
+  if (top <= 0) return [];
+  return table.filter((row) => row.pts === top).map((row) => row.uid);
+}
+
+// Per-uid tally of matchday wins across every complete round.
+export function computeRoundWins(members, fixtures, picksByMatch) {
+  const wins = Object.fromEntries(members.map((member) => [member.uid, 0]));
+  const byMatchday = new Map();
+  for (const match of fixtures) {
+    if (match?.matchday == null) continue;
+    const list = byMatchday.get(match.matchday) || [];
+    list.push(match);
+    byMatchday.set(match.matchday, list);
+  }
+  for (const roundFixtures of byMatchday.values()) {
+    for (const uid of roundWinners(members, roundFixtures, picksByMatch)) {
+      if (uid in wins) wins[uid] += 1;
+    }
+  }
+  return wins;
+}
+
 export function buildReveals(members, matches, picksByMatch, nowMs) {
   return matches
     .filter((match) => matchLocked(match, nowMs))

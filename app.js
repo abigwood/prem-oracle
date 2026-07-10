@@ -806,9 +806,17 @@ function matchdayPicker() {
     `<button type="button" class="md-cell${n === md ? " active" : ""}" data-round-md="${n}">${n}</button>`).join("")}</div>`;
 }
 
+function fixtureHasResult(match) {
+  const result = match?.result;
+  if (Array.isArray(result)) return result.length === 2 && result.every((value) => value != null);
+  return result?.p1 != null && result?.p2 != null;
+}
+
 function seasonBanner(state) {
   const played = state.currentMatchday == null ? 38 : Math.max(0, state.currentMatchday - 1);
-  const detail = state.currentMatchdayHasResults && state.currentMatchday != null
+  const currentMatchdayHasResults = state.currentMatchdayHasResults ||
+    fixtures.some((fixture) => fixture.matchday === state.currentMatchday && fixtureHasResult(fixture));
+  const detail = currentMatchdayHasResults && state.currentMatchday != null
     ? `Matchday ${state.currentMatchday} in progress`
     : played === 0 ? `starts Matchday ${state.currentMatchday || 1}` : `after Matchday ${played} of 38`;
   return `<div class="round-banner"><strong>Season 2026/27</strong><span>${detail}</span></div>`;

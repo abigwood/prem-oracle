@@ -808,6 +808,8 @@ th.wins-col { font-size: .92rem; }
 .reveal-picks em { color: var(--green); font-style: normal; font-weight: 900; text-align: right; }
 .rules-list { padding-left: 20px; color: var(--muted); line-height: 1.6; }
 .rules-list strong { color: var(--ink); }
+.rules-attribution { margin: 18px 0 0; color: var(--muted); font-size: .78rem; }
+.rules-attribution a { color: var(--ink); font-weight: 800; }
 .round-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; margin-top: 14px; }
 .round-rule { padding: 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--white); }
 .round-rule b { display: block; color: var(--green); }

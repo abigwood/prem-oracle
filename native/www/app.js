@@ -1,6 +1,6 @@
 const SEASON_START = new Date("2026-08-21T20:00:00+01:00");
 const SEASON_START_DATE = "2026-08-21";
-const APP_BUILD = "20260709t";
+const APP_BUILD = "20260714a";
 const API = window.PREM_API || null;
 const STORAGE = {
   uid: "prem_oracle_uid",
@@ -1059,6 +1059,7 @@ function rulesView() {
       <li>Picks lock at scheduled kick-off and then reveal to the league.</li>
       <li>Postponed or abandoned matches are void until they are rescheduled.</li>
     </ul>
+    <p class="rules-attribution">Match data: <a href="https://www.football-data.org/" target="_blank" rel="noopener">football-data.org</a>. Football data provided by the Football-Data.org API.</p>
   </div>`;
 }
 

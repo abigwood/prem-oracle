@@ -17,6 +17,7 @@ import {
   validFootballScore,
 } from "./logic.js";
 import { apnsConfigured, sendPush } from "./apns.js";
+import { autoSettleResults } from "./results_feed.js";
 
 let fixtureCache = null;
 let fixtureCacheAt = 0;
@@ -424,9 +425,20 @@ async function notifyKickoffs(env) {
   }
 }
 
+async function autoSettle(env) {
+  if (!env.FOOTBALL_DATA_TOKEN) return;
+  const matchList = await fixtures(env, true);
+  const current = (await kvGet(env, "results")) || {};
+  const settled = await autoSettleResults(env, matchList, current);
+  if (!settled.checked || settled.settled === 0) return;
+  await kvPut(env, "results", settled.results);
+  fixtureCache = null;
+}
+
 export default {
   async scheduled(_event, env, ctx) {
     ctx.waitUntil(notifyKickoffs(env));
+    ctx.waitUntil(autoSettle(env));
   },
   async fetch(request, env) {
     if (request.method === "OPTIONS") return new Response(null, { headers: cors(env) });

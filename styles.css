@@ -862,6 +862,15 @@ th.wins-col { font-size: .92rem; }
 .bottom-nav button.active { color: var(--purple); }
 .bottom-nav button.active span { filter: none; }
 
+/* Native shell only: tighten the bottom-nav's home-indicator padding so the
+   icons sit lower while the bar still clears the indicator and its background
+   still reaches the very bottom. Web build keeps the full safe-area inset. */
+.is-native {
+  --safe-bottom-nav: max(8px, calc(var(--safe-bottom) - 14px));
+  --nav-total-height: calc(var(--nav-height) + var(--safe-bottom-nav));
+}
+.is-native .bottom-nav { padding-bottom: var(--safe-bottom-nav); }
+
 dialog { width: min(430px, calc(100% - 28px)); padding: 0; border: 0; border-radius: 18px; box-shadow: 0 24px 80px rgba(0,0,0,.28); }
 dialog::backdrop { background: rgba(13, 46, 32, .58); backdrop-filter: blur(3px); }
 dialog form { padding: 20px; }

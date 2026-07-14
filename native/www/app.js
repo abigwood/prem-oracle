@@ -12,6 +12,13 @@ const STORAGE = {
   recovery: "prem_oracle_recovery",
   pushToken: "prem_oracle_push_token",
 };
+
+// Native (Capacitor) builds get an `is-native` hook for shell-only styling —
+// e.g. a tighter bottom-nav safe-area inset. The web build (window.Capacitor
+// exists there too) never gets this class because isNativePlatform() is false.
+if (window.Capacitor?.isNativePlatform?.()) {
+  document.documentElement.classList.add("is-native");
+}
 const TEAM_MARKERS = {
   "AFC Bournemouth": { bg: "#DA291C", fg: "#FFFFFF", border: "#111111" },
   "Arsenal": { bg: "#EF0107", fg: "#FFFFFF", border: "#9C824A" },

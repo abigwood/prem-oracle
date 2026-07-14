@@ -23,12 +23,30 @@ let fixtureCache = null;
 let fixtureCacheAt = 0;
 const CACHE_MS = 60_000;
 
+const CORS_ALLOWLIST = ["https://abigwood.github.io", "premoracle://localhost", "capacitor://localhost"];
+
+const allowedOrigin = (env, request) => {
+  const origin = request?.headers.get("origin");
+  if (!origin) return null;
+  const allowlist = [...CORS_ALLOWLIST, env.ALLOWED_ORIGIN].filter(Boolean);
+  return allowlist.includes(origin) ? origin : null;
+};
+
 const cors = (env) => ({
   "access-control-allow-origin": env.ALLOWED_ORIGIN || "*",
   "access-control-allow-methods": "GET, POST, OPTIONS",
   "access-control-allow-headers": "content-type",
   "access-control-max-age": "86400",
 });
+
+const applyCors = (response, env, request) => {
+  const origin = allowedOrigin(env, request);
+  if (origin) {
+    response.headers.set("access-control-allow-origin", origin);
+    response.headers.set("vary", "origin");
+  }
+  return response;
+};
 const json = (body, status, env) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", ...cors(env) } });
 const kvGet = (env, key) => env.KV.get(key, "json");
@@ -441,32 +459,36 @@ export default {
     ctx.waitUntil(autoSettle(env));
   },
   async fetch(request, env) {
-    if (request.method === "OPTIONS") return new Response(null, { headers: cors(env) });
-    const url = new URL(request.url);
-    const path = url.pathname.replace(/\/+$/, "") || "/";
-    try {
-      if (request.method === "GET") {
-        if (path === "/" || path === "/health") return json({ ok: true, service: "prem-oracle-window" }, 200, env);
-        if (path === "/me") return await getMe(env, url);
-        if (path === "/fixtures") return await getFixtures(env, request);
-        if (path === "/picks") return await getUserPicks(env, url);
-        if (path === "/state") return await state(env, url);
-        if (path === "/stats") return await stats(env, url);
-      }
-      if (request.method === "POST") {
-        const body = await request.json().catch(() => ({}));
-        if (path === "/league") return await createLeague(env, body);
-        if (path === "/join") return await joinLeague(env, body);
-        if (path === "/league/delete") return await deleteLeague(env, body);
-        if (path === "/league/kick") return await kickMember(env, body);
-        if (path === "/restore") return await restore(env, body);
-        if (path === "/pick") return await savePick(env, body);
-        if (path === "/push-token") return await savePushToken(env, body);
-        if (path === "/settle") return await settle(env, body);
-      }
-      return json({ error: "not found" }, 404, env);
-    } catch (error) {
-      return json({ error: "server error", detail: String(error?.message || error) }, 500, env);
-    }
+    if (request.method === "OPTIONS") return applyCors(new Response(null, { headers: cors(env) }), env, request);
+    return applyCors(await route(request, env), env, request);
   },
 };
+
+async function route(request, env) {
+  const url = new URL(request.url);
+  const path = url.pathname.replace(/\/+$/, "") || "/";
+  try {
+    if (request.method === "GET") {
+      if (path === "/" || path === "/health") return json({ ok: true, service: "prem-oracle-window" }, 200, env);
+      if (path === "/me") return await getMe(env, url);
+      if (path === "/fixtures") return await getFixtures(env, request);
+      if (path === "/picks") return await getUserPicks(env, url);
+      if (path === "/state") return await state(env, url);
+      if (path === "/stats") return await stats(env, url);
+    }
+    if (request.method === "POST") {
+      const body = await request.json().catch(() => ({}));
+      if (path === "/league") return await createLeague(env, body);
+      if (path === "/join") return await joinLeague(env, body);
+      if (path === "/league/delete") return await deleteLeague(env, body);
+      if (path === "/league/kick") return await kickMember(env, body);
+      if (path === "/restore") return await restore(env, body);
+      if (path === "/pick") return await savePick(env, body);
+      if (path === "/push-token") return await savePushToken(env, body);
+      if (path === "/settle") return await settle(env, body);
+    }
+    return json({ error: "not found" }, 404, env);
+  } catch (error) {
+    return json({ error: "server error", detail: String(error?.message || error) }, 500, env);
+  }
+}

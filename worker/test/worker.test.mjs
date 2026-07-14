@@ -346,6 +346,51 @@ test("stats endpoint reports totals and weekly actives behind STATS_SECRET", asy
   assert.equal(data.activeUsers, 2);
 });
 
+test("CORS echoes allowlisted origins and marks the response as origin-varying", async () => {
+  const env = { KV: memoryKV(new Map()) };
+  const health = (origin) => worker.fetch(new Request("https://worker.test/health", {
+    headers: origin ? { origin } : {},
+  }), env);
+
+  for (const origin of ["https://abigwood.github.io", "premoracle://localhost", "capacitor://localhost"]) {
+    const response = await health(origin);
+    assert.equal(response.headers.get("access-control-allow-origin"), origin);
+    assert.equal(response.headers.get("vary"), "origin");
+  }
+
+  // Env-configured origin is also allowlisted.
+  const envResponse = await worker.fetch(new Request("https://worker.test/health", {
+    headers: { origin: "https://staging.example.com" },
+  }), { ...env, ALLOWED_ORIGIN: "https://staging.example.com" });
+  assert.equal(envResponse.headers.get("access-control-allow-origin"), "https://staging.example.com");
+  assert.equal(envResponse.headers.get("vary"), "origin");
+
+  // Unknown origin is not echoed; falls back to the default.
+  const rejected = await health("https://evil.example.com");
+  assert.equal(rejected.headers.get("access-control-allow-origin"), "*");
+  assert.equal(rejected.headers.get("vary"), null);
+
+  // No Origin header keeps the previous default behaviour.
+  const noOrigin = await health(null);
+  assert.equal(noOrigin.headers.get("access-control-allow-origin"), "*");
+  assert.equal(noOrigin.headers.get("vary"), null);
+});
+
+test("OPTIONS preflight is origin-aware for the native app scheme", async () => {
+  const env = { KV: memoryKV(new Map()) };
+  const preflight = await worker.fetch(new Request("https://worker.test/push-token", {
+    method: "OPTIONS",
+    headers: { origin: "premoracle://localhost" },
+  }), env);
+  assert.equal(preflight.headers.get("access-control-allow-origin"), "premoracle://localhost");
+  assert.equal(preflight.headers.get("vary"), "origin");
+  assert.equal(preflight.headers.get("access-control-allow-methods"), "GET, POST, OPTIONS");
+
+  const noOrigin = await worker.fetch(new Request("https://worker.test/push-token", { method: "OPTIONS" }), env);
+  assert.equal(noOrigin.headers.get("access-control-allow-origin"), "*");
+  assert.equal(noOrigin.headers.get("vary"), null);
+});
+
 test("push token endpoint stores native registration token", async () => {
   const store = new Map();
   const env = {

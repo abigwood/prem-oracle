@@ -19,9 +19,9 @@ class PremOracleTests(unittest.TestCase):
         sw = (ROOT / "sw.js").read_text()
         self.assertIn("Prem Oracle", html)
         self.assertIn("Prem Oracle", manifest)
-        self.assertIn("styles.css?v=20260714a", html)
-        self.assertIn("app.js?v=20260714a", html)
-        self.assertIn("prem-oracle-v1-20260714a", sw)
+        self.assertIn("styles.css?v=20260723a", html)
+        self.assertIn("app.js?v=20260723a", html)
+        self.assertIn("prem-oracle-v1-20260723a", sw)
         self.assertIn("https://prem-oracle-window.abigwood.workers.dev", html)
         self.assertIn("vendor/capacitor/push-notifications.js", html)
 

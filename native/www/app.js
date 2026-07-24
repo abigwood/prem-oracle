@@ -1,6 +1,6 @@
 const SEASON_START = new Date("2026-08-21T20:00:00+01:00");
 const SEASON_START_DATE = "2026-08-21";
-const APP_BUILD = "20260714a";
+const APP_BUILD = "20260723a";
 const API = window.PREM_API || null;
 const STORAGE = {
   uid: "prem_oracle_uid",

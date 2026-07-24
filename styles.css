@@ -108,7 +108,7 @@ main {
   overflow-x: hidden;
   overscroll-behavior: contain;
   -webkit-overflow-scrolling: touch;
-  scroll-padding-bottom: 28px;
+  scroll-padding-bottom: calc(var(--nav-total-height) + 24px);
 }
 .hero {
   position: relative;
@@ -870,6 +870,7 @@ th.wins-col { font-size: .92rem; }
   --nav-total-height: calc(var(--nav-height) + var(--safe-bottom-nav));
 }
 .is-native .bottom-nav { padding-bottom: var(--safe-bottom-nav); }
+.is-native .app-footer { display: none; }
 
 dialog { width: min(430px, calc(100% - 28px)); padding: 0; border: 0; border-radius: 18px; box-shadow: 0 24px 80px rgba(0,0,0,.28); }
 dialog::backdrop { background: rgba(13, 46, 32, .58); backdrop-filter: blur(3px); }
@@ -883,6 +884,86 @@ dialog label { display: block; margin-bottom: 6px; color: var(--muted); font-siz
   .hero { padding: 30px; }
   .day-body { padding: 0 18px 16px; }
   .round-grid { grid-template-columns: repeat(4, 1fr); }
+}
+
+/* iPad portrait's WKWebView viewport is ~663 CSS px (device-width is scaled),
+   so a 760px breakpoint never fires there — the crowded case Apple flagged.
+   600px covers iPad portrait/landscape while leaving iPhone unchanged:
+   iPhone portrait (402) stays single-column, iPhone landscape (874) was
+   already two-column above 760. */
+@media (min-width: 600px) {
+  .match-card {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(300px, .88fr);
+    column-gap: 4px;
+  }
+  .match-meta,
+  .match-intel-strip {
+    grid-column: 1 / -1;
+  }
+  .players {
+    grid-column: 1;
+    grid-row: 3 / span 3;
+    align-self: start;
+    padding: 28px 12px 14px 14px;
+  }
+  .oracle-prob {
+    grid-column: 2;
+    grid-row: 3;
+    margin: 11px 12px 7px 4px;
+  }
+  .form-guide {
+    grid-column: 2;
+    grid-row: 4;
+    margin: 0 12px 9px 4px;
+  }
+  .pick-zone {
+    grid-column: 2;
+    grid-row: 5;
+    padding: 0 12px 13px 4px;
+  }
+}
+
+@media (min-width: 900px) and (max-height: 860px) {
+  main {
+    max-width: 960px;
+    padding-top: 14px;
+  }
+  .app-header {
+    min-height: 62px;
+    padding-top: calc(7px + env(safe-area-inset-top));
+    padding-bottom: 7px;
+  }
+  .brand-mark {
+    width: 38px;
+    height: 38px;
+    font-size: 1rem;
+  }
+  .hero {
+    padding: 22px 30px;
+    border-radius: 18px;
+  }
+  .hero h1 {
+    margin: 5px 0 6px;
+    font-size: 2.35rem;
+  }
+  .countdown {
+    margin-top: 14px;
+  }
+  .notice {
+    margin-top: 10px;
+    padding: 13px 16px;
+  }
+  .section-head {
+    margin-top: 18px;
+  }
+  .bottom-nav {
+    --nav-height: 68px;
+  }
+  .bottom-nav button {
+    height: 46px;
+    min-height: 46px;
+  }
 }
 
 @media (max-width: 430px) {

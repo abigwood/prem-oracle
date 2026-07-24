@@ -1132,16 +1132,21 @@ function showUpdatePrompt(registration) {
   document.body.append(prompt);
 }
 
+async function navigateToView(view) {
+  if (!view) return;
+  currentView = view;
+  clearFlash();
+  render({ scrollTop: true });
+  if (currentView === "league") {
+    await loadLeagueState();
+    render();
+  }
+}
+
 document.addEventListener("click", async (event) => {
   const nav = event.target.closest("[data-view]");
   if (nav) {
-    currentView = nav.dataset.view;
-    clearFlash();
-    render({ scrollTop: true });
-    if (currentView === "league") {
-      await loadLeagueState();
-      render();
-    }
+    await navigateToView(nav.dataset.view);
     return;
   }
   const filter = event.target.closest("[data-filter]");
@@ -1257,6 +1262,60 @@ document.addEventListener("click", async (event) => {
     }
   }
 });
+
+// Native shell: swipe left/right to move between the bottom-nav tabs. iOS
+// reviewers expect paged content to respond to horizontal swipes, so we wire
+// this up only inside the Capacitor shell (is-native). The web build is left
+// exactly as-is. We never preventDefault, so vertical scrolling, momentum and
+// horizontal scrollers keep their native behaviour — a gesture only switches
+// tabs when it is clearly horizontal and starts on inert (non-interactive,
+// non-scrolling) content such as the +/− steppers or the filter chips.
+function stepView(direction) {
+  const order = Array.from(document.querySelectorAll(".bottom-nav button[data-view]"))
+    .map((button) => button.dataset.view);
+  const index = order.indexOf(currentView);
+  if (index === -1) return;
+  const next = order[index + direction];
+  if (next) navigateToView(next);
+}
+
+if (document.documentElement.classList.contains("is-native")) {
+  const SWIPE_MIN_X = 60;          // horizontal travel required (px)
+  const SWIPE_MAX_DURATION = 600;  // a flick, not a slow drag (ms)
+  let swipe = null;
+
+  const swipeBlockedBy = (target) => {
+    if (!target?.closest) return true;
+    // Interactive controls own their own touches (steppers, buttons, links,
+    // form fields, open dialogs, and the whole score window).
+    if (target.closest("button, a, input, select, textarea, dialog[open], [data-score-window]")) return true;
+    // Let anything inside a horizontal scroller (e.g. the filter chips) scroll.
+    for (let el = target; el && el !== document.body; el = el.parentElement) {
+      const overflowX = window.getComputedStyle(el).overflowX;
+      if ((overflowX === "auto" || overflowX === "scroll") && el.scrollWidth > el.clientWidth) return true;
+    }
+    return false;
+  };
+
+  document.addEventListener("touchstart", (event) => {
+    if (event.touches.length !== 1 || swipeBlockedBy(event.target)) { swipe = null; return; }
+    const touch = event.touches[0];
+    swipe = { x: touch.clientX, y: touch.clientY, t: Date.now() };
+  }, { passive: true });
+
+  document.addEventListener("touchend", (event) => {
+    const start = swipe;
+    swipe = null;
+    const touch = event.changedTouches[0];
+    if (!start || !touch) return;
+    if (Date.now() - start.t > SWIPE_MAX_DURATION) return;
+    const dx = touch.clientX - start.x;
+    const dy = touch.clientY - start.y;
+    // Require a clearly horizontal flick so we never fight vertical scrolling.
+    if (Math.abs(dx) < SWIPE_MIN_X || Math.abs(dx) < Math.abs(dy) * 2) return;
+    stepView(dx < 0 ? 1 : -1);  // swipe left → next tab, swipe right → previous
+  }, { passive: true });
+}
 
 async function savePick(matchId, p1, p2) {
   if (!validScore(p1) || !validScore(p2)) return;

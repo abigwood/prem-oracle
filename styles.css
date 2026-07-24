@@ -628,7 +628,7 @@ main {
   background: #fef2f2;
 }
 
-.filters { display: flex; gap: 8px; margin: 12px 0 15px; overflow-x: auto; scrollbar-width: none; }
+.filters { display: flex; gap: 8px; margin: 12px 0 15px; overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
 .filters::-webkit-scrollbar { display: none; }
 .filter {
   flex: none;

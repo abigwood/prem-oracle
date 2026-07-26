@@ -1,6 +1,6 @@
 const SEASON_START = new Date("2026-08-21T20:00:00+01:00");
 const SEASON_START_DATE = "2026-08-21";
-const APP_BUILD = "20260723a";
+const APP_BUILD = "20260726b";
 const API = window.PREM_API || null;
 const STORAGE = {
   uid: "prem_oracle_uid",
@@ -41,28 +41,11 @@ const TEAM_MARKERS = {
   "Sunderland": { bg: "#E30613", fg: "#FFFFFF", border: "#111111" },
   "Tottenham Hotspur": { bg: "#FFFFFF", fg: "#132257", border: "#132257" },
 };
-const TEAM_INTEL = {
-  "AFC Bournemouth": { rating: 76, form: "LDWWLW" },
-  "Arsenal": { rating: 91, form: "WWWDWW" },
-  "Aston Villa": { rating: 84, form: "WLWWDW" },
-  "Brentford": { rating: 75, form: "DWLWDL" },
-  "Brighton & Hove Albion": { rating: 80, form: "WDLWWL" },
-  "Chelsea": { rating: 86, form: "WWLWDW" },
-  "Coventry City": { rating: 68, form: "DWWLDW" },
-  "Crystal Palace": { rating: 79, form: "WDDWLW" },
-  "Everton": { rating: 74, form: "LDWDWL" },
-  "Fulham": { rating: 76, form: "DLWWDL" },
-  "Hull City": { rating: 67, form: "WLDWDL" },
-  "Ipswich Town": { rating: 70, form: "WLDDWW" },
-  "Leeds United": { rating: 73, form: "WWDLDW" },
-  "Liverpool": { rating: 90, form: "WDWWLW" },
-  "Manchester City": { rating: 93, form: "WWWWDW" },
-  "Manchester United": { rating: 83, form: "DWWLWW" },
-  "Newcastle United": { rating: 85, form: "WLWDWW" },
-  "Nottingham Forest": { rating: 78, form: "DWLWDW" },
-  "Sunderland": { rating: 69, form: "WDWLDD" },
-  "Tottenham Hotspur": { rating: 82, form: "WLWDWL" },
-};
+// Real per-team forecast intel (rating + last-6 form) is loaded at runtime from
+// the fixtures feed's `teams` block — see loadFixtures(). It is intentionally
+// NOT hardcoded: when it is empty (or a team is missing) the UI shows neutral
+// states rather than inventing numbers.
+let teamIntel = {};
 const VENUE_OUTLOOK = {
   "Emirates Stadium": { icon: "🌤", temp: 20, desc: "London late-summer outlook" },
   "MKM Stadium": { icon: "🌥", temp: 18, desc: "Hull coastal outlook" },
@@ -108,7 +91,9 @@ let flashTone = "success";
 let openScheduleDates = new Set();
 let updateReloading = false;
 let pendingUpdateReload = false;
-const inviteCode = new URLSearchParams(location.search).get("league")?.toUpperCase() || "";
+// Invite code from the launch URL (web query string). Mutable because native
+// universal links deliver it later via the Capacitor appUrlOpen event.
+let inviteCode = new URLSearchParams(location.search).get("league")?.toUpperCase() || "";
 
 function readJSON(key, fallback) {
   try { return JSON.parse(localStorage.getItem(key)) ?? fallback; }
@@ -164,8 +149,10 @@ async function loadFixtures(refresh = false) {
       (Date.parse(a.startAt || "") || 0) - (Date.parse(b.startAt || "") || 0) ||
       String(a.id).localeCompare(String(b.id))
     );
+    teamIntel = (data.teams && typeof data.teams === "object") ? data.teams : {};
   } catch {
     fixtures = [];
+    teamIntel = {};
   }
 }
 
@@ -536,15 +523,12 @@ function teamSegmentColours(marker) {
   return { fill, needsOutline, outline, text };
 }
 
-function matchProbabilities(match) {
-  const home = TEAM_INTEL[match.player1]?.rating ?? 76;
-  const away = TEAM_INTEL[match.player2]?.rating ?? 76;
-  const diff = clamp(home + 4 - away, -24, 24);
-  const homeWin = clamp(43 + diff * 1.15, 18, 70);
-  const awayWin = clamp(32 - diff * .95, 12, 58);
-  const draw = clamp(100 - homeWin - awayWin, 18, 34);
-  const total = homeWin + draw + awayWin;
-  return [homeWin, draw, awayWin].map((value) => Math.round((value / total) * 100));
+// The forecast is real-data-only. There is deliberately no client-side
+// probability fallback: a fixture without probabilities renders as unavailable.
+function hasProbabilities(match) {
+  return Array.isArray(match.probabilities) &&
+    match.probabilities.length === 3 &&
+    match.probabilities.every((value) => Number.isFinite(value));
 }
 
 const PROB_FALLBACK_MARKER = { bg: "#ECFFF5", fg: "#38003C", border: "#B9F8D8" };
@@ -554,12 +538,18 @@ function segmentFillStyle(segment) {
 }
 
 function probabilityStrip(match) {
-  const [home, draw, away] = match.probabilities || matchProbabilities(match);
+  if (!hasProbabilities(match)) {
+    return `<div class="oracle-prob oracle-prob-empty" aria-label="Oracle forecast unavailable">
+      <div class="prob-title"><span>Oracle forecast</span></div>
+      <div class="prob-unavailable">Forecast unavailable</div>
+    </div>`;
+  }
+  const [home, draw, away] = match.probabilities;
   const columns = `${home}fr ${draw}fr ${away}fr`;
   const homeSeg = teamSegmentColours(TEAM_MARKERS[match.player1] || PROB_FALLBACK_MARKER);
   const awaySeg = teamSegmentColours(TEAM_MARKERS[match.player2] || PROB_FALLBACK_MARKER);
   return `<div class="oracle-prob" aria-label="Oracle forecast: ${escapeHTML(match.player1)} ${home}%, draw ${draw}%, ${escapeHTML(match.player2)} ${away}%">
-    <div class="prob-title"><span>Oracle forecast</span><em>Illustrative</em></div>
+    <div class="prob-title"><span>Oracle forecast</span></div>
     <div class="prob-values" style="grid-template-columns:${columns}">
       <span class="home" style="color:${homeSeg.text}">${home}%</span>
       <span class="draw">${draw}%</span>
@@ -605,17 +595,25 @@ function shortTeam(name) {
 
 function formGuide(match) {
   return `<div class="form-guide" aria-label="Recent form guide">
-    <div class="form-note">Illustrative form until live team feeds are connected</div>
     ${teamFormRow(match.player1)}
     ${teamFormRow(match.player2)}
   </div>`;
 }
 
+// A valid form string is exactly six W/D/L results (most recent last). Anything
+// else is treated as missing so we show a neutral em-dash, never a placeholder.
+function validForm(form) {
+  return typeof form === "string" && /^[WDL]{6}$/.test(form) ? form : "";
+}
+
 function teamFormRow(team) {
-  const form = TEAM_INTEL[team]?.form || "------";
+  const form = validForm(teamIntel[team]?.form);
+  const dots = form
+    ? [...form].map((result) => `<span class="form-dot ${formClass(result)}">${escapeHTML(result)}</span>`).join("")
+    : `<span class="form-dot unknown form-dot-empty" aria-label="Form unavailable">—</span>`;
   return `<div class="form-row">
     <div class="form-team"><strong>${escapeHTML(shortTeam(team))}</strong></div>
-    <div class="form-dots">${[...form].map((result) => `<span class="form-dot ${formClass(result)}">${escapeHTML(result)}</span>`).join("")}</div>
+    <div class="form-dots">${dots}</div>
   </div>`;
 }
 
@@ -1044,6 +1042,7 @@ function leagueView() {
           <h2>${escapeHTML(state.name)}</h2>
           <div class="league-code"><span>League code</span><strong>${state.code}</strong></div>
           <button class="secondary wide" type="button" data-share-league="${state.code}">Invite mates</button>
+          <button class="secondary wide" type="button" data-league-nick="${state.code}">Change my name in this league</button>
           ${isOwner ? `<button class="link-danger" type="button" data-delete-league="${state.code}">Delete league</button>` : ""}
           ${supportsRounds ? `${roundToggle()}${matchdayPicker()}` : ""}
           ${inner}
@@ -1199,6 +1198,24 @@ document.addEventListener("click", async (event) => {
       removeStoredLeague(code);
       pruneStoredLeagueNames();
       setFlash(`Deleted ${name}`);
+      await loadLeagueState();
+    } catch (error) {
+      setFlash(error.message, "error");
+    }
+    render();
+    return;
+  }
+  const nick = event.target.closest("[data-league-nick]");
+  if (nick) {
+    const code = nick.dataset.leagueNick;
+    const current = leagueState?.table?.find((row) => row.uid === uid())?.nick || playerName || "";
+    const next = prompt("Your name in this league", current);
+    if (next == null) return;
+    const trimmed = next.trim();
+    if (!trimmed) { setFlash("Name can't be empty", "error"); render(); return; }
+    try {
+      const result = await api("/league/nick", { uid: uid(), code, nick: trimmed });
+      setFlash(`Now showing as ${result.nick} in this league`);
       await loadLeagueState();
     } catch (error) {
       setFlash(error.message, "error");
@@ -1450,11 +1467,48 @@ async function setupNativePushNotifications() {
   }
 }
 
+// Pull a ?league=CODE invite out of an incoming URL (universal link or web).
+function leagueCodeFromUrl(url) {
+  try {
+    return new URL(url, location.href).searchParams.get("league")?.toUpperCase() || "";
+  } catch {
+    return "";
+  }
+}
+
+// Open the join flow for an invite code arriving after launch (native deep link).
+async function openInviteFlow(code) {
+  if (!code || leagueCodes.includes(code)) return;
+  inviteCode = code;
+  await navigateToView("league");
+}
+
+// Native universal links (applinks:abigwood.github.io) arrive through the
+// Capacitor App plugin rather than location.search, because the webview runs at
+// capacitor://localhost. Route them into the same invite flow as the web build.
+async function setupNativeUniversalLinks() {
+  const cap = window.Capacitor;
+  const app = window.capacitorApp?.App || cap?.Plugins?.App;
+  if (!cap?.isNativePlatform?.() || !app) return;
+  try {
+    await app.addListener("appUrlOpen", (data) => {
+      const code = leagueCodeFromUrl(data?.url || "");
+      if (code) openInviteFlow(code);
+    });
+    const launch = await app.getLaunchUrl?.();
+    const launchCode = leagueCodeFromUrl(launch?.url || "");
+    if (launchCode) openInviteFlow(launchCode);
+  } catch {
+    // Deep-link routing is best-effort; the code can still be typed manually.
+  }
+}
+
 Promise.all([loadFixtures(), hydrateIdentity()]).then(() => {
   if (inviteCode && !leagueCodes.includes(inviteCode)) currentView = "league";
   render();
   registerServiceWorker();
   setupNativePushNotifications();
+  setupNativeUniversalLinks();
   if (currentView === "league") {
     loadLeagueState().then(render);
   }

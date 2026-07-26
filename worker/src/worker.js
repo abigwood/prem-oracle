@@ -21,6 +21,7 @@ import { autoSettleResults } from "./results_feed.js";
 
 let fixtureCache = null;
 let fixtureCacheAt = 0;
+let fixtureIntel = { teams: {}, modelVersion: null };
 const CACHE_MS = 60_000;
 
 const CORS_ALLOWLIST = ["https://abigwood.github.io", "premoracle://localhost", "capacitor://localhost"];
@@ -91,13 +92,24 @@ async function fixtures(env, fresh = false) {
     const persisted = resultStore[match.id];
     return mergeResultOverlay(match, persisted);
   });
+  fixtureIntel = {
+    teams: body.teams && typeof body.teams === "object" ? body.teams : {},
+    modelVersion: body.modelVersion || null,
+  };
   fixtureCacheAt = now;
   return fixtureCache;
 }
 
 async function getFixtures(env, request) {
   const refresh = new URL(request.url).searchParams.get("refresh") === "1";
-  return json({ ok: true, fixtures: await fixtures(env, refresh), settlement: "manual" }, 200, env);
+  const list = await fixtures(env, refresh);
+  return json({
+    ok: true,
+    fixtures: list,
+    teams: fixtureIntel.teams,
+    modelVersion: fixtureIntel.modelVersion,
+    settlement: "manual",
+  }, 200, env);
 }
 
 async function uniqueRecovery(env) {
@@ -247,6 +259,27 @@ async function kickMember(env, body) {
     user ? kvPut(env, `user:${memberUid}`, user) : Promise.resolve(),
   ]);
   return json({ ok: true, code, removed: memberUid }, 200, env);
+}
+
+async function updateLeagueNick(env, body) {
+  const uid = String(body.uid || "").trim();
+  const code = String(body.code || "").trim().toUpperCase();
+  if (!uid || !code) return json({ error: "uid and code required" }, 400, env);
+  if (!String(body.nick || "").trim()) return json({ error: "nick required" }, 400, env);
+  const nick = normNick(body.nick);
+  const league = await kvGet(env, `league:${code}`);
+  if (!league) return json({ error: "league not found" }, 404, env);
+  const existing = await kvGet(env, leagueMemberKey(code, uid));
+  const legacyMember = (league.members || []).includes(uid);
+  if (!existing && !legacyMember) return json({ error: "member not found" }, 404, env);
+  const since = existing?.since || league.joinedAt?.[uid] || Date.now();
+  await kvPut(env, leagueMemberKey(code, uid), { nick, since });
+  // A legacy names[] override would otherwise shadow the member row.
+  if (league.names && Object.prototype.hasOwnProperty.call(league.names, uid)) {
+    delete league.names[uid];
+    await kvPut(env, `league:${code}`, league);
+  }
+  return json({ ok: true, code, uid, nick }, 200, env);
 }
 
 async function restore(env, body) {
@@ -499,6 +532,7 @@ async function route(request, env) {
       if (path === "/join") return await joinLeague(env, body);
       if (path === "/league/delete") return await deleteLeague(env, body);
       if (path === "/league/kick") return await kickMember(env, body);
+      if (path === "/league/nick") return await updateLeagueNick(env, body);
       if (path === "/restore") return await restore(env, body);
       if (path === "/pick") return await savePick(env, body);
       if (path === "/push-token") return await savePushToken(env, body);

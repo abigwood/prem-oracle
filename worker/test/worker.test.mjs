@@ -425,3 +425,66 @@ test("push token endpoint stores native registration token", async () => {
   assert.equal(response.status, 200);
   assert.equal(JSON.parse(store.get("push:user-1")).token, "apns-token");
 });
+
+test("fixtures endpoint exposes the teams intel block and model version", async () => {
+  const originalFetch = globalThis.fetch;
+  const teams = {
+    Arsenal: { rating: 92, form: "LWWWWW" },
+    "Hull City": { rating: 50, form: "DLDDLW" },
+  };
+  globalThis.fetch = async () =>
+    new Response(JSON.stringify({ fixtures: [], teams, modelVersion: "1.1.0" }), { status: 200 });
+  const store = new Map();
+  const env = {
+    FIXTURES_URL: "https://example.com/fixtures.json",
+    KV: {
+      async get(key) { return store.has(key) ? JSON.parse(store.get(key)) : null; },
+      async put(key, value) { store.set(key, value); },
+    },
+  };
+  try {
+    // refresh=1 bypasses the module-level fixtures cache.
+    const response = await worker.fetch(new Request("https://worker.test/fixtures?refresh=1"), env);
+    const body = await response.json();
+    assert.deepEqual(body.teams, teams);
+    assert.equal(body.modelVersion, "1.1.0");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("POST /league/nick updates only that league's member row with normNick rules", async () => {
+  const store = new Map();
+  const env = { KV: memoryKV(store) };
+  const post = (path, body) => worker.fetch(new Request(`https://worker.test${path}`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  }), env);
+
+  const created = await (await post("/league", { uid: "owner", nickname: "Owner" })).json();
+  const code = created.code;
+  await post("/join", { uid: "m2", code, nickname: "Two" });
+
+  const memberNick = (uid) => store.has(`member:${code}:${uid}`)
+    ? JSON.parse(store.get(`member:${code}:${uid}`)).nick
+    : null;
+  const globalNick = async (uid) => (await env.KV.get(`user:${uid}`))?.nickname;
+
+  // Validation.
+  assert.equal((await post("/league/nick", { uid: "m2", code })).status, 400); // no nick
+  assert.equal((await post("/league/nick", { code, nick: "X" })).status, 400); // no uid
+  assert.equal((await post("/league/nick", { uid: "m2", code: "ZZZZZZ", nick: "X" })).status, 404); // no league
+  assert.equal((await post("/league/nick", { uid: "ghost", code, nick: "X" })).status, 404); // not a member
+  assert.equal((await post("/league/nick", { uid: "m2", code, nick: "   " })).status, 400); // whitespace only
+
+  // Happy path: trims, caps to normNick rules, updates only this member row.
+  const long = "  " + "N".repeat(40) + "  ";
+  const response = await post("/league/nick", { uid: "m2", code, nick: long });
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.ok, true);
+  assert.equal(body.nick, "N".repeat(24)); // trimmed + capped at 24
+  assert.equal(memberNick("m2"), "N".repeat(24));
+  assert.equal(memberNick("owner"), "Owner"); // other member untouched
+  assert.equal(await globalNick("m2"), "Two"); // global default name unchanged
+});

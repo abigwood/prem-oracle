@@ -19,9 +19,9 @@ class PremOracleTests(unittest.TestCase):
         sw = (ROOT / "sw.js").read_text()
         self.assertIn("Prem Oracle", html)
         self.assertIn("Prem Oracle", manifest)
-        self.assertIn("styles.css?v=20260726a", html)
-        self.assertIn("app.js?v=20260726a", html)
-        self.assertIn("prem-oracle-v1-20260726a", sw)
+        self.assertIn("styles.css?v=20260726b", html)
+        self.assertIn("app.js?v=20260726b", html)
+        self.assertIn("prem-oracle-v1-20260726b", sw)
         self.assertIn("https://prem-oracle-window.abigwood.workers.dev", html)
         self.assertIn("vendor/capacitor/push-notifications.js", html)
 
@@ -63,12 +63,11 @@ class PremOracleTests(unittest.TestCase):
         self.assertIn("match-intel-strip", css)
         self.assertIn("oracle-prob", css)
         self.assertIn("form-guide", css)
-        self.assertIn("Illustrative form", app)
         self.assertIn("fixtureDayDiff(match) > 7", app)
         self.assertIn("flash-error", css)
         self.assertIn("setupNativePushNotifications", app)
         self.assertIn("/push-token", app)
-        self.assertIn("TEAM_INTEL", app)
+        self.assertIn("teamIntel", app)
         self.assertIn("VENUE_OUTLOOK", app)
         self.assertIn(".team-crest", css)
         self.assertIn("TEAM_MARKERS", app)
@@ -114,6 +113,44 @@ class PremOracleTests(unittest.TestCase):
         self.assertIn("premierleague.com/en/news/4675097", script)
         self.assertIn("expected 380 fixtures", script)
         self.assertNotIn("api_key", script.lower())
+
+
+class Phase2WiringTests(unittest.TestCase):
+    """v1.1 phase 2: real forecast/form, per-league nicknames, universal links."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = (ROOT / "app.js").read_text()
+        cls.worker = (ROOT / "worker/src/worker.js").read_text()
+        cls.entitlements = (ROOT / "ios/App/App/App.entitlements").read_text()
+
+    def test_forecast_is_real_data_only(self):
+        # No "Illustrative" copy anywhere, and no client-side probability fallback.
+        self.assertNotIn("Illustrative", self.app)
+        self.assertNotIn("function matchProbabilities", self.app)
+        self.assertIn("Forecast unavailable", self.app)
+        self.assertIn("hasProbabilities", self.app)
+
+    def test_form_guide_reads_real_team_intel(self):
+        self.assertIn("teamIntel", self.app)
+        self.assertIn("data.teams", self.app)
+        self.assertNotIn("Illustrative form", self.app)
+
+    def test_worker_exposes_teams_block(self):
+        self.assertIn("teams: fixtureIntel.teams", self.worker)
+
+    def test_per_league_nickname_endpoint_and_control(self):
+        self.assertIn('path === "/league/nick"', self.worker)
+        self.assertIn("updateLeagueNick", self.worker)
+        self.assertIn("/league/nick", self.app)
+        self.assertIn("Change my name in this league", self.app)
+        self.assertIn("data-league-nick", self.app)
+
+    def test_universal_links_wired(self):
+        self.assertIn("applinks:abigwood.github.io", self.entitlements)
+        self.assertIn("associated-domains", self.entitlements)
+        self.assertIn("appUrlOpen", self.app)
+        self.assertIn("setupNativeUniversalLinks", self.app)
 
 
 PROMOTED_TEAMS = {"Coventry City", "Hull City", "Ipswich Town"}

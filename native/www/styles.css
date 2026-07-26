@@ -376,14 +376,15 @@ main {
   letter-spacing: .09em;
   text-transform: uppercase;
 }
-.prob-title em,
-.form-note {
-  color: #8a6475;
-  font-style: normal;
-  font-size: .58rem;
-  font-weight: 900;
-  letter-spacing: .08em;
-  text-transform: uppercase;
+.prob-unavailable {
+  color: var(--muted);
+  font-size: .68rem;
+  font-weight: 800;
+  padding: 2px 0 1px;
+}
+.form-dot-empty {
+  color: var(--muted);
+  background: #f1f3f7;
 }
 .prob-values,
 .prob-labels {

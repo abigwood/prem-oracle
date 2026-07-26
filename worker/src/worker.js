@@ -49,6 +49,22 @@ const applyCors = (response, env, request) => {
 };
 const json = (body, status, env) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", ...cors(env) } });
+const appleAppSiteAssociation = () =>
+  new Response(JSON.stringify({
+    applinks: {
+      apps: [],
+      details: [{
+        appID: "Y98F87NK7D.com.abigwood.premoracle",
+        paths: ["/prem-oracle/*", "/prem-oracle/"],
+      }],
+    },
+  }), {
+    status: 200,
+    headers: {
+      "content-type": "application/json",
+      "cache-control": "public, max-age=3600",
+    },
+  });
 const kvGet = (env, key) => env.KV.get(key, "json");
 const kvPut = (env, key, value) => env.KV.put(key, JSON.stringify(value));
 const randomBytes = (n) => crypto.getRandomValues(new Uint8Array(n));
@@ -469,6 +485,7 @@ async function route(request, env) {
   const path = url.pathname.replace(/\/+$/, "") || "/";
   try {
     if (request.method === "GET") {
+      if (path === "/.well-known/apple-app-site-association" || path === "/apple-app-site-association") return appleAppSiteAssociation();
       if (path === "/" || path === "/health") return json({ ok: true, service: "prem-oracle-window" }, 200, env);
       if (path === "/me") return await getMe(env, url);
       if (path === "/fixtures") return await getFixtures(env, request);

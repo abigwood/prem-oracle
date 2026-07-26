@@ -46,6 +46,25 @@ test("fixtures endpoint declares manual settlement", async () => {
   }
 });
 
+test("serves apple app site association for universal links", async () => {
+  const env = { KV: memoryKV(new Map()) };
+  for (const path of ["/.well-known/apple-app-site-association", "/apple-app-site-association"]) {
+    const response = await worker.fetch(new Request(`https://worker.test${path}`), env);
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("content-type"), "application/json");
+    const body = await response.json();
+    assert.deepEqual(body, {
+      applinks: {
+        apps: [],
+        details: [{
+          appID: "Y98F87NK7D.com.abigwood.premoracle",
+          paths: ["/prem-oracle/*", "/prem-oracle/"],
+        }],
+      },
+    });
+  }
+});
+
 test("manual settlement preserves previous fixture results", async () => {
   const originalFetch = globalThis.fetch;
   const fixtures = [

@@ -780,7 +780,7 @@ function leagueTableText(state) {
     const marker = movement > 0 ? `▲${movement}` : movement < 0 ? `▼${Math.abs(movement)}` : "-";
     return `${rank}. ${row.nick} ${marker} - ${row.pts} pts (${row.exact} exact)${row.wins ? ` 🏆x${row.wins}` : ""}`;
   });
-  return `Prem Oracle league table - ${state.name}\nUpdated ${updated}\n\n${rows.join("\n")}\n\nJoin with code ${state.code}`;
+  return `Prem Oracle league table - ${state.name}\nUpdated ${updated}\n\n${rows.join("\n")}\n\nJoin on the web or in the app with code ${state.code}`;
 }
 
 function winnerNames(round) {
@@ -795,7 +795,7 @@ function roundShareText(state, round) {
     ? `🏆 Matchday ${round.matchday}: won by ${winnerNames(round) || "nobody"}`
     : `🏆 Matchday ${round.matchday} · in progress`;
   const rows = (round.table || []).map((row, index) => `${row.rank || index + 1}. ${row.nick} - ${row.pts} pts (${row.exact} exact)`);
-  return `${head}\n\n${rows.join("\n")}\n\nJoin with code ${state.code}`;
+  return `${head}\n\n${rows.join("\n")}\n\nJoin on the web or in the app with code ${state.code}`;
 }
 
 function roundToggle() {
@@ -974,7 +974,7 @@ async function shareLeagueTableGraphic(state) {
   const blob = await canvasToBlob(canvas);
   if (!blob) throw new Error("Could not create league table graphic.");
   const link = `${location.origin}${location.pathname}?league=${state.code}`;
-  const text = `🏆 ${state.name} - Prem Oracle live league table. Tap to join and get your picks in: ${link}`;
+  const text = `🏆 ${state.name} - Prem Oracle live league table. Tap to join on the web or in the app and get your picks in: ${link}`;
   const file = new File([blob], "prem-oracle-league-table.png", { type: "image/png" });
   if (navigator.canShare?.({ files: [file] })) {
     await navigator.share({ files: [file], text, title: `${state.name} league table` });
@@ -1184,7 +1184,7 @@ document.addEventListener("click", async (event) => {
   const share = event.target.closest("[data-share-league]");
   if (share) {
     const url = `${location.origin}${location.pathname}?league=${share.dataset.shareLeague}`;
-    const text = `Join my Prem Oracle league ${share.dataset.shareLeague}: ${url}`;
+    const text = `Join my Prem Oracle league ${share.dataset.shareLeague} on the web or in the app: ${url}`;
     if (navigator.share) await navigator.share({ title: "Prem Oracle", text, url }).catch(() => {});
     else location.href = whatsappUrlFor(text);
     return;

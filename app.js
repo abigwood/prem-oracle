@@ -41,6 +41,31 @@ const TEAM_MARKERS = {
   "Sunderland": { bg: "#E30613", fg: "#FFFFFF", border: "#111111" },
   "Tottenham Hotspur": { bg: "#FFFFFF", fg: "#132257", border: "#132257" },
 };
+// Official Premier League 3-letter club codes for all 2026/27 sides (incl. the
+// promoted trio: Coventry COV, Hull HUL, Ipswich IPS). Used everywhere a team
+// is abbreviated — badges, forecast strip labels, form guide.
+const TEAM_CODES = {
+  "Arsenal": "ARS",
+  "Aston Villa": "AVL",
+  "AFC Bournemouth": "BOU",
+  "Brentford": "BRE",
+  "Brighton & Hove Albion": "BHA",
+  "Chelsea": "CHE",
+  "Coventry City": "COV",
+  "Crystal Palace": "CRY",
+  "Everton": "EVE",
+  "Fulham": "FUL",
+  "Hull City": "HUL",
+  "Ipswich Town": "IPS",
+  "Leeds United": "LEE",
+  "Liverpool": "LIV",
+  "Manchester City": "MCI",
+  "Manchester United": "MUN",
+  "Newcastle United": "NEW",
+  "Nottingham Forest": "NFO",
+  "Sunderland": "SUN",
+  "Tottenham Hotspur": "TOT",
+};
 // Real per-team forecast intel (rating + last-6 form) is loaded at runtime from
 // the fixtures feed's `teams` block — see loadFixtures(). It is intentionally
 // NOT hardcoded: when it is empty (or a team is missing) the UI shows neutral
@@ -452,10 +477,16 @@ function teamInitials(name) {
   return words.map((word) => word[0]).join("").slice(0, 3).toUpperCase();
 }
 
+// Official PL 3-letter code, falling back to derived initials for any team not
+// in the map (e.g. a future opponent), so a code is always shown.
+function teamCode(name) {
+  return TEAM_CODES[name] || teamInitials(name);
+}
+
 function teamBadge(name) {
   const marker = TEAM_MARKERS[name] || { bg: "#ECFFF5", fg: "#38003C", border: "#B9F8D8" };
   const style = `--team-bg:${marker.bg};--team-fg:${marker.fg};--team-border:${marker.border};`;
-  return `<span class="team-crest" style="${style}" aria-hidden="true">${escapeHTML(teamInitials(name))}</span>`;
+  return `<span class="team-crest" style="${style}" aria-hidden="true">${escapeHTML(teamCode(name))}</span>`;
 }
 
 function clamp(value, min, max) {
@@ -560,7 +591,7 @@ function probabilityStrip(match) {
       <i class="draw"></i>
       <i class="away" style="${segmentFillStyle(awaySeg)}"></i>
     </div>
-    <div class="prob-labels" style="grid-template-columns:${columns}"><span>${escapeHTML(shortTeam(match.player1))}</span><span>Draw</span><span>${escapeHTML(shortTeam(match.player2))}</span></div>
+    <div class="prob-labels" style="grid-template-columns:${columns}"><span>${escapeHTML(teamCode(match.player1))}</span><span>Draw</span><span>${escapeHTML(teamCode(match.player2))}</span></div>
   </div>`;
 }
 
@@ -583,16 +614,6 @@ function matchIntelStrip(match) {
   </div>`;
 }
 
-function shortTeam(name) {
-  return String(name || "")
-    .replace("Manchester ", "Man ")
-    .replace("Nottingham Forest", "Forest")
-    .replace("Tottenham Hotspur", "Spurs")
-    .replace("Brighton & Hove Albion", "Brighton")
-    .replace("AFC Bournemouth", "Bournemouth")
-    .replace("Newcastle United", "Newcastle");
-}
-
 function formGuide(match) {
   return `<div class="form-guide" aria-label="Recent form guide">
     ${teamFormRow(match.player1)}
@@ -612,7 +633,7 @@ function teamFormRow(team) {
     ? [...form].map((result) => `<span class="form-dot ${formClass(result)}">${escapeHTML(result)}</span>`).join("")
     : `<span class="form-dot unknown form-dot-empty" aria-label="Form unavailable">—</span>`;
   return `<div class="form-row">
-    <div class="form-team"><strong>${escapeHTML(shortTeam(team))}</strong></div>
+    <div class="form-team"><strong>${escapeHTML(teamCode(team))}</strong></div>
     <div class="form-dots">${dots}</div>
   </div>`;
 }

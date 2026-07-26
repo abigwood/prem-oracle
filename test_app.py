@@ -152,6 +152,23 @@ class Phase2WiringTests(unittest.TestCase):
         self.assertIn("appUrlOpen", self.app)
         self.assertIn("setupNativeUniversalLinks", self.app)
 
+    def test_official_pl_team_codes(self):
+        codes = {
+            "Arsenal": "ARS", "Aston Villa": "AVL", "AFC Bournemouth": "BOU",
+            "Brentford": "BRE", "Brighton & Hove Albion": "BHA", "Chelsea": "CHE",
+            "Coventry City": "COV", "Crystal Palace": "CRY", "Everton": "EVE",
+            "Fulham": "FUL", "Hull City": "HUL", "Ipswich Town": "IPS",
+            "Leeds United": "LEE", "Liverpool": "LIV", "Manchester City": "MCI",
+            "Manchester United": "MUN", "Newcastle United": "NEW",
+            "Nottingham Forest": "NFO", "Sunderland": "SUN", "Tottenham Hotspur": "TOT",
+        }
+        for name, code in codes.items():
+            self.assertIn(f'"{name}": "{code}"', self.app)
+        # Abbreviations everywhere resolve through teamCode(); the badge no longer
+        # renders raw initials (which produced "CC", "HC", "MU").
+        self.assertIn("escapeHTML(teamCode(name))", self.app)
+        self.assertNotIn("escapeHTML(teamInitials(name))", self.app)
+
 
 PROMOTED_TEAMS = {"Coventry City", "Hull City", "Ipswich Town"}
 

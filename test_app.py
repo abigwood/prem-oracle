@@ -116,5 +116,67 @@ class PremOracleTests(unittest.TestCase):
         self.assertNotIn("api_key", script.lower())
 
 
+PROMOTED_TEAMS = {"Coventry City", "Hull City", "Ipswich Town"}
+
+
+class ForecastIntelTests(unittest.TestCase):
+    """Validate the forecast intel that build_intel.mjs wires into fixtures.json."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.data = json.loads((ROOT / "data/fixtures.json").read_text())
+
+    def test_model_metadata_present(self):
+        self.assertRegex(self.data["modelVersion"], r"^\d+\.\d+\.\d+$")
+        self.assertTrue(self.data.get("generatedAt"))
+        self.assertEqual(self.data["forecast"]["version"], self.data["modelVersion"])
+
+    def test_every_fixture_has_sane_probabilities(self):
+        for fixture in self.data["fixtures"]:
+            probs = fixture.get("probabilities")
+            self.assertIsInstance(probs, list, fixture["id"])
+            self.assertEqual(len(probs), 3, fixture["id"])
+            self.assertTrue(all(isinstance(p, int) for p in probs), fixture["id"])
+            self.assertEqual(sum(probs), 100, fixture["id"])
+            home, draw, away = probs
+            self.assertLessEqual(max(home, away), 75, fixture["id"])  # favourites capped
+            self.assertGreaterEqual(draw, 18, fixture["id"])
+            self.assertLessEqual(draw, 32, fixture["id"])
+
+    def test_teams_block_covers_all_20_clubs(self):
+        teams = self.data["teams"]
+        fixture_teams = set()
+        for fixture in self.data["fixtures"]:
+            fixture_teams.add(fixture["homeTeam"])
+            fixture_teams.add(fixture["awayTeam"])
+        self.assertEqual(len(teams), 20)
+        self.assertEqual(set(teams), fixture_teams)
+
+    def test_team_form_strings_are_six_results(self):
+        for name, intel in self.data["teams"].items():
+            form = intel["form"]
+            self.assertEqual(len(form), 6, name)
+            self.assertTrue(all(ch in "WDL" for ch in form), name)
+
+    def test_team_ratings_in_sane_range(self):
+        for name, intel in self.data["teams"].items():
+            self.assertIsInstance(intel["rating"], int, name)
+            self.assertGreaterEqual(intel["rating"], 45, name)
+            self.assertLessEqual(intel["rating"], 95, name)
+
+    def test_promoted_teams_get_plausible_ratings(self):
+        teams = self.data["teams"]
+        top_rating = max(t["rating"] for t in teams.values())
+        for name in PROMOTED_TEAMS:
+            self.assertIn(name, teams)
+            rating = teams[name]["rating"]
+            # Promoted sides seeded from the Championship with a handicap: a
+            # plausible newcomer band, and never the strongest team in the league.
+            self.assertGreaterEqual(rating, 45, name)
+            self.assertLessEqual(rating, 72, name)
+            self.assertLess(rating, top_rating, name)
+            self.assertIn("Championship", teams[name]["basis"], name)
+
+
 if __name__ == "__main__":
     unittest.main()

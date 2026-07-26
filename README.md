@@ -29,6 +29,32 @@ Official source:
 
 - https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season
 
+## Forecast model (v1.1)
+
+The Oracle forecast is an in-house model (home advantage + rating difference +
+recent form). Ratings are seeded from real 2025/26 final league performance;
+the three promoted clubs (Coventry City, Hull City, Ipswich Town) are seeded
+from their 2025/26 Championship record with a division handicap. Form is each
+team's last 6 league games, most recent last.
+
+- Raw inputs are committed under `data/source/` so the build is reproducible
+  offline (football-data.co.uk season CSVs — free, no API key).
+- `scripts/build_intel.mjs` wires per-fixture `probabilities` `[home, draw,
+  away]` (integers summing to 100) plus a top-level `teams` intel block,
+  `modelVersion`, and `generatedAt` into `data/fixtures.json`.
+- Shared, testable model logic lives in `worker/src/forecast.mjs`.
+
+```bash
+npm run build:fixtures   # scrape the 380-fixture list (premierleague.com)
+npm run build:intel      # add ratings/form/probabilities (offline, from CSVs)
+```
+
+In-season rolling updates fold 2026/27 results in via football-data.org (free
+tier) and re-run the pipeline. Run `npm run build:intel:refresh` locally with
+`FOOTBALL_DATA_TOKEN` set, or let the scheduled GitHub Action
+(`.github/workflows/refresh-intel.yml`) commit changes automatically — it needs
+a `FOOTBALL_DATA_TOKEN` repository secret and is a no-op until matchday 1.
+
 ## Run
 
 ```bash

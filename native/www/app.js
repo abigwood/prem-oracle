@@ -591,7 +591,7 @@ function probabilityStrip(match) {
       <i class="draw"></i>
       <i class="away" style="${segmentFillStyle(awaySeg)}"></i>
     </div>
-    <div class="prob-labels" style="grid-template-columns:${columns}"><span>${escapeHTML(teamCode(match.player1))}</span><span>Draw</span><span>${escapeHTML(teamCode(match.player2))}</span></div>
+    <div class="prob-labels"><span>${escapeHTML(teamCode(match.player1))}</span><span>Draw</span><span>${escapeHTML(teamCode(match.player2))}</span></div>
   </div>`;
 }
 

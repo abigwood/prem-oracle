@@ -386,13 +386,10 @@ main {
   color: var(--muted);
   background: #f1f3f7;
 }
-.prob-values,
-.prob-labels {
+.prob-values {
   display: grid;
   align-items: center;
   min-width: 0;
-}
-.prob-values {
   margin: -1px 0 3px;
   color: var(--purple);
   font-size: .64rem;
@@ -400,14 +397,24 @@ main {
   font-variant-numeric: tabular-nums;
   line-height: 1;
 }
-.prob-values span,
-.prob-labels span {
+.prob-values span {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  text-align: center;
 }
-.prob-values span { text-align: center; }
+/* Labels are decoupled from the fr-based segment widths so the 3-letter codes
+   always render in full, even on lopsided splits (e.g. 71/7 -> COV, never
+   "C…"). The rail and percent rows above keep their segment geometry. */
+.prob-labels {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  min-width: 0;
+}
+.prob-labels span { white-space: nowrap; }
 .prob-labels span:first-child { text-align: left; }
 .prob-labels span:last-child { text-align: right; }
 .prob-values .draw { color: #4b5563; }

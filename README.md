@@ -29,19 +29,20 @@ Official source:
 
 - https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season
 
-## Forecast model (v1.1)
+## Forecast model (v2)
 
-The Oracle forecast is an in-house model (home advantage + rating difference +
-recent form). Ratings are seeded from real 2025/26 final league performance;
-the three promoted clubs (Coventry City, Hull City, Ipswich Town) are seeded
-from their 2025/26 Championship record with a division handicap. Form is each
-team's last 6 league games, most recent last.
+The Oracle forecast is an in-house Elo + Poisson model (home advantage, rating
+difference, and recent form). Elo is seeded from real 2025/26 final league
+performance; the three promoted clubs (Coventry City, Hull City, Ipswich Town)
+are seeded from their 2025/26 Championship record with a division handicap.
+Form is each team's last 6 league games, most recent last.
 
 - Raw inputs are committed under `data/source/` so the build is reproducible
   offline (football-data.co.uk season CSVs — free, no API key).
-- `scripts/build_intel.mjs` wires per-fixture `probabilities` `[home, draw,
-  away]` (integers summing to 100) plus a top-level `teams` intel block,
-  `modelVersion`, and `generatedAt` into `data/fixtures.json`.
+- `scripts/build_intel.mjs` applies live-result Elo updates, then wires
+  per-fixture `probabilities` `[home, draw, away]` (integers summing to 100)
+  plus a top-level `teams` intel block, `modelVersion`, and `generatedAt` into
+  `data/fixtures.json`.
 - Shared, testable model logic lives in `worker/src/forecast.mjs`.
 
 ```bash

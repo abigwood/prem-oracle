@@ -4,46 +4,64 @@
 // refresh path, and the test suite. Everything here is deterministic given its
 // inputs so ratings/forecasts are reproducible.
 
-export const MODEL_VERSION = "1.1.0";
+export const MODEL_VERSION = "2.0.0";
 
 // ---- Rating model -----------------------------------------------------------
-// A team's rating is seeded from a completed league season: points-per-game
-// (which encodes points) plus goal-difference-per-game (which encodes goals
-// for/against). Promoted clubs are rated from their Championship season and
-// then handicapped, because second-tier form overstates top-flight strength.
+// A team's Elo is seeded from a completed league season: points-per-game
+// (results strength) plus goal-difference-per-game (goal strength). Promoted
+// clubs are seeded from their Championship season and then handicapped, because
+// second-tier form overstates top-flight strength.
 const RATING = {
-  BASE: 40,
-  PPG_WEIGHT: 20,
-  GDPG_WEIGHT: 6,
-  DIVISION_PENALTY: 22, // subtracted from ratings seeded on second-tier data
-  MIN: 45,
-  MAX: 95,
+  BASE_ELO: 1500,
+  NEUTRAL_PPG: 1.35,
+  PPG_WEIGHT: 260,
+  GDPG_WEIGHT: 140,
+  DIVISION_PENALTY: 160, // Elo subtracted from ratings seeded on second-tier data
+  MIN: 1320,
+  MAX: 1900,
 };
 
 const clamp = (value, lo, hi) => Math.max(lo, Math.min(hi, value));
 
 /**
- * Rating from one season's aggregate record.
+ * Elo seed from one season's aggregate record.
  * @param {{played:number, points:number, gf:number, ga:number}} season
  * @param {{promoted?:boolean}} [opts] promoted => apply division handicap
- * @returns {number} integer rating, clamped to [MIN, MAX]
+ * @returns {number} integer Elo, clamped to [MIN, MAX]
  */
 export function ratingFromSeason(season, opts = {}) {
   const played = season.played || 0;
   if (!played) return RATING.MIN;
   const ppg = season.points / played;
   const gdpg = (season.gf - season.ga) / played;
-  let rating = RATING.BASE + ppg * RATING.PPG_WEIGHT + gdpg * RATING.GDPG_WEIGHT;
+  let rating =
+    RATING.BASE_ELO +
+    (ppg - RATING.NEUTRAL_PPG) * RATING.PPG_WEIGHT +
+    gdpg * RATING.GDPG_WEIGHT;
   if (opts.promoted) rating -= RATING.DIVISION_PENALTY;
   return Math.round(clamp(rating, RATING.MIN, RATING.MAX));
+}
+
+// Standard Elo update, using the same goal-difference multiplier shape as
+// eloratings.net. This lets the Tue/Fri refresh move the model with real games.
+export function updatedElo(homeElo, awayElo, homeGoals, awayGoals, opts = {}) {
+  const k = opts.k ?? 40;
+  const homeAdv = opts.homeAdv ?? 0;
+  const diff = homeElo + homeAdv - awayElo;
+  const expected = 1 / (1 + 10 ** (-diff / 400));
+  const actual = homeGoals > awayGoals ? 1 : homeGoals === awayGoals ? 0.5 : 0;
+  const gd = Math.abs(homeGoals - awayGoals);
+  const goalMultiplier = gd <= 1 ? 1 : gd === 2 ? 1.5 : (11 + gd) / 8;
+  const delta = k * goalMultiplier * (actual - expected);
+  return [homeElo + delta, awayElo - delta];
 }
 
 // ---- Form model -------------------------------------------------------------
 // Form is a W/D/L string of the last 6 league games, most recent LAST.
 const FORM = {
   NEUTRAL_PPG: 1.35, // ~ mid-table points-per-game; the "no swing" baseline
-  WEIGHT: 4, // rating-points per (ppg above/below neutral)
-  SWING_CAP: 8, // clamp the form adjustment either way
+  WEIGHT: 22, // Elo per weighted-form ppg above/below neutral
+  SWING_CAP: 45, // clamp the form adjustment either way
 };
 
 const resultPoints = (ch) => (ch === "W" ? 3 : ch === "D" ? 1 : 0);
@@ -70,17 +88,15 @@ export function formAdjustment(form) {
 }
 
 // ---- Match probability model ------------------------------------------------
-const MODEL = {
-  HOME_ADV: 7, // home advantage in rating points
-  SIG_SCALE: 15, // logistic scale for the home/away split
-  DRAW_BASE: 30, // draw % for a perfectly even tie
-  DRAW_SLOPE: 0.22, // draw % lost per rating point of mismatch
-  DRAW_MIN: 18,
-  DRAW_MAX: 32,
-  OUTCOME_CAP: 75, // no single outcome is allowed above this
+const POISSON = {
+  HOME_ADV: 65, // home advantage in Elo points
+  BASE_GOALS: 1.33,
+  ELO_GOAL_SCALE: 1100,
+  MAX_GOALS: 3.4,
+  MIN_GOALS: 0.25,
+  GRID: 10,
+  OUTCOME_CAP: 75, // app-friendly cap; avoids cartoon certainty
 };
-
-const sigmoid = (x) => 1 / (1 + Math.exp(-x));
 
 // Round an array of non-negative reals to integers summing to `total`
 // (largest-remainder method) so probabilities always sum to exactly 100.
@@ -96,58 +112,79 @@ function roundToTotal(values, total = 100) {
   return floors;
 }
 
+function poissonPmf(lambda, maxGoals = POISSON.GRID) {
+  const out = [];
+  let p = Math.exp(-lambda);
+  out.push(p);
+  for (let k = 1; k <= maxGoals; k++) {
+    p = (p * lambda) / k;
+    out.push(p);
+  }
+  return out;
+}
+
+export function expectedGoals(homeElo, awayElo, homeForm = "", awayForm = "") {
+  const diff =
+    homeElo -
+    awayElo +
+    POISSON.HOME_ADV +
+    (formAdjustment(homeForm) - formAdjustment(awayForm));
+  const home = POISSON.BASE_GOALS * 10 ** (diff / POISSON.ELO_GOAL_SCALE);
+  const away = POISSON.BASE_GOALS * 10 ** (-diff / POISSON.ELO_GOAL_SCALE);
+  return [
+    clamp(home, POISSON.MIN_GOALS, POISSON.MAX_GOALS),
+    clamp(away, POISSON.MIN_GOALS, POISSON.MAX_GOALS),
+  ];
+}
+
+function capFavourite([home, draw, away]) {
+  const cap = POISSON.OUTCOME_CAP;
+  if (home <= cap && away <= cap) return [home, draw, away];
+  if (home > cap) {
+    const excess = home - cap;
+    const rest = draw + away || 1;
+    return [cap, draw + excess * (draw / rest), away + excess * (away / rest)];
+  }
+  const excess = away - cap;
+  const rest = draw + home || 1;
+  return [home + excess * (home / rest), draw + excess * (draw / rest), cap];
+}
+
 /**
  * Compute [homePct, drawPct, awayPct] integer probabilities summing to 100.
- * @param {number} homeRating
- * @param {number} awayRating
+ * @param {number} homeRating Elo
+ * @param {number} awayRating Elo
  * @param {string} [homeForm] W/D/L string, most recent last
  * @param {string} [awayForm]
  * @returns {[number, number, number]}
  */
 export function matchProbabilities(homeRating, awayRating, homeForm = "", awayForm = "") {
-  const eff =
-    homeRating - awayRating +
-    MODEL.HOME_ADV +
-    (formAdjustment(homeForm) - formAdjustment(awayForm));
+  const [homeGoals, awayGoals] = expectedGoals(homeRating, awayRating, homeForm, awayForm);
+  const homePmf = poissonPmf(homeGoals);
+  const awayPmf = poissonPmf(awayGoals);
+  let home = 0;
+  let draw = 0;
+  let away = 0;
 
-  const draw = clamp(
-    MODEL.DRAW_BASE - MODEL.DRAW_SLOPE * Math.abs(eff),
-    MODEL.DRAW_MIN,
-    MODEL.DRAW_MAX,
-  );
-  const homeShare = sigmoid(eff / MODEL.SIG_SCALE);
-  let home = (100 - draw) * homeShare;
-  let away = (100 - draw) * (1 - homeShare);
-  let drawPct = draw;
-
-  // Enforce the favourite cap, then hand the excess back to the other two
-  // outcomes in proportion so the trio still totals 100.
-  const cap = MODEL.OUTCOME_CAP;
-  if (home > cap || away > cap) {
-    if (home > cap) {
-      const excess = home - cap;
-      home = cap;
-      const rest = drawPct + away || 1;
-      drawPct += excess * (drawPct / rest);
-      away += excess * (away / rest);
-    } else {
-      const excess = away - cap;
-      away = cap;
-      const rest = drawPct + home || 1;
-      drawPct += excess * (drawPct / rest);
-      home += excess * (home / rest);
+  for (let h = 0; h <= POISSON.GRID; h++) {
+    for (let a = 0; a <= POISSON.GRID; a++) {
+      const p = homePmf[h] * awayPmf[a];
+      if (h > a) home += p;
+      else if (h === a) draw += p;
+      else away += p;
     }
   }
 
-  return roundToTotal([home, drawPct, away], 100);
+  const total = home + draw + away || 1;
+  return roundToTotal(capFavourite([home, draw, away].map((p) => (p / total) * 100)), 100);
 }
 
 /**
  * Convenience wrapper taking an intel map ({ [team]: { rating, form } }).
- * Falls back to a league-average rating (69) for unknown teams.
+ * Falls back to a league-average Elo (1500) for unknown teams.
  */
 export function fixtureProbabilities(intel, homeTeam, awayTeam) {
   const h = intel[homeTeam] || {};
   const a = intel[awayTeam] || {};
-  return matchProbabilities(h.rating ?? 69, a.rating ?? 69, h.form || "", a.form || "");
+  return matchProbabilities(h.rating ?? RATING.BASE_ELO, a.rating ?? RATING.BASE_ELO, h.form || "", a.form || "");
 }

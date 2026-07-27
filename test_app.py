@@ -194,7 +194,7 @@ class ForecastIntelTests(unittest.TestCase):
             self.assertEqual(sum(probs), 100, fixture["id"])
             home, draw, away = probs
             self.assertLessEqual(max(home, away), 75, fixture["id"])  # favourites capped
-            self.assertGreaterEqual(draw, 18, fixture["id"])
+            self.assertGreaterEqual(draw, 12, fixture["id"])
             self.assertLessEqual(draw, 32, fixture["id"])
 
     def test_teams_block_covers_all_20_clubs(self):
@@ -215,8 +215,8 @@ class ForecastIntelTests(unittest.TestCase):
     def test_team_ratings_in_sane_range(self):
         for name, intel in self.data["teams"].items():
             self.assertIsInstance(intel["rating"], int, name)
-            self.assertGreaterEqual(intel["rating"], 45, name)
-            self.assertLessEqual(intel["rating"], 95, name)
+            self.assertGreaterEqual(intel["rating"], 1320, name)
+            self.assertLessEqual(intel["rating"], 1900, name)
 
     def test_promoted_teams_get_plausible_ratings(self):
         teams = self.data["teams"]
@@ -225,9 +225,9 @@ class ForecastIntelTests(unittest.TestCase):
             self.assertIn(name, teams)
             rating = teams[name]["rating"]
             # Promoted sides seeded from the Championship with a handicap: a
-            # plausible newcomer band, and never the strongest team in the league.
-            self.assertGreaterEqual(rating, 45, name)
-            self.assertLessEqual(rating, 72, name)
+            # plausible newcomer Elo band, and never the strongest team in the league.
+            self.assertGreaterEqual(rating, 1320, name)
+            self.assertLessEqual(rating, 1700, name)
             self.assertLess(rating, top_rating, name)
             self.assertIn("Championship", teams[name]["basis"], name)
 

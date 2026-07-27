@@ -3,12 +3,14 @@ import assert from "node:assert/strict";
 import {
   MODEL_VERSION,
   ratingFromSeason,
+  updatedElo,
+  expectedGoals,
   formAdjustment,
   matchProbabilities,
   fixtureProbabilities,
 } from "../src/forecast.mjs";
 
-const RATINGS = [45, 50, 60, 66, 73, 80, 88, 92, 95];
+const RATINGS = [1320, 1400, 1500, 1580, 1660, 1740, 1820, 1880, 1900];
 const FORMS = ["WWWWWW", "LLLLLL", "WDLWDL", "DDDDDD", "LWDWLW", ""];
 
 test("model version is exposed", () => {
@@ -38,11 +40,11 @@ test("no single outcome exceeds the 75% cap, even in extreme mismatches", () => 
   assert.ok(Math.max(...q) <= 75, `got ${q}`);
 });
 
-test("draw probability stays within 18-32 across the grid", () => {
+test("draw probability stays in a plausible football band across the grid", () => {
   for (const hr of RATINGS) {
     for (const ar of RATINGS) {
       const [, draw] = matchProbabilities(hr, ar);
-      assert.ok(draw >= 18 && draw <= 32, `draw ${draw} for ${hr} vs ${ar}`);
+      assert.ok(draw >= 12 && draw <= 32, `draw ${draw} for ${hr} vs ${ar}`);
     }
   }
 });
@@ -59,12 +61,12 @@ test("a stronger rating produces a bigger home win probability", () => {
 });
 
 test("form swings the forecast but does not dominate rating", () => {
-  const hot = matchProbabilities(70, 70, "WWWWWW", "LLLLLL")[0];
-  const cold = matchProbabilities(70, 70, "LLLLLL", "WWWWWW")[0];
+  const hot = matchProbabilities(1600, 1600, "WWWWWW", "LLLLLL")[0];
+  const cold = matchProbabilities(1600, 1600, "LLLLLL", "WWWWWW")[0];
   assert.ok(hot > cold, "hot home form should beat cold");
-  // rating gap (15) should outweigh a form swing
-  const ratingLed = matchProbabilities(85, 70, "LLLLLL", "WWWWWW")[0];
-  assert.ok(ratingLed > matchProbabilities(70, 70)[2], "rating still leads");
+  // A meaningful Elo gap should outweigh a form swing.
+  const ratingLed = matchProbabilities(1740, 1600, "LLLLLL", "WWWWWW")[0];
+  assert.ok(ratingLed > matchProbabilities(1600, 1600)[2], "rating still leads");
 });
 
 test("formAdjustment is neutral-ish for empty/mid form and signed for hot/cold", () => {
@@ -79,8 +81,8 @@ test("ratingFromSeason encodes points and goal difference, clamped", () => {
   const champ = ratingFromSeason({ played: 38, points: 85, gf: 78, ga: 34 });
   const bottom = ratingFromSeason({ played: 38, points: 22, gf: 30, ga: 67 });
   assert.ok(champ > bottom);
-  assert.ok(champ >= 45 && champ <= 95);
-  assert.ok(bottom >= 45 && bottom <= 95);
+  assert.ok(champ >= 1320 && champ <= 1900);
+  assert.ok(bottom >= 1320 && bottom <= 1900);
 });
 
 test("promoted handicap lowers a rating vs the same record in the top flight", () => {
@@ -88,11 +90,24 @@ test("promoted handicap lowers a rating vs the same record in the top flight", (
   const topFlight = ratingFromSeason(record);
   const promoted = ratingFromSeason(record, { promoted: true });
   assert.ok(promoted < topFlight, "division penalty must apply");
-  assert.ok(promoted >= 45, "but still a plausible floor");
+  assert.ok(promoted >= 1320, "but still a plausible floor");
+});
+
+test("updatedElo rewards wins and penalises defeats symmetrically", () => {
+  const [home, away] = updatedElo(1600, 1600, 2, 0);
+  assert.ok(home > 1600);
+  assert.ok(away < 1600);
+  assert.equal(Math.round((home - 1600) + (away - 1600)), 0);
+});
+
+test("expectedGoals follows the Elo favourite", () => {
+  const [fav, dog] = expectedGoals(1750, 1500);
+  assert.ok(fav > dog);
+  assert.ok(fav <= 3.4 && dog >= 0.25);
 });
 
 test("fixtureProbabilities reads an intel map and tolerates unknown teams", () => {
-  const intel = { A: { rating: 88, form: "WWWWWW" }, B: { rating: 55, form: "LLLLLL" } };
+  const intel = { A: { rating: 1800, form: "WWWWWW" }, B: { rating: 1400, form: "LLLLLL" } };
   const p = fixtureProbabilities(intel, "A", "B");
   assert.equal(p[0] + p[1] + p[2], 100);
   const unknown = fixtureProbabilities(intel, "X", "Y");

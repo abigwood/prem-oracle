@@ -18,6 +18,7 @@ import {
   MODEL_VERSION,
   ratingFromSeason,
   matchProbabilities,
+  updatedElo,
 } from "../worker/src/forecast.mjs";
 import { mapFootballDataTeam } from "../worker/src/results_feed.js";
 
@@ -151,14 +152,17 @@ async function fetchCurrentSeason(season) {
   }
 }
 
-// Blend the preseason rating (a prior) with current-season performance.
-// Early season stays near the prior; it shifts as real games accumulate.
-const PRIOR_GAMES = 6;
-function blendRating(priorRating, current) {
-  if (!current || !current.played) return priorRating;
-  const seasonRating = ratingFromSeason(current); // top-flight scale, no penalty
-  const w = current.played;
-  return Math.round((priorRating * PRIOR_GAMES + seasonRating * w) / (PRIOR_GAMES + w));
+function applyCurrentSeasonElo(teams, matches) {
+  const ratings = Object.fromEntries(Object.entries(teams).map(([name, intel]) => [name, intel.rating]));
+  for (const m of matches.slice().sort((a, b) => a.date - b.date)) {
+    if (!Number.isFinite(ratings[m.home]) || !Number.isFinite(ratings[m.away])) continue;
+    const [home, away] = updatedElo(ratings[m.home], ratings[m.away], m.hg, m.ag);
+    ratings[m.home] = home;
+    ratings[m.away] = away;
+  }
+  for (const [name, rating] of Object.entries(ratings)) {
+    teams[name].rating = Math.round(rating);
+  }
 }
 
 // ---- Main -------------------------------------------------------------------
@@ -211,7 +215,6 @@ async function build() {
       accumulate(current, (n) => (teamNames.has(n) ? n : null), curStore);
       for (const name of teamNames) {
         const cur = curStore[name];
-        teams[name].rating = blendRating(teams[name].rating, cur);
         if (cur) {
           // last 6 across the season/division boundary, most recent last
           const merged = [...store[name].log, ...cur.log];
@@ -219,6 +222,7 @@ async function build() {
           teams[name].playedCurrent = cur.played;
         }
       }
+      applyCurrentSeasonElo(teams, current);
     }
   }
 
@@ -236,7 +240,7 @@ async function build() {
 
   fixturesData.modelVersion = MODEL_VERSION;
   fixturesData.forecast = {
-    model: "prem-oracle in-house (home advantage + rating + form)",
+    model: "prem-oracle v2 Elo + Poisson (home advantage + form)",
     version: MODEL_VERSION,
     baseline: "football-data.co.uk 2025/26 (E0 + E1)",
   };

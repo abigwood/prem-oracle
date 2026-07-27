@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildReveals, computeRoundTable, computeRoundWins, computeTable, computeTableWithMovement, fixturesNeedingNotification, normaliseResult, roundComplete, roundStatus, roundWinners, scorePick, validFootballScore, windowState } from "../src/logic.js";
+import { buildFixtureIcs, buildReveals, computeRoundTable, computeRoundWins, computeTable, computeTableWithMovement, fixturesNeedingNotification, normaliseResult, parsePickParam, roundComplete, roundStatus, roundWinners, scorePick, validFootballScore, windowState } from "../src/logic.js";
 
 test("football scores validate from 0-0 to 9-9", () => {
   assert.equal(validFootballScore(0, 0), true);
@@ -157,4 +157,53 @@ test("postponed fixture leaves a round pending while cancelled still completes",
   assert.equal(roundStatus(cancelledRound), "complete");
   assert.deepEqual(roundWinners(members, cancelledRound, picks), ["a"]);
   assert.deepEqual(computeRoundWins(members, cancelledRound, picks), { a: 1, b: 0, c: 0 });
+});
+
+test("fixture ics is a single well-formed calendar event", () => {
+  const ics = buildFixtureIcs({
+    id: "pl-2026-m1-arsenal-coventry",
+    player1: "Arsenal",
+    player2: "Coventry City",
+    startAt: "2026-08-21T20:00:00+01:00",
+    venue: "Emirates Stadium",
+    broadcaster: "Sky Sports",
+    matchday: 1,
+  });
+  const lines = ics.split("\r\n");
+  assert.equal(lines[0], "BEGIN:VCALENDAR");
+  assert.equal(lines[lines.length - 1], "END:VCALENDAR");
+  assert.equal(lines.filter((line) => line === "BEGIN:VEVENT").length, 1);
+  assert.ok(ics.includes("UID:pl-2026-m1-arsenal-coventry@premoracle"));
+  assert.ok(ics.includes("DTSTART:20260821T190000Z"));
+  // 115-minute event: 19:00Z + 1h55m.
+  assert.ok(ics.includes("DTEND:20260821T205500Z"));
+  assert.ok(ics.includes("SUMMARY:⚽ Arsenal v Coventry City"));
+  assert.ok(ics.includes("LOCATION:Emirates Stadium"));
+  assert.ok(ics.includes("UK TV: Sky Sports"));
+});
+
+test("fixture ics escapes separators and folds in the viewer's pick", () => {
+  const ics = buildFixtureIcs({
+    id: "m1",
+    player1: "Brighton & Hove Albion",
+    player2: "Spurs",
+    startAt: "2026-08-22T14:00:00Z",
+    venue: "Amex Stadium, Falmer",
+  }, { p1: 2, p2: 1 });
+  assert.ok(ics.includes("LOCATION:Amex Stadium\\, Falmer"));
+  assert.ok(ics.includes("Your prediction: Brighton & Hove Albion 2-1 Spurs"));
+});
+
+test("fixture ics needs a parseable start time", () => {
+  assert.equal(buildFixtureIcs(null), null);
+  assert.equal(buildFixtureIcs({ id: "m1", startAt: "tbc" }), null);
+});
+
+test("pick query parameter only accepts a single-digit scoreline", () => {
+  assert.deepEqual(parsePickParam("2-1"), { p1: 2, p2: 1 });
+  assert.deepEqual(parsePickParam("0-0"), { p1: 0, p2: 0 });
+  assert.equal(parsePickParam("12-1"), null);
+  assert.equal(parsePickParam("2:1"), null);
+  assert.equal(parsePickParam(""), null);
+  assert.equal(parsePickParam(null), null);
 });

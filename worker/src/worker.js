@@ -1,4 +1,5 @@
 import {
+  buildFixtureIcs,
   buildReveals,
   computeRoundTable,
   computeRoundWins,
@@ -11,6 +12,7 @@ import {
   normNick,
   normRecovery,
   normaliseResult,
+  parsePickParam,
   roundComplete,
   roundStatus,
   roundWinners,
@@ -110,6 +112,30 @@ async function getFixtures(env, request) {
     modelVersion: fixtureIntel.modelVersion,
     settlement: "manual",
   }, 200, env);
+}
+
+// GET /ics/<matchId>[?pick=2-1] — one fixture as a calendar event.
+//
+// The native app can't do a browser-style .ics download inside WKWebView, so it
+// links here instead; iOS opens the URL itself and offers "Add to Calendar" off
+// the back of the text/calendar content type. Deliberately not an attachment —
+// a Content-Disposition download would give the user a file to manage rather
+// than the add-event sheet.
+async function fixtureIcs(env, url, path) {
+  const matchId = decodeURIComponent(path.slice("/ics/".length));
+  if (!matchId) return json({ error: "not found" }, 404, env);
+  const list = await fixtures(env);
+  const match = list.find((fixture) => String(fixture.id) === matchId);
+  if (!match) return json({ error: "not found" }, 404, env);
+  const body = buildFixtureIcs(match, parsePickParam(url.searchParams.get("pick")));
+  if (!body) return json({ error: "fixture has no start time" }, 409, env);
+  return new Response(body, {
+    status: 200,
+    headers: {
+      "content-type": "text/calendar; charset=utf-8",
+      "cache-control": "public, max-age=300",
+    },
+  });
 }
 
 async function uniqueRecovery(env) {
@@ -525,6 +551,7 @@ async function route(request, env) {
       if (path === "/picks") return await getUserPicks(env, url);
       if (path === "/state") return await state(env, url);
       if (path === "/stats") return await stats(env, url);
+      if (path.startsWith("/ics/")) return await fixtureIcs(env, url, path);
     }
     if (request.method === "POST") {
       const body = await request.json().catch(() => ({}));

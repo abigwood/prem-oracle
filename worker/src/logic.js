@@ -207,6 +207,57 @@ export const normRecovery = (value) =>
 
 export const normNick = (value) => String(value || "").trim().slice(0, 24) || "Anon";
 
+const icsStamp = (date) => date.toISOString().replace(/[-:]/g, "").slice(0, 15) + "Z";
+
+const icsEscape = (value) =>
+  String(value ?? "")
+    .replace(/\\/g, "\\\\")
+    .replace(/\r?\n/g, "\\n")
+    .replace(/,/g, "\\,")
+    .replace(/;/g, "\\;");
+
+// Single-event VCALENDAR for one fixture. Served as text/calendar so iOS can
+// hand it straight to its own "Add to Calendar" sheet — the native app has no
+// way to trigger a browser-style .ics download. `pick` is the viewer's own
+// prediction, kept so the native event body matches the web one.
+export function buildFixtureIcs(match, pick = null) {
+  if (!match) return null;
+  const start = new Date(match.startAt);
+  if (Number.isNaN(start.getTime())) return null;
+  const end = new Date(start.getTime() + 115 * 60000);
+  const description = [
+    match.round || (match.matchday ? `Matchday ${match.matchday}` : ""),
+    match.venue,
+    match.broadcaster ? `UK TV: ${match.broadcaster}` : "",
+    pick && validFootballScore(pick.p1, pick.p2)
+      ? `Your prediction: ${match.player1} ${pick.p1}-${pick.p2} ${match.player2}`
+      : "",
+    "Prem Oracle fixture",
+  ].filter(Boolean).join(" · ");
+  return [
+    "BEGIN:VCALENDAR",
+    "VERSION:2.0",
+    "PRODID:-//PremOracle//PremierLeague202627//EN",
+    "BEGIN:VEVENT",
+    `UID:${icsEscape(match.id)}@premoracle`,
+    `DTSTART:${icsStamp(start)}`,
+    `DTEND:${icsStamp(end)}`,
+    `SUMMARY:${icsEscape(`⚽ ${match.player1} v ${match.player2}`)}`,
+    `DESCRIPTION:${icsEscape(description)}`,
+    `LOCATION:${icsEscape(match.venue || "")}`,
+    "END:VEVENT",
+    "END:VCALENDAR",
+  ].join("\r\n");
+}
+
+// "2-1" -> { p1: 2, p2: 1 }; anything else -> null.
+export function parsePickParam(value) {
+  const match = /^(\d)-(\d)$/.exec(String(value || ""));
+  if (!match) return null;
+  const pick = { p1: Number(match[1]), p2: Number(match[2]) };
+  return validFootballScore(pick.p1, pick.p2) ? pick : null;
+}
+
 // Selects fixtures kicking off within the next `windowMs` (default 60 minutes)
 // whose id is not already present in `notifiedIds`. Fixtures that have already
 // started, lack a parseable start time, or have unconfirmed players are skipped.

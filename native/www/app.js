@@ -1,7 +1,12 @@
 const SEASON_START = new Date("2026-08-21T20:00:00+01:00");
 const SEASON_START_DATE = "2026-08-21";
-const APP_BUILD = "20260726b";
+const APP_BUILD = "20260727a";
 const API = window.PREM_API || null;
+// Canonical public home of the web app. Inside the Capacitor shell the page is
+// served from premoracle://localhost, so location.origin can never be used to
+// build a link we hand to somebody else — it isn't reachable off-device, and
+// WebKit's Web Share API rejects non-http(s) URLs outright.
+const WEB_BASE = "https://abigwood.github.io/prem-oracle/";
 const STORAGE = {
   uid: "prem_oracle_uid",
   name: "prem_oracle_name",
@@ -13,10 +18,14 @@ const STORAGE = {
   pushToken: "prem_oracle_push_token",
 };
 
+function isNativeApp() {
+  return Boolean(window.Capacitor?.isNativePlatform?.());
+}
+
 // Native (Capacitor) builds get an `is-native` hook for shell-only styling —
 // e.g. a tighter bottom-nav safe-area inset. The web build (window.Capacitor
 // exists there too) never gets this class because isNativePlatform() is false.
-if (window.Capacitor?.isNativePlatform?.()) {
+if (isNativeApp()) {
   document.documentElement.classList.add("is-native");
 }
 const TEAM_MARKERS = {
@@ -373,6 +382,21 @@ function calendarHref(match) {
   return `data:text/calendar;charset=utf-8,${encodeURIComponent(content)}`;
 }
 
+// WKWebView silently drops `<a download>` on a data: URL — the click dispatches,
+// nothing navigates, nothing errors. Natively we point the link at the Worker's
+// text/calendar endpoint instead: Capacitor hands off-origin top-level
+// navigations to the system, and iOS answers a text/calendar response with its
+// own "Add to Calendar" sheet. The web build keeps the data: URL download.
+function calendarLink(match) {
+  const pick = picks[match.id];
+  if (isNativeApp() && API && match.id && match.startAt) {
+    const query = pick && validScore(pick.p1) && validScore(pick.p2) ? `?pick=${pick.p1}-${pick.p2}` : "";
+    return { href: `${API}/ics/${encodeURIComponent(match.id)}${query}`, download: "" };
+  }
+  const href = calendarHref(match);
+  return href ? { href, download: calendarFileName(match) } : { href: "", download: "" };
+}
+
 function calendarFileName(match) {
   return `${match.player1}-v-${match.player2}.ics`
     .replace(/&/g, "and")
@@ -670,9 +694,9 @@ function scorePicker(match, open) {
 function matchCard(match) {
   const pick = picks[match.id];
   const open = matchOpen(match);
-  const calendar = calendarHref(match);
+  const calendar = calendarLink(match);
   return `<article class="match-card" data-match-card="${match.id}">
-    ${calendar ? `<a class="fixture-calendar" href="${calendar}" download="${calendarFileName(match)}" aria-label="Add ${escapeHTML(match.player1)} v ${escapeHTML(match.player2)} to calendar">＋</a>` : ""}
+    ${calendar.href ? `<a class="fixture-calendar" href="${calendar.href}"${calendar.download ? ` download="${calendar.download}"` : ""} aria-label="Add ${escapeHTML(match.player1)} v ${escapeHTML(match.player2)} to calendar">＋</a>` : ""}
     <div class="match-meta">
       <span class="tour-badge">Matchday ${match.matchday}</span>
       <span>${matchTime(match)}${match.broadcaster ? ` · ${escapeHTML(match.broadcaster)}` : ""}</span>
@@ -885,6 +909,45 @@ function whatsappUrlFor(text) {
   return `https://wa.me/?text=${encodeURIComponent(text)}`;
 }
 
+// A link a mate can actually open. On the web that is wherever this copy of the
+// app is hosted; in the native shell it has to be the public site, which also
+// universal-links straight back into the app.
+function inviteLinkFor(code) {
+  const base = isNativeApp() ? WEB_BASE : `${location.origin}${location.pathname}`;
+  return `${base}?league=${code}`;
+}
+
+// Native shells go through @capacitor/share (a real UIActivityViewController).
+// navigator.share exists inside WKWebView but rejects with a bare TypeError for
+// anything it dislikes — notably our premoracle:// URLs — and that rejection is
+// invisible to the user. The web build keeps using navigator.share unchanged.
+async function openShareSheet({ title, text, url }) {
+  if (isNativeApp()) {
+    const share = window.Capacitor?.Plugins?.Share;
+    if (share) {
+      await share.share({ title, text, url, dialogTitle: title });
+      return true;
+    }
+  }
+  if (navigator.share) {
+    await navigator.share(url ? { title, text, url } : { title, text });
+    return true;
+  }
+  return false;
+}
+
+// Share, and fall back to the WhatsApp web hand-off if the sheet is unavailable
+// or fails. A user dismissing the sheet is not a failure — it must not then
+// bounce them into WhatsApp.
+async function shareOrWhatsApp({ title, text, url }) {
+  try {
+    if (await openShareSheet({ title, text, url })) return;
+  } catch (error) {
+    if (error?.name === "AbortError" || /cancel/i.test(error?.message || "")) return;
+  }
+  location.href = whatsappUrlFor(text);
+}
+
 function roundedRect(ctx, x, y, width, height, radius) {
   const r = Math.min(radius, width / 2, height / 2);
   ctx.beginPath();
@@ -988,12 +1051,16 @@ async function canvasToBlob(canvas) {
   return new Promise((resolve) => canvas.toBlob(resolve, "image/png", 0.95));
 }
 
+function leagueTableShareText(state) {
+  const link = inviteLinkFor(state.code);
+  return `🏆 ${state.name} - Prem Oracle live league table. Tap to join on the web or in the app and get your picks in: ${link}`;
+}
+
 async function shareLeagueTableGraphic(state) {
   const canvas = drawLeagueTableCard(state);
   const blob = await canvasToBlob(canvas);
   if (!blob) throw new Error("Could not create league table graphic.");
-  const link = `${location.origin}${location.pathname}?league=${state.code}`;
-  const text = `🏆 ${state.name} - Prem Oracle live league table. Tap to join on the web or in the app and get your picks in: ${link}`;
+  const text = leagueTableShareText(state);
   const file = new File([blob], "prem-oracle-league-table.png", { type: "image/png" });
   if (navigator.canShare?.({ files: [file] })) {
     await navigator.share({ files: [file], text, title: `${state.name} league table` });
@@ -1203,10 +1270,9 @@ document.addEventListener("click", async (event) => {
   }
   const share = event.target.closest("[data-share-league]");
   if (share) {
-    const url = `${location.origin}${location.pathname}?league=${share.dataset.shareLeague}`;
+    const url = inviteLinkFor(share.dataset.shareLeague);
     const text = `Join my Prem Oracle league ${share.dataset.shareLeague} on the web or in the app: ${url}`;
-    if (navigator.share) await navigator.share({ title: "Prem Oracle", text, url }).catch(() => {});
-    else location.href = whatsappUrlFor(text);
+    await shareOrWhatsApp({ title: "Prem Oracle", text, url });
     return;
   }
   const del = event.target.closest("[data-delete-league]");
@@ -1265,11 +1331,17 @@ document.addEventListener("click", async (event) => {
   if (exportTable) {
     if (leagueTab === "matchday" && roundState && !roundState.error && roundState.table?.length) {
       const text = roundShareText(leagueState, roundState);
-      if (navigator.share) await navigator.share({ title: "Prem Oracle", text }).catch(() => {});
-      else location.href = whatsappUrlFor(text);
+      await shareOrWhatsApp({ title: "Prem Oracle", text });
       return;
     }
     if (leagueState?.table?.length) {
+      // The PNG share card rides on navigator.share({files}), which the native
+      // WKWebView has no answer for. Natively we share the same text + invite
+      // link through the Share plugin instead.
+      if (isNativeApp()) {
+        await shareOrWhatsApp({ title: `${leagueState.name} league table`, text: leagueTableShareText(leagueState) });
+        return;
+      }
       setFlash("Building share card.");
       render();
       try {

@@ -19,11 +19,13 @@ class PremOracleTests(unittest.TestCase):
         sw = (ROOT / "sw.js").read_text()
         self.assertIn("Prem Oracle", html)
         self.assertIn("Prem Oracle", manifest)
-        self.assertIn("styles.css?v=20260726b", html)
-        self.assertIn("app.js?v=20260726b", html)
-        self.assertIn("prem-oracle-v1-20260726b", sw)
+        self.assertIn("styles.css?v=20260727a", html)
+        self.assertIn("app.js?v=20260727a", html)
+        self.assertIn("prem-oracle-v1-20260727a", sw)
         self.assertIn("https://prem-oracle-window.abigwood.workers.dev", html)
         self.assertIn("vendor/capacitor/push-notifications.js", html)
+        self.assertIn("vendor/capacitor/share.js", html)
+        self.assertIn("vendor/capacitor/share.js", sw)
 
     def test_fixture_json_has_full_season(self):
         data = json.loads((ROOT / "data/fixtures.json").read_text())
@@ -230,6 +232,57 @@ class ForecastIntelTests(unittest.TestCase):
             self.assertLessEqual(rating, 1700, name)
             self.assertLess(rating, top_rating, name)
             self.assertIn("Championship", teams[name]["basis"], name)
+
+
+class NativeShareAndCalendarTests(unittest.TestCase):
+    """v1.1.1: the two App Store buttons that silently did nothing on iPhone."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = (ROOT / "app.js").read_text()
+        cls.html = (ROOT / "index.html").read_text()
+        cls.worker = (ROOT / "worker/src/worker.js").read_text()
+        cls.logic = (ROOT / "worker/src/logic.js").read_text()
+
+    def test_share_plugin_is_vendored_and_loaded(self):
+        self.assertTrue((ROOT / "vendor/capacitor/share.js").exists())
+        self.assertIn('registerPlugin(\'Share\'', (ROOT / "vendor/capacitor/share.js").read_text())
+        self.assertIn("vendor/capacitor/share.js", self.html)
+
+    def test_native_share_goes_through_the_capacitor_plugin(self):
+        self.assertIn("openShareSheet", self.app)
+        self.assertIn("Capacitor?.Plugins?.Share", self.app)
+        # The web path still uses navigator.share.
+        self.assertIn("await navigator.share(", self.app)
+
+    def test_no_share_call_site_swallows_failures_silently(self):
+        # The v1.1 bug: navigator.share(...).catch(() => {}) hid a hard rejection.
+        self.assertNotIn("navigator.share({ title: \"Prem Oracle\", text, url }).catch(() => {})", self.app)
+        self.assertNotIn("navigator.share({ title: \"Prem Oracle\", text }).catch(() => {})", self.app)
+        # Every share now runs through one helper that distinguishes a user
+        # dismissing the sheet from the sheet failing to open at all.
+        self.assertIn("shareOrWhatsApp", self.app)
+        self.assertIn('error?.name === "AbortError"', self.app)
+
+    def test_shared_links_never_use_the_capacitor_scheme_origin(self):
+        # location.origin is premoracle://localhost inside the native shell, which
+        # is unshareable and makes navigator.share reject with a TypeError.
+        self.assertIn("https://abigwood.github.io/prem-oracle/", self.app)
+        self.assertIn("inviteLinkFor", self.app)
+        self.assertNotIn("${location.origin}${location.pathname}?league=", self.app)
+
+    def test_native_calendar_link_targets_the_worker_ics_endpoint(self):
+        self.assertIn("calendarLink", self.app)
+        self.assertIn("/ics/", self.app)
+        # `download` is a web-only attribute; WKWebView drops it.
+        self.assertIn("calendar.download ?", self.app)
+
+    def test_worker_serves_text_calendar(self):
+        self.assertIn('path.startsWith("/ics/")', self.worker)
+        self.assertIn("fixtureIcs", self.worker)
+        self.assertIn('"content-type": "text/calendar; charset=utf-8"', self.worker)
+        self.assertIn("buildFixtureIcs", self.logic)
+        self.assertIn("parsePickParam", self.logic)
 
 
 if __name__ == "__main__":

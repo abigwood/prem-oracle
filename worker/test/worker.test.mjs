@@ -488,3 +488,39 @@ test("POST /league/nick updates only that league's member row with normNick rule
   assert.equal(memberNick("owner"), "Owner"); // other member untouched
   assert.equal(await globalNick("m2"), "Two"); // global default name unchanged
 });
+
+test("ics endpoint serves one fixture as text/calendar", async () => {
+  const originalFetch = globalThis.fetch;
+  const fixture = {
+    id: "pl-md1-ars-cov",
+    player1: "Arsenal",
+    player2: "Coventry City",
+    startAt: "2026-08-21T20:00:00+01:00",
+    venue: "Emirates Stadium",
+    matchday: 1,
+  };
+  globalThis.fetch = async () => new Response(JSON.stringify({ fixtures: [fixture] }), { status: 200 });
+  const env = { FIXTURES_URL: "https://example.com/fixtures.json?ics-test", KV: memoryKV(new Map()) };
+  try {
+    // The fixture list is memoised module-wide; force a refresh so this test
+    // doesn't read a list cached by an earlier one.
+    await worker.fetch(new Request("https://worker.test/fixtures?refresh=1"), env);
+    const response = await worker.fetch(new Request(`https://worker.test/ics/${fixture.id}`), env);
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("content-type"), "text/calendar; charset=utf-8");
+    // No attachment disposition: iOS should offer "Add to Calendar", not a download.
+    assert.equal(response.headers.get("content-disposition"), null);
+    const body = await response.text();
+    assert.ok(body.startsWith("BEGIN:VCALENDAR"));
+    assert.ok(body.includes("SUMMARY:⚽ Arsenal v Coventry City"));
+    assert.ok(!body.includes("Your prediction"));
+
+    const withPick = await worker.fetch(new Request(`https://worker.test/ics/${fixture.id}?pick=3-1`), env);
+    assert.ok((await withPick.text()).includes("Your prediction: Arsenal 3-1 Coventry City"));
+
+    const missing = await worker.fetch(new Request("https://worker.test/ics/not-a-fixture"), env);
+    assert.equal(missing.status, 404);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

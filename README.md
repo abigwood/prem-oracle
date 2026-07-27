@@ -86,3 +86,22 @@ Native push registration is wired with `@capacitor/push-notifications`; iOS
 uses `ios/App/App/App.entitlements` and the AppDelegate APNs callbacks. Device
 tokens are stored by the Worker via `/push-token` so kick-off reminders can be
 sent once the APNs sender credentials/result-reminder job are configured.
+
+### Where the native shell needs its own path
+
+Two web APIs do not survive the Capacitor WKWebView, so both have a native
+branch guarded by `isNativeApp()`. The web build is untouched in each case.
+
+- **Sharing.** `navigator.share` exists in WKWebView but rejects with a
+  `TypeError` on non-http(s) URLs, and inside the shell `location.origin` is
+  `premoracle://localhost`. Native shares go through `@capacitor/share`, and all
+  invite links are built from `WEB_BASE` (the public site, which also
+  universal-links back into the app) rather than `location.origin`.
+- **Add to calendar.** WKWebView silently drops `<a download>` on a `data:` URL.
+  Native builds link to the Worker's `GET /ics/<matchId>` instead, which
+  responds `text/calendar` — Capacitor hands the off-origin navigation to iOS,
+  which shows its own "Add to Calendar" sheet. An optional `?pick=2-1` keeps the
+  viewer's own prediction in the event notes, matching the web `.ics`.
+
+`/ics/<matchId>` must be deployed (`cd worker && npm run deploy`) before a
+native build that uses it ships.

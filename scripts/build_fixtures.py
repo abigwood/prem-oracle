@@ -138,7 +138,9 @@ def build():
             "date": current_date,
             "startAt": kickoff,
             "time": time,
-            "round": f"Matchday {matchday}",
+            # Display label. The numeric `matchday` field keeps the upstream
+            # football-data name; only the user-facing wording is Matchweek.
+            "round": f"Matchweek {matchday}",
             "matchday": matchday,
             "tour": "prem",
             "coverage": "all",

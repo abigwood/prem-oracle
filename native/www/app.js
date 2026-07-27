@@ -1,6 +1,6 @@
 const SEASON_START = new Date("2026-08-21T20:00:00+01:00");
 const SEASON_START_DATE = "2026-08-21";
-const APP_BUILD = "20260727a";
+const APP_BUILD = "20260727b";
 const API = window.PREM_API || null;
 // Canonical public home of the web app. Inside the Capacitor shell the page is
 // served from premoracle://localhost, so location.origin can never be used to
@@ -29,15 +29,15 @@ if (isNativeApp()) {
   document.documentElement.classList.add("is-native");
 }
 const TEAM_MARKERS = {
-  "AFC Bournemouth": { bg: "#DA291C", fg: "#FFFFFF", border: "#111111" },
-  "Arsenal": { bg: "#EF0107", fg: "#FFFFFF", border: "#9C824A" },
+  "AFC Bournemouth": { bg: "#DA291C", fg: "#FFFFFF", border: "#C8A657" },
+  "Arsenal": { bg: "#E20613", fg: "#FFFFFF", border: "#9C824A" },
   "Aston Villa": { bg: "#670E36", fg: "#FFFFFF", border: "#95BFE5" },
   "Brentford": { bg: "#E30613", fg: "#FFFFFF", border: "#111111" },
-  "Brighton & Hove Albion": { bg: "#0057B8", fg: "#FFFFFF", border: "#FFFFFF" },
+  "Brighton & Hove Albion": { bg: "#0057B8", fg: "#FFFFFF", border: "#FFCD00" },
   "Chelsea": { bg: "#034694", fg: "#FFFFFF", border: "#DBA111" },
   "Coventry City": { bg: "#77BBE8", fg: "#102033", border: "#0B6FB3" },
   "Crystal Palace": { bg: "#1B458F", fg: "#FFFFFF", border: "#C4122E" },
-  "Everton": { bg: "#003399", fg: "#FFFFFF", border: "#FFFFFF" },
+  "Everton": { bg: "#003399", fg: "#FFFFFF", border: "#D1D5DB" },
   "Fulham": { bg: "#FFFFFF", fg: "#111111", border: "#CC0000" },
   "Hull City": { bg: "#F5A400", fg: "#111111", border: "#111111" },
   "Ipswich Town": { bg: "#0033A0", fg: "#FFFFFF", border: "#DE2C2F" },
@@ -45,8 +45,8 @@ const TEAM_MARKERS = {
   "Liverpool": { bg: "#C8102E", fg: "#FFFFFF", border: "#00B2A9" },
   "Manchester City": { bg: "#6CABDD", fg: "#101820", border: "#1C2C5B" },
   "Manchester United": { bg: "#DA291C", fg: "#FFFFFF", border: "#FBE122" },
-  "Newcastle United": { bg: "#241F20", fg: "#FFFFFF", border: "#FFFFFF" },
-  "Nottingham Forest": { bg: "#DD0000", fg: "#FFFFFF", border: "#FFFFFF" },
+  "Newcastle United": { bg: "#241F20", fg: "#FFFFFF", border: "#D1D5DB" },
+  "Nottingham Forest": { bg: "#DD0000", fg: "#FFFFFF", border: "#D1D5DB" },
   "Sunderland": { bg: "#E30613", fg: "#FFFFFF", border: "#111111" },
   "Tottenham Hotspur": { bg: "#FFFFFF", fg: "#132257", border: "#132257" },
 };
@@ -357,7 +357,7 @@ function calendarHref(match) {
   const title = `${match.player1} v ${match.player2}`;
   const pick = picks[match.id];
   const description = [
-    match.round || `Matchday ${match.matchday}`,
+    match.round || `Matchweek ${match.matchday}`,
     match.venue,
     match.broadcaster ? `UK TV: ${match.broadcaster}` : "",
     pick && validScore(pick.p1) && validScore(pick.p2)
@@ -432,7 +432,7 @@ function playerInitial() {
 
 function hero() {
   return `<section class="hero">
-    <span class="eyebrow">Premier League 2026/27 · 38 matchdays</span>
+    <span class="eyebrow">Premier League 2026/27 · 38 matchweeks</span>
     <h1>Predict the scores.</h1>
     <p>All 380 fixtures. Private leagues. Picks lock at kick-off.</p>
     <div class="countdown">⚽ <span>${daysToStart()}</span></div>
@@ -698,7 +698,7 @@ function matchCard(match) {
   return `<article class="match-card" data-match-card="${match.id}">
     ${calendar.href ? `<a class="fixture-calendar" href="${calendar.href}"${calendar.download ? ` download="${calendar.download}"` : ""} aria-label="Add ${escapeHTML(match.player1)} v ${escapeHTML(match.player2)} to calendar">＋</a>` : ""}
     <div class="match-meta">
-      <span class="tour-badge">Matchday ${match.matchday}</span>
+      <span class="tour-badge">Matchweek ${match.matchday}</span>
       <span>${matchTime(match)}${match.broadcaster ? ` · ${escapeHTML(match.broadcaster)}` : ""}</span>
     </div>
     ${matchIntelStrip(match)}
@@ -725,7 +725,7 @@ function groupedMatchdays(list) {
     const open = openScheduleDates.has(key) || (!openScheduleDates.size && matchday === nextMatchday());
     return `<details class="day-card" data-day-card="${key}" ${open ? "open" : ""}>
       <summary>
-        <div><strong>Matchday ${matchday}</strong><span>${firstDate ? dateLabel(firstDate, true) : ""}</span></div>
+        <div><strong>Matchweek ${matchday}</strong><span>${firstDate ? dateLabel(firstDate, true) : ""}</span></div>
         <span>${matches.length} fixtures</span>
       </summary>
       <div class="day-body">${matches.map(matchCard).join("")}</div>
@@ -747,8 +747,8 @@ function todayView() {
   if (!dayMatches.length) {
     const md = nextMatchday();
     dayMatches = fixtures.filter((fixture) => fixture.matchday === md);
-    title = md === 1 ? "Opening matchday" : "Next matchday";
-    subtitle = `Matchday ${md}`;
+    title = md === 1 ? "Opening matchweek" : "Next matchweek";
+    subtitle = `Matchweek ${md}`;
   }
   const homeMatchday = dayMatches[0]?.matchday ?? nextMatchday();
   const roundFixtures = fixtures.filter((fixture) => fixture.matchday === homeMatchday);
@@ -770,7 +770,7 @@ function scheduleView() {
     <div class="section-head"><div><span class="eyebrow">Full season</span><h2>Prediction schedule</h2></div></div>
     <div class="filters">
       <button class="filter${matchdayFilter === "all" ? " active" : ""}" data-filter="all">All rounds</button>
-      ${matchdays.map((value) => `<button class="filter${String(matchdayFilter) === String(value) ? " active" : ""}" data-filter="${value}">MD ${value}</button>`).join("")}
+      ${matchdays.map((value) => `<button class="filter${String(matchdayFilter) === String(value) ? " active" : ""}" data-filter="${value}">MW ${value}</button>`).join("")}
     </div>
     ${groupedMatchdays(filtered)}`;
 }
@@ -835,8 +835,8 @@ function winnerNames(round) {
 
 function roundShareText(state, round) {
   const head = round.complete
-    ? `🏆 Matchday ${round.matchday}: won by ${winnerNames(round) || "nobody"}`
-    : `🏆 Matchday ${round.matchday} · in progress`;
+    ? `🏆 Matchweek ${round.matchday}: won by ${winnerNames(round) || "nobody"}`
+    : `🏆 Matchweek ${round.matchday} · in progress`;
   const rows = (round.table || []).map((row, index) => `${row.rank || index + 1}. ${row.nick} - ${row.pts} pts (${row.exact} exact)`);
   return `${head}\n\n${rows.join("\n")}\n\nJoin on the web or in the app with code ${state.code}`;
 }
@@ -844,7 +844,7 @@ function roundShareText(state, round) {
 function roundToggle() {
   const md = selectedMatchday || leagueState?.currentMatchday || 1;
   return `<div class="round-toggle">
-    <button type="button" class="round-seg${leagueTab === "matchday" ? " active" : ""}" data-round-tab="matchday">Matchday ${md} ▾</button>
+    <button type="button" class="round-seg${leagueTab === "matchday" ? " active" : ""}" data-round-tab="matchday">Matchweek ${md} ▾</button>
     <button type="button" class="round-seg${leagueTab === "season" ? " active" : ""}" data-round-tab="season">Season</button>
   </div>`;
 }
@@ -852,7 +852,7 @@ function roundToggle() {
 function matchdayPicker() {
   if (!matchdayPickerOpen) return "";
   const md = selectedMatchday || 1;
-  return `<div class="md-picker">${Array.from({ length: 38 }, (_, i) => i + 1).map((n) =>
+  return `<div class="md-picker" role="group" aria-label="Choose matchweek">${Array.from({ length: 38 }, (_, i) => i + 1).map((n) =>
     `<button type="button" class="md-cell${n === md ? " active" : ""}" data-round-md="${n}">${n}</button>`).join("")}</div>`;
 }
 
@@ -867,8 +867,8 @@ function seasonBanner(state) {
   const currentMatchdayHasResults = state.currentMatchdayHasResults ||
     fixtures.some((fixture) => fixture.matchday === state.currentMatchday && fixtureHasResult(fixture));
   const detail = currentMatchdayHasResults && state.currentMatchday != null
-    ? `Matchday ${state.currentMatchday} in progress`
-    : played === 0 ? `starts Matchday ${state.currentMatchday || 1}` : `after Matchday ${played} of 38`;
+    ? `Matchweek ${state.currentMatchday} in progress`
+    : played === 0 ? `starts Matchweek ${state.currentMatchday || 1}` : `after Matchweek ${played} of 38`;
   return `<div class="round-banner"><strong>Season 2026/27</strong><span>${detail}</span></div>`;
 }
 
@@ -876,7 +876,7 @@ function roundBanner(round) {
   const md = round.matchday;
   if (round.complete) {
     const names = winnerNames(round);
-    return `<div class="round-banner is-success"><strong>Matchday ${md} complete — won by ${names ? escapeHTML(names) : "nobody"} 🏆</strong><span>Game ${md} of 38 · all fixtures settled</span></div>`;
+    return `<div class="round-banner is-success"><strong>Matchweek ${md} complete — won by ${names ? escapeHTML(names) : "nobody"} 🏆</strong><span>Game ${md} of 38 · all fixtures settled</span></div>`;
   }
   if (!round.status || round.status === "in progress") {
     return `<div class="round-banner"><strong>Game ${md} of 38 · in progress</strong></div>`;
@@ -1106,12 +1106,12 @@ function leagueView() {
   const supportsRounds = leagueSupportsRounds(state);
   const showMatchday = supportsRounds && leagueTab === "matchday";
   const shareLabel = showMatchday && roundState && !roundState.error && roundState.matchday != null
-    ? `Share Matchday ${roundState.matchday} result`
+    ? `Share Matchweek ${roundState.matchday} result`
     : "Share table to WhatsApp";
   let inner;
   if (showMatchday) {
     inner = !roundState
-      ? `<div class="empty"><strong>Loading matchday…</strong></div>`
+      ? `<div class="empty"><strong>Loading matchweek…</strong></div>`
       : roundState.error
         ? `<div class="empty"><strong>${escapeHTML(roundState.error)}</strong></div>`
         : `${roundBanner(roundState)}${roundTableHtml(roundState)}`;

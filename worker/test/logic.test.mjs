@@ -180,6 +180,9 @@ test("fixture ics is a single well-formed calendar event", () => {
   assert.ok(ics.includes("SUMMARY:⚽ Arsenal v Coventry City"));
   assert.ok(ics.includes("LOCATION:Emirates Stadium"));
   assert.ok(ics.includes("UK TV: Sky Sports"));
+  // User-facing wording is Matchweek even though the field stays `matchday`.
+  assert.ok(ics.includes("Matchweek 1"));
+  assert.ok(!ics.includes("Matchday"));
 });
 
 test("fixture ics escapes separators and folds in the viewer's pick", () => {

@@ -226,7 +226,7 @@ export function buildFixtureIcs(match, pick = null) {
   if (Number.isNaN(start.getTime())) return null;
   const end = new Date(start.getTime() + 115 * 60000);
   const description = [
-    match.round || (match.matchday ? `Matchday ${match.matchday}` : ""),
+    match.round || (match.matchday ? `Matchweek ${match.matchday}` : ""),
     match.venue,
     match.broadcaster ? `UK TV: ${match.broadcaster}` : "",
     pick && validFootballScore(pick.p1, pick.p2)

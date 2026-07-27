@@ -1,4 +1,5 @@
 import json
+import re
 import unittest
 from pathlib import Path
 
@@ -19,9 +20,9 @@ class PremOracleTests(unittest.TestCase):
         sw = (ROOT / "sw.js").read_text()
         self.assertIn("Prem Oracle", html)
         self.assertIn("Prem Oracle", manifest)
-        self.assertIn("styles.css?v=20260727a", html)
-        self.assertIn("app.js?v=20260727a", html)
-        self.assertIn("prem-oracle-v1-20260727a", sw)
+        self.assertIn("styles.css?v=20260727b", html)
+        self.assertIn("app.js?v=20260727b", html)
+        self.assertIn("prem-oracle-v1-20260727b", sw)
         self.assertIn("https://prem-oracle-window.abigwood.workers.dev", html)
         self.assertIn("vendor/capacitor/push-notifications.js", html)
         self.assertIn("vendor/capacitor/share.js", html)
@@ -73,7 +74,7 @@ class PremOracleTests(unittest.TestCase):
         self.assertIn("VENUE_OUTLOOK", app)
         self.assertIn(".team-crest", css)
         self.assertIn("TEAM_MARKERS", app)
-        self.assertIn('"Arsenal": { bg: "#EF0107"', app)
+        self.assertIn('"Arsenal": { bg: "#E20613"', app)
         self.assertIn('"Coventry City": { bg: "#77BBE8"', app)
         self.assertIn(".score-picker", css)
         self.assertIn(".score-step", css)
@@ -283,6 +284,127 @@ class NativeShareAndCalendarTests(unittest.TestCase):
         self.assertIn('"content-type": "text/calendar; charset=utf-8"', self.worker)
         self.assertIn("buildFixtureIcs", self.logic)
         self.assertIn("parsePickParam", self.logic)
+
+
+class ClubColourTests(unittest.TestCase):
+    """v1.1.1: approved badge colour refinements. TEAM_MARKERS is the single
+    source for crests, the forecast strip and anywhere else badges are painted."""
+
+    @classmethod
+    def setUpClass(cls):
+        app = (ROOT / "app.js").read_text()
+        block = app[app.index("const TEAM_MARKERS"):]
+        block = block[:block.index("};") + 2]
+        cls.markers = {}
+        for line in block.splitlines():
+            match = re.match(r'\s*"(?P<team>[^"]+)":\s*\{\s*bg:\s*"(?P<bg>#[0-9A-Fa-f]{6})",\s*'
+                             r'fg:\s*"(?P<fg>#[0-9A-Fa-f]{6})",\s*border:\s*"(?P<border>#[0-9A-Fa-f]{6})"', line)
+            if match:
+                cls.markers[match.group("team")] = match.groupdict()
+
+    @staticmethod
+    def _luminance(hex_colour):
+        def channel(value):
+            s = value / 255
+            return s / 12.92 if s <= 0.03928 else ((s + 0.055) / 1.055) ** 2.4
+        r, g, b = (int(hex_colour[i:i + 2], 16) for i in (1, 3, 5))
+        return 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
+
+    @classmethod
+    def _contrast(cls, a, b):
+        la, lb = cls._luminance(a), cls._luminance(b)
+        return (max(la, lb) + 0.05) / (min(la, lb) + 0.05)
+
+    def test_all_twenty_clubs_have_markers(self):
+        self.assertEqual(len(self.markers), 20)
+
+    def test_approved_colour_refinements(self):
+        expected = {
+            "Arsenal": ("#E20613", "#9C824A"),            # brighter red, gold rim kept
+            "Brighton & Hove Albion": ("#0057B8", "#FFCD00"),
+            "AFC Bournemouth": ("#DA291C", "#C8A657"),
+            "Manchester United": ("#DA291C", "#FBE122"),
+            "Nottingham Forest": ("#DD0000", "#D1D5DB"),
+            "Everton": ("#003399", "#D1D5DB"),
+            "Newcastle United": ("#241F20", "#D1D5DB"),
+        }
+        for team, (bg, border) in expected.items():
+            self.assertEqual(self.markers[team]["bg"], bg, team)
+            self.assertEqual(self.markers[team]["border"], border, team)
+
+    def test_untouched_clubs_keep_their_colours(self):
+        # Explicitly excluded from the approved subset.
+        self.assertEqual(self.markers["Crystal Palace"], {
+            "team": "Crystal Palace", "bg": "#1B458F", "fg": "#FFFFFF", "border": "#C4122E"})
+        self.assertEqual(self.markers["Sunderland"], {
+            "team": "Sunderland", "bg": "#E30613", "fg": "#FFFFFF", "border": "#111111"})
+
+    def test_no_badge_border_is_pure_white_on_a_white_card(self):
+        # White rims made the circles vanish against the white match card.
+        for team, marker in self.markers.items():
+            self.assertNotEqual(marker["border"].upper(), "#FFFFFF", team)
+
+    def test_badge_text_clears_wcag_aa(self):
+        for team, marker in self.markers.items():
+            ratio = self._contrast(marker["fg"], marker["bg"])
+            self.assertGreaterEqual(round(ratio, 2), 4.5, f"{team}: {ratio:.2f}")
+
+    def test_new_arsenal_red_improves_on_the_old_one(self):
+        old = self._contrast("#FFFFFF", "#EF0107")
+        new = self._contrast("#FFFFFF", self.markers["Arsenal"]["bg"])
+        self.assertGreater(new, old)
+        self.assertLess(old, 4.5)          # the old red missed AA
+        self.assertGreaterEqual(new, 4.5)  # the new one clears it
+
+
+class MatchweekTerminologyTests(unittest.TestCase):
+    """v1.1.1: users see "Matchweek"; code and data field names stay `matchday`."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = (ROOT / "app.js").read_text()
+        cls.logic = (ROOT / "worker/src/logic.js").read_text()
+        cls.builder = (ROOT / "scripts/build_fixtures.py").read_text()
+        cls.fixtures = json.loads((ROOT / "data/fixtures.json").read_text())["fixtures"]
+
+    def test_no_user_facing_matchday_wording_remains(self):
+        # Targets rendered wording only. Identifiers such as selectedMatchday or
+        # byMatchday legitimately contain "Matchday" and are checked separately.
+        for name, source in (("app.js", self.app), ("worker/src/logic.js", self.logic)):
+            for pattern in (r"Matchday \$\{", r"Matchday \d", r"\d+ matchdays",
+                            r"Opening matchday", r"Next matchday", r"Loading matchday",
+                            r">MD \$\{"):
+                self.assertIsNone(re.search(pattern, source), f"{pattern} still in {name}")
+
+    def test_user_facing_strings_say_matchweek(self):
+        for snippet in (
+            "38 matchweeks",
+            'class="tour-badge">Matchweek ',
+            "Opening matchweek",
+            "Next matchweek",
+            "MW ${value}",
+            "🏆 Matchweek ",
+            "Matchweek ${md} \u25be",
+            "Share Matchweek ",
+            "Loading matchweek",
+            'aria-label="Choose matchweek"',
+        ):
+            self.assertIn(snippet, self.app, snippet)
+        self.assertIn("Matchweek ${match.matchday}", self.logic)
+
+    def test_code_identifiers_and_data_fields_are_unchanged(self):
+        # The football-data field name stays `matchday` everywhere.
+        for identifier in ("selectedMatchday", "matchdayFilter", "currentMatchday",
+                           "nextMatchday", "groupedMatchdays", "match.matchday"):
+            self.assertIn(identifier, self.app, identifier)
+        self.assertTrue(all("matchday" in fixture for fixture in self.fixtures))
+        self.assertFalse(any("matchweek" in fixture for fixture in self.fixtures))
+
+    def test_fixture_round_labels_and_builder_agree(self):
+        self.assertIn('"round": f"Matchweek {matchday}"', self.builder)
+        self.assertNotIn('f"Matchday', self.builder)
+        for fixture in self.fixtures:
+            self.assertEqual(fixture["round"], f"Matchweek {fixture['matchday']}", fixture["id"])
 
 
 if __name__ == "__main__":

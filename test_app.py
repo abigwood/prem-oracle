@@ -20,9 +20,9 @@ class PremOracleTests(unittest.TestCase):
         sw = (ROOT / "sw.js").read_text()
         self.assertIn("Prem Oracle", html)
         self.assertIn("Prem Oracle", manifest)
-        self.assertIn("styles.css?v=20260727b", html)
-        self.assertIn("app.js?v=20260727b", html)
-        self.assertIn("prem-oracle-v1-20260727b", sw)
+        self.assertIn("styles.css?v=20260728a", html)
+        self.assertIn("app.js?v=20260728a", html)
+        self.assertIn("prem-oracle-v1-20260728a", sw)
         self.assertIn("https://prem-oracle-window.abigwood.workers.dev", html)
         self.assertIn("vendor/capacitor/push-notifications.js", html)
         self.assertIn("vendor/capacitor/share.js", html)
@@ -378,7 +378,7 @@ class MatchweekTerminologyTests(unittest.TestCase):
 
     def test_user_facing_strings_say_matchweek(self):
         for snippet in (
-            "38 matchweeks",
+            'countPhrase(38, "Matchweeks")',
             'class="tour-badge">Matchweek ',
             "Opening matchweek",
             "Next matchweek",
@@ -405,6 +405,129 @@ class MatchweekTerminologyTests(unittest.TestCase):
         self.assertNotIn('f"Matchday', self.builder)
         for fixture in self.fixtures:
             self.assertEqual(fixture["round"], f"Matchweek {fixture['matchday']}", fixture["id"])
+
+
+class CustomMixTests(unittest.TestCase):
+    """v1.2: the host-curated slate, from the creation toggle to the picker."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = (ROOT / "app.js").read_text()
+        cls.css = (ROOT / "styles.css").read_text()
+        cls.worker = (ROOT / "worker/src/worker.js").read_text()
+        cls.logic = (ROOT / "worker/src/logic.js").read_text()
+
+    def test_custom_mix_is_opt_in_at_league_creation(self):
+        self.assertIn('<strong>Custom matchweek picks</strong>', self.app)
+        self.assertIn('name="customMix"', self.app)
+        # Off by default: no `checked`, and the flag is only sent when ticked.
+        toggle = self.app[self.app.index('name="customMix"'):][:120]
+        self.assertNotIn("checked", toggle)
+        self.assertIn('const customMix = form.get("customMix") != null;', self.app)
+        # Existing leagues are untouched — the worker defaults the flag to false.
+        self.assertIn("const customMix = body.customMix === true;", self.worker)
+
+    def test_picker_offers_six_to_ten_with_surprise_me_and_use_all(self):
+        self.assertIn("const SLATE_MIN = 6;", self.app)
+        self.assertIn("const SLATE_MAX = 10;", self.app)
+        self.assertIn("Select ${SLATE_MIN}–${SLATE_MAX} · ${count} selected", self.app)
+        self.assertIn("data-picker-surprise", self.app)
+        self.assertIn("Surprise me", self.app)
+        self.assertIn("Use all ${list.length} this week", self.app)
+        self.assertIn("Set ${count} fixtures", self.app)
+        # The CTA only activates from six selections.
+        self.assertIn("count < SLATE_MIN || count > SLATE_MAX ? \"disabled\" : \"\"", self.app)
+
+    def test_surprise_me_deals_an_editable_random_eight(self):
+        self.assertIn("const SURPRISE_COUNT = 8;", self.app)
+        self.assertIn("Math.min(SURPRISE_COUNT, pool.length)", self.app)
+        # Applied as an ordinary selection: same mode, so every card stays tappable.
+        surprise = self.app[self.app.index("[data-picker-surprise]"):][:260]
+        self.assertIn("pickerSelection = surpriseSelection(pickerFixtures())", surprise)
+        self.assertIn('pickerMode = "custom"', surprise)
+
+    def test_setting_a_slate_needs_one_confirmation_that_says_it_is_final(self):
+        self.assertIn("Your league cannot change them after this.", self.app)
+        self.assertIn("data-picker-commit", self.app)
+        self.assertIn("picker-confirm-scrim", self.css)
+        # Use-all-10 is an explicit full-week record, not a silent absence.
+        use_all = self.app[self.app.index('[data-picker-all]'):][:220]
+        self.assertIn('pickerMode = "full"', use_all)
+
+    def test_members_get_a_calm_waiting_state_then_fewer_cards(self):
+        self.assertIn("Waiting for ${escapeHTML(hostNickname())} to set this week's fixtures", self.app)
+        self.assertNotIn("spinner", self.app)
+        # Only the slate fixtures are rendered once it is set.
+        self.assertIn("dayMatches = dayMatches.filter((fixture) => chosen.has(String(fixture.id)))", self.app)
+        self.assertIn("You've picked ${pickedCount} of ${roundFixtures.length}", self.app)
+
+    def test_host_banner_names_the_matchweek(self):
+        self.assertIn("Pick fixtures for Matchweek ${matchweek}", self.app)
+        self.assertIn("Pick fixtures for Matchweek ${state.currentMatchday}", self.app)
+
+    def test_worker_routes_and_storage_key(self):
+        for route in ("/league/slate", "/league/custom-mix", "/account/delete"):
+            self.assertIn(f'path === "{route}"', self.worker)
+        self.assertIn("`custom_slate:${code}:${matchweek}`", self.logic)
+        # Immutable once set.
+        self.assertIn('return json({ error: "this matchweek\'s fixtures are already set", slate: existing }, 409, env);', self.worker)
+
+    def test_fallback_lead_time_is_a_day_not_two_hours(self):
+        self.assertIn("const FALLBACK_LEAD_MS = 24 * 60 * 60 * 1000;", self.worker)
+        self.assertNotIn("2 * 60 * 60 * 1000", self.worker)
+
+
+class TrophyTests(unittest.TestCase):
+    """v1.2: the weekly podium and the personal Trophy Cabinet."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = (ROOT / "app.js").read_text()
+        cls.css = (ROOT / "styles.css").read_text()
+        cls.logic = (ROOT / "worker/src/logic.js").read_text()
+
+    def test_podium_is_points_only_competition_ranking(self):
+        self.assertIn('export const PODIUM_PLACES = ["gold", "silver", "bronze"];', self.logic)
+        self.assertIn("const rank = rows.filter((other) => other.pts > row.pts).length + 1;", self.logic)
+        # Explicit small-league guard rather than assuming a third player exists.
+        self.assertIn("const places = Math.min(PODIUM_PLACES.length, memberCount);", self.logic)
+        # Zero suppression, matching the existing winner rule.
+        self.assertIn("if (!rows.length || rows[0].pts <= 0) return [];", self.logic)
+
+    def test_cabinet_needs_no_new_stored_state(self):
+        self.assertIn("export function computeCabinet(", self.logic)
+        # The only new KV key in v1.2 is the slate itself.
+        new_keys = re.findall(r"kvPut\(env, `([a-z_]+):", (ROOT / "worker/src/worker.js").read_text())
+        self.assertNotIn("cabinet", new_keys)
+        self.assertNotIn("podium", new_keys)
+
+    def test_cabinet_shelf_and_week_by_week(self):
+        self.assertIn("trophy cabinet", self.app)
+        self.assertIn("Week by week", self.app)
+        self.assertIn('PLACE_EMOJI = { gold: "🏆", silver: "🥈", bronze: "🥉" }', self.app)
+        # An empty ring for a week without an award.
+        self.assertIn("cab-award-none", self.app)
+        self.assertIn(".cab-award-none", self.css)
+        # Slate type, fixture count and points on every row.
+        self.assertIn('week.slateType === "custom" ? "Custom Mix" : "Full card"', self.app)
+        self.assertIn("countPhrase(week.fixtures,", self.app)
+        self.assertIn('countPhrase(week.pts, "pts")', self.app)
+
+    def test_winner_banner_extends_to_a_podium(self):
+        self.assertIn("function podiumStrip(round)", self.app)
+        self.assertIn("podium-strip", self.css)
+        self.assertIn("Matchweek ${md} complete — won by", self.app)
+
+    def test_number_and_word_pairs_wrap_as_one_unit(self):
+        self.assertIn(".nowrap { white-space: nowrap; }", self.css)
+        self.assertIn('function countPhrase(count, word)', self.app)
+        for phrase in ('countPhrase(38, "Matchweeks")',
+                       'countPhrase(380, "fixtures")',
+                       '<span class="nowrap">Game ${homeMatchday} of 38</span>',
+                       '<span class="nowrap">Game ${md} of 38 ·</span>'):
+            self.assertIn(phrase, self.app, phrase)
+        # The separator rides inside the wrapper, so a line never opens with "·".
+        self.assertNotIn("of 38</span> ·", self.app)
 
 
 if __name__ == "__main__":

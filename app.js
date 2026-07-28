@@ -1,6 +1,6 @@
 const SEASON_START = new Date("2026-08-21T20:00:00+01:00");
 const SEASON_START_DATE = "2026-08-21";
-const APP_BUILD = "20260727b";
+const APP_BUILD = "20260728a";
 const API = window.PREM_API || null;
 // Canonical public home of the web app. Inside the Capacitor shell the page is
 // served from premoracle://localhost, so location.origin can never be used to
@@ -125,6 +125,14 @@ let flashTone = "success";
 let openScheduleDates = new Set();
 let updateReloading = false;
 let pendingUpdateReload = false;
+// Custom Mix host Fixture Picker. Held outside the view functions because the
+// picker is a full-screen layer over whichever tab the host opened it from.
+let pickerOpen = false;
+let pickerMatchweek = null;
+let pickerSelection = new Set();
+let pickerMode = "custom";
+let pickerConfirmOpen = false;
+let pickerBusy = false;
 // Invite code from the launch URL (web query string). Mutable because native
 // universal links deliver it later via the Capacitor appUrlOpen event.
 let inviteCode = new URLSearchParams(location.search).get("league")?.toUpperCase() || "";
@@ -228,7 +236,9 @@ function leagueSupportsRounds(state) {
 async function loadLeagueState() {
   if (!activeLeague || !API) { leagueState = null; roundState = null; return; }
   try {
-    leagueState = await api(`/state?code=${encodeURIComponent(activeLeague)}`);
+    // `uid` asks the worker for this viewer's own Trophy Cabinet alongside the
+    // table; older workers simply ignore it.
+    leagueState = await api(`/state?code=${encodeURIComponent(activeLeague)}&uid=${encodeURIComponent(uid())}`);
     saveLeagueName(leagueState.code, leagueState.name);
   } catch (error) {
     roundState = null;
@@ -423,18 +433,24 @@ function daysToStart(now = new Date()) {
   const today = londonDateKey(now);
   if (today >= SEASON_START_DATE) return "Premier League starts today";
   const days = calendarDayDiff(today, SEASON_START_DATE);
-  return `${days} day${days === 1 ? "" : "s"} until Arsenal v Coventry`;
+  return `${countPhrase(days, days === 1 ? "day" : "days")} until Arsenal v Coventry`;
 }
 
 function playerInitial() {
   return (playerName.trim()[0] || "?").toUpperCase();
 }
 
+// A number and the word it counts must break as one unit — "38" stranded at the
+// end of a line above "Matchweeks" reads as a different number entirely.
+function countPhrase(count, word) {
+  return `<span class="nowrap">${count} ${escapeHTML(word)}</span>`;
+}
+
 function hero() {
   return `<section class="hero">
-    <span class="eyebrow">Premier League 2026/27 · 38 matchweeks</span>
+    <span class="eyebrow">Premier League 2026/27 · ${countPhrase(38, "Matchweeks")}</span>
     <h1>Predict the scores.</h1>
-    <p>All 380 fixtures. Private leagues. Picks lock at kick-off.</p>
+    <p>All ${countPhrase(380, "fixtures")}. Private leagues. Picks lock at kick-off.</p>
     <div class="countdown">⚽ <span>${daysToStart()}</span></div>
   </section>`;
 }
@@ -726,7 +742,7 @@ function groupedMatchdays(list) {
     return `<details class="day-card" data-day-card="${key}" ${open ? "open" : ""}>
       <summary>
         <div><strong>Matchweek ${matchday}</strong><span>${firstDate ? dateLabel(firstDate, true) : ""}</span></div>
-        <span>${matches.length} fixtures</span>
+        <span>${countPhrase(matches.length, matches.length === 1 ? "fixture" : "fixtures")}</span>
       </summary>
       <div class="day-body">${matches.map(matchCard).join("")}</div>
     </details>`;
@@ -737,6 +753,50 @@ function nextMatchday() {
   const now = Date.now();
   const upcoming = fixtures.find((fixture) => Date.parse(fixture.startAt || "") > now);
   return upcoming?.matchday || fixtures[0]?.matchday || 1;
+}
+
+// --- Custom Mix ------------------------------------------------------------
+// From the member's side Custom Mix is meant to be invisible: the Next tab
+// simply shows fewer cards. Everything here is a read of the league state the
+// app already holds, so a league that isn't running Custom Mix is untouched.
+
+function isLeagueHost() {
+  return !!leagueState && !leagueState.error && leagueState.owner === uid();
+}
+
+function customMixActive() {
+  return !!leagueState && !leagueState.error && leagueState.customMix === true;
+}
+
+// The slate governing a matchweek, or null while the host has yet to set one.
+function slateForMatchweek(matchweek) {
+  const slate = leagueState?.currentSlate;
+  return slate && slate.matchweek === matchweek ? slate : null;
+}
+
+function hostNickname() {
+  return (leagueState?.table || []).find((row) => row.uid === leagueState?.owner)?.nick || "your host";
+}
+
+// True while a Custom Mix league is waiting on its host for this matchweek.
+function awaitingSlate(matchweek) {
+  return customMixActive() && leagueState?.currentMatchday === matchweek && !slateForMatchweek(matchweek);
+}
+
+function slateNotice(matchweek) {
+  if (!awaitingSlate(matchweek)) return "";
+  if (isLeagueHost()) {
+    return `<div class="slate-notice slate-notice-host">
+      <p>You pick this week's fixtures for ${escapeHTML(leagueState.name)}.</p>
+      <button class="primary wide" type="button" data-open-picker="${matchweek}">Pick fixtures for Matchweek ${matchweek}</button>
+    </div>`;
+  }
+  return `<div class="slate-notice"><p>Waiting for ${escapeHTML(hostNickname())} to set this week's fixtures</p></div>`;
+}
+
+function slateSummary(slate) {
+  if (!slate || slate.mode !== "custom") return "";
+  return `<p class="slate-summary">Custom Mix · ${countPhrase(slate.count, slate.count === 1 ? "fixture" : "fixtures")} this week</p>`;
 }
 
 function todayView() {
@@ -751,16 +811,25 @@ function todayView() {
     subtitle = `Matchweek ${md}`;
   }
   const homeMatchday = dayMatches[0]?.matchday ?? nextMatchday();
-  const roundFixtures = fixtures.filter((fixture) => fixture.matchday === homeMatchday);
+  const slate = slateForMatchweek(homeMatchday);
+  const waiting = awaitingSlate(homeMatchday);
+  if (slate) {
+    const chosen = new Set(slate.fixtureIds.map(String));
+    dayMatches = dayMatches.filter((fixture) => chosen.has(String(fixture.id)));
+  }
+  const roundFixtures = slate
+    ? fixtures.filter((fixture) => slate.fixtureIds.map(String).includes(String(fixture.id)))
+    : fixtures.filter((fixture) => fixture.matchday === homeMatchday);
   const pickedCount = roundFixtures.filter((fixture) => picks[fixture.id]).length;
-  const progress = roundFixtures.length
+  const progress = roundFixtures.length && !waiting
     ? `<p class="pick-progress">You've picked ${pickedCount} of ${roundFixtures.length}</p>`
     : "";
   return `${hero()}${installNotice()}${inviteCode && !leagueCodes.includes(inviteCode) ? `<div class="notice invite-notice"><span class="notice-icon">🏆</span><div><strong>League invitation: ${inviteCode}</strong><p>Open the League tab to join.</p></div></div>` : ""}${fixtureNotice()}
     <div class="section-head">
-      <div><span class="eyebrow">Next up · Game ${homeMatchday} of 38</span><h2>${title}</h2><p>${subtitle}</p>${progress}</div>
+      <div><span class="eyebrow">Next up · <span class="nowrap">Game ${homeMatchday} of 38</span></span><h2>${title}</h2><p>${subtitle}</p>${slateSummary(slate)}${progress}</div>
     </div>
-    ${dayMatches.map(matchCard).join("")}`;
+    ${slateNotice(homeMatchday)}
+    ${waiting ? "" : dayMatches.map(matchCard).join("")}`;
 }
 
 function scheduleView() {
@@ -872,24 +941,43 @@ function seasonBanner(state) {
   return `<div class="round-banner"><strong>Season 2026/27</strong><span>${detail}</span></div>`;
 }
 
+// Slate line under a matchweek banner, so a curated week is always legible as
+// one — and a full card never grows a label it doesn't need.
+function roundSlateLine(round) {
+  if (round?.slate?.mode !== "custom") return "";
+  const count = round.slate.count;
+  return `<span class="round-slate">Custom Mix · ${countPhrase(count, count === 1 ? "fixture" : "fixtures")}</span>`;
+}
+
+// The weekly podium: one strip, up to three names, gold first.
+function podiumStrip(round) {
+  const podium = round?.podium || [];
+  if (!podium.length) return "";
+  return `<div class="podium-strip">${podium.map((entry) =>
+    `<span class="podium-place podium-${entry.place}"><i aria-hidden="true">${PLACE_EMOJI[entry.place]}</i><span>${escapeHTML(entry.nick)}</span><b>${entry.pts}</b></span>`
+  ).join("")}</div>`;
+}
+
 function roundBanner(round) {
   const md = round.matchday;
   if (round.complete) {
     const names = winnerNames(round);
-    return `<div class="round-banner is-success"><strong>Matchweek ${md} complete — won by ${names ? escapeHTML(names) : "nobody"} 🏆</strong><span>Game ${md} of 38 · all fixtures settled</span></div>`;
+    return `<div class="round-banner is-success"><strong>Matchweek ${md} complete — won by ${names ? escapeHTML(names) : "nobody"} 🏆</strong><span><span class="nowrap">Game ${md} of 38 ·</span>all fixtures settled</span>${roundSlateLine(round)}${podiumStrip(round)}</div>`;
   }
   if (!round.status || round.status === "in progress") {
-    return `<div class="round-banner"><strong>Game ${md} of 38 · in progress</strong></div>`;
+    return `<div class="round-banner"><strong><span class="nowrap">Game ${md} of 38 ·</span>in progress</strong>${roundSlateLine(round)}</div>`;
   }
-  return `<div class="round-banner is-pending"><strong>Game ${md} of 38 · ${escapeHTML(round.status)}</strong></div>`;
+  return `<div class="round-banner is-pending"><strong><span class="nowrap">Game ${md} of 38 ·</span>${escapeHTML(round.status)}</strong>${roundSlateLine(round)}</div>`;
 }
 
 function roundTableHtml(round) {
-  const winners = new Set(round.complete ? round.winners || [] : []);
+  const awards = new Map((round.complete ? round.podium || [] : []).map((entry) => [entry.uid, entry.place]));
   return `<table class="table round-standings"><thead><tr><th>Player</th><th>Pts</th><th>Exact</th></tr></thead>
-    <tbody>${(round.table || []).map((row, index) =>
-      `<tr><td>${row.rank || index + 1}. ${escapeHTML(row.nick)}${winners.has(row.uid) ? ` <span class="crown" aria-label="Round winner">👑</span>` : ""}</td><td>${row.pts}</td><td>${row.exact}</td></tr>`
-    ).join("")}</tbody></table>`;
+    <tbody>${(round.table || []).map((row, index) => {
+      const place = awards.get(row.uid);
+      const medal = place ? ` <span class="crown" aria-label="Matchweek ${place}">${PLACE_EMOJI[place]}</span>` : "";
+      return `<tr><td>${row.rank || index + 1}. ${escapeHTML(row.nick)}${medal}</td><td>${row.pts}</td><td>${row.exact}</td></tr>`;
+    }).join("")}</tbody></table>`;
 }
 
 function seasonTableHtml(state, isOwner, withWins) {
@@ -1078,6 +1166,165 @@ async function shareLeagueTableGraphic(state) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
+// --- Host Fixture Picker ---------------------------------------------------
+
+const SLATE_MIN = 6;
+const SLATE_MAX = 10;
+const SURPRISE_COUNT = 8;
+
+function pickerFixtures() {
+  return fixtures
+    .filter((fixture) => fixture.matchday === pickerMatchweek)
+    .sort((a, b) => (Date.parse(a.startAt || "") || 0) - (Date.parse(b.startAt || "") || 0) ||
+      String(a.id).localeCompare(String(b.id)));
+}
+
+function pickerKickoff(match) {
+  if (!match.startAt) return match.time || "Time TBC";
+  return new Intl.DateTimeFormat("en-GB", {
+    weekday: "short", hour: "2-digit", minute: "2-digit", timeZone: "Europe/London",
+  }).format(new Date(match.startAt));
+}
+
+// "Surprise me" is a starting point, not a mode: it drops a random eight into
+// the ordinary selection, so every fixture stays swappable and another tap
+// simply re-rolls. Pure client-side randomness — nothing is stored, and members
+// never learn a slate was dealt rather than chosen.
+function surpriseSelection(list) {
+  const pool = [...list];
+  for (let i = pool.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [pool[i], pool[j]] = [pool[j], pool[i]];
+  }
+  return new Set(pool.slice(0, Math.min(SURPRISE_COUNT, pool.length)).map((fixture) => String(fixture.id)));
+}
+
+function openFixturePicker(matchweek) {
+  pickerOpen = true;
+  pickerMatchweek = Number(matchweek);
+  pickerSelection = new Set();
+  pickerMode = "custom";
+  pickerConfirmOpen = false;
+  pickerBusy = false;
+}
+
+function closeFixturePicker() {
+  pickerOpen = false;
+  pickerConfirmOpen = false;
+  pickerSelection = new Set();
+  pickerMatchweek = null;
+  pickerBusy = false;
+}
+
+function pickerRow(match) {
+  const selected = pickerSelection.has(String(match.id));
+  return `<button type="button" class="picker-row${selected ? " is-selected" : ""}" data-picker-fixture="${escapeHTML(match.id)}" aria-pressed="${selected}">
+    <span class="picker-teams">${teamBadge(match.player1)}<em>v</em>${teamBadge(match.player2)}</span>
+    <span class="picker-kickoff">${escapeHTML(pickerKickoff(match))}</span>
+    <span class="picker-tick" aria-hidden="true"></span>
+    <span class="sr-only">${escapeHTML(`${match.player1} v ${match.player2}`)}</span>
+  </button>`;
+}
+
+function pickerConfirm(total) {
+  if (!pickerConfirmOpen) return "";
+  const count = pickerSelection.size;
+  return `<div class="picker-confirm-scrim">
+    <div class="picker-confirm" role="dialog" aria-modal="true" aria-label="Confirm fixtures">
+      <strong>${pickerMode === "full" ? `Use all ${total} fixtures?` : `Set these ${count} fixtures?`}</strong>
+      <p>Your league cannot change them after this.</p>
+      <div class="picker-confirm-actions">
+        <button class="secondary" type="button" data-picker-cancel ${pickerBusy ? "disabled" : ""}>Back</button>
+        <button class="primary" type="button" data-picker-commit ${pickerBusy ? "disabled" : ""}>${pickerBusy ? "Setting…" : "Set fixtures"}</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+// The picker is mounted on <body>, not inside #app. A position:fixed element
+// nested in `main` is clipped to that scroller by WKWebView (main carries
+// -webkit-overflow-scrolling: touch), which left the overlay tucked under the
+// header and above the tab bar in the native shell.
+function renderPickerLayer() {
+  let layer = document.getElementById("pickerLayer");
+  if (!layer) {
+    layer = document.createElement("div");
+    layer.id = "pickerLayer";
+    document.body.append(layer);
+  }
+  layer.innerHTML = fixturePickerView();
+  document.body.classList.toggle("picker-open", pickerOpen);
+}
+
+function fixturePickerView() {
+  if (!pickerOpen) return "";
+  const list = pickerFixtures();
+  const count = pickerSelection.size;
+  const leagueName = leagueState?.name || "your league";
+  return `<div class="picker-overlay" role="dialog" aria-modal="true" aria-label="Pick your fixtures">
+    <header class="picker-head">
+      <div><h2>Pick your fixtures</h2><p>Matchweek ${pickerMatchweek} · ${escapeHTML(leagueName)}</p></div>
+      <button class="picker-close" type="button" data-picker-close aria-label="Close fixture picker">×</button>
+    </header>
+    <div class="picker-counter">
+      <strong>Select ${SLATE_MIN}–${SLATE_MAX} · ${count} selected</strong>
+      <button class="picker-dice" type="button" data-picker-surprise>🎲 <span>Surprise me</span></button>
+    </div>
+    <div class="picker-list">${list.map(pickerRow).join("")}</div>
+    <div class="picker-actions">
+      <button class="picker-secondary" type="button" data-picker-all>Use all ${list.length} this week</button>
+      <button class="primary wide" type="button" data-picker-set ${count < SLATE_MIN || count > SLATE_MAX ? "disabled" : ""}>Set ${count} fixtures</button>
+    </div>
+    ${pickerConfirm(list.length)}
+  </div>`;
+}
+
+// --- Trophy Cabinet --------------------------------------------------------
+
+const PLACE_EMOJI = { gold: "🏆", silver: "🥈", bronze: "🥉" };
+const ORDINALS = ["", "1st", "2nd", "3rd"];
+
+function ordinal(rank) {
+  if (ORDINALS[rank]) return ORDINALS[rank];
+  const remainder = rank % 100;
+  if (remainder >= 11 && remainder <= 13) return `${rank}th`;
+  return `${rank}${({ 1: "st", 2: "nd", 3: "rd" })[rank % 10] || "th"}`;
+}
+
+function cabinetWeek(week) {
+  const award = week.place
+    ? `<span class="cab-award" aria-label="${week.place}">${PLACE_EMOJI[week.place]}</span>`
+    : `<span class="cab-award cab-award-none" aria-label="No podium"></span>`;
+  const slate = week.slateType === "custom" ? "Custom Mix" : "Full card";
+  return `<li class="cabinet-week">
+    ${award}
+    <div class="cabinet-week-main">
+      <strong>Matchweek ${week.matchweek}</strong>
+      <span>${slate} · ${countPhrase(week.fixtures, week.fixtures === 1 ? "fixture" : "fixtures")}</span>
+    </div>
+    <b>${countPhrase(week.pts, "pts")}${week.place ? "" : ` · ${ordinal(week.rank)}`}</b>
+  </li>`;
+}
+
+function trophyCabinet(state) {
+  const cabinet = state?.cabinet;
+  if (!cabinet) return "";
+  const shelf = ["gold", "silver", "bronze"].map((place) =>
+    `<div class="cab-slot"><span class="cab-emoji">${PLACE_EMOJI[place]}</span><b>× ${cabinet[place] || 0}</b></div>`
+  ).join("");
+  return `<section class="cabinet">
+    <h3>${escapeHTML(cabinet.nick || "Your")}'s trophy cabinet</h3>
+    <div class="cabinet-shelf">
+      ${shelf}
+      <div class="cab-slot cab-total"><b>${cabinet.podiums || 0}</b><span>podiums</span></div>
+    </div>
+    <h4>Week by week</h4>
+    ${cabinet.weeks?.length
+      ? `<ul class="cabinet-weeks">${cabinet.weeks.map(cabinetWeek).join("")}</ul>`
+      : `<p class="muted">Your first matchweek award lands here once a round is settled.</p>`}
+  </section>`;
+}
+
 function leagueView() {
   const recovery = localStorage.getItem(STORAGE.recovery);
   const joinDefault = inviteCode && !leagueCodes.includes(inviteCode) ? inviteCode : "";
@@ -1085,6 +1332,10 @@ function leagueView() {
     <form class="league-form" data-create-league>
       <span class="eyebrow">Start a competition</span><h3>Create a league</h3>
       <input name="leagueName" maxlength="40" placeholder="Saturday Super 6" required>
+      <label class="league-toggle">
+        <input type="checkbox" name="customMix">
+        <span><strong>Custom matchweek picks</strong><em>Host chooses ${SLATE_MIN}–${SLATE_MAX} fixtures each week</em></span>
+      </label>
       <button class="primary wide" type="submit">Create league</button>
     </form>
     <form class="league-form" data-join-league>
@@ -1116,7 +1367,7 @@ function leagueView() {
         ? `<div class="empty"><strong>${escapeHTML(roundState.error)}</strong></div>`
         : `${roundBanner(roundState)}${roundTableHtml(roundState)}`;
   } else if (supportsRounds) {
-    inner = `${seasonBanner(state)}${seasonTableHtml(state, isOwner, true)}${leagueRevealsHtml(state)}`;
+    inner = `${seasonBanner(state)}${seasonTableHtml(state, isOwner, true)}${trophyCabinet(state)}${leagueRevealsHtml(state)}`;
   } else if (state && !state.error) {
     // Resilient fallback: an old worker response without round data.
     inner = `${seasonTableHtml(state, isOwner, false)}${leagueRevealsHtml(state)}`;
@@ -1129,6 +1380,9 @@ function leagueView() {
           <span class="eyebrow">Private predictor league</span>
           <h2>${escapeHTML(state.name)}</h2>
           <div class="league-code"><span>League code</span><strong>${state.code}</strong></div>
+          ${isOwner && state.customMix && state.currentMatchday != null && !state.currentSlate
+            ? `<button class="primary wide host-slate-banner" type="button" data-open-picker="${state.currentMatchday}">Pick fixtures for Matchweek ${state.currentMatchday}</button>`
+            : ""}
           <button class="secondary wide" type="button" data-share-league="${state.code}">Invite mates</button>
           <button class="secondary wide" type="button" data-league-nick="${state.code}">Change my name in this league</button>
           ${isOwner ? `<button class="link-danger" type="button" data-delete-league="${state.code}">Delete league</button>` : ""}
@@ -1194,6 +1448,7 @@ function render(options = {}) {
   const app = document.getElementById("app");
   const views = { today: todayView, schedule: scheduleView, picks: picksView, league: leagueView, rules: rulesView };
   app.innerHTML = (views[currentView] || todayView)();
+  renderPickerLayer();
   document.getElementById("profileInitial").textContent = playerInitial();
   document.querySelectorAll(".bottom-nav button").forEach((button) => button.classList.toggle("active", button.dataset.view === currentView));
   if (options.anchorMatchId) {
@@ -1230,7 +1485,86 @@ async function navigateToView(view) {
   }
 }
 
+// Commits the slate. Immutable server-side, so this runs once and then the
+// picker closes for good — every later matchweek gets its own picker.
+async function commitSlate() {
+  const matchweek = pickerMatchweek;
+  const mode = pickerMode;
+  const fixtureIds = [...pickerSelection];
+  pickerBusy = true;
+  render();
+  try {
+    await api("/league/slate", { uid: uid(), code: activeLeague, matchweek, mode, fixtureIds });
+    closeFixturePicker();
+    setFlash(`Matchweek ${matchweek} is set — ${fixtureIds.length} fixtures.`);
+    await loadLeagueState();
+  } catch (error) {
+    pickerBusy = false;
+    pickerConfirmOpen = false;
+    setFlash(error.message, "error");
+  }
+  render();
+}
+
+async function handlePickerClick(event) {
+  const open = event.target.closest("[data-open-picker]");
+  if (open) {
+    openFixturePicker(open.dataset.openPicker);
+    render();
+    return true;
+  }
+  if (!pickerOpen) return false;
+  if (event.target.closest("[data-picker-commit]")) {
+    if (!pickerBusy) await commitSlate();
+    return true;
+  }
+  // Dismiss on the Back button, or on a direct hit outside the half-modal —
+  // never on a click that merely bubbled up through the dialog itself.
+  if (event.target.closest("[data-picker-cancel]") || event.target.classList?.contains("picker-confirm-scrim")) {
+    if (!pickerBusy) { pickerConfirmOpen = false; render(); }
+    return true;
+  }
+  if (pickerConfirmOpen) return true;
+  if (event.target.closest("[data-picker-close]")) {
+    closeFixturePicker();
+    render();
+    return true;
+  }
+  if (event.target.closest("[data-picker-surprise]")) {
+    pickerSelection = surpriseSelection(pickerFixtures());
+    pickerMode = "custom";
+    render();
+    return true;
+  }
+  if (event.target.closest("[data-picker-all]")) {
+    pickerSelection = new Set(pickerFixtures().map((fixture) => String(fixture.id)));
+    pickerMode = "full";
+    pickerConfirmOpen = true;
+    render();
+    return true;
+  }
+  if (event.target.closest("[data-picker-set]")) {
+    if (pickerSelection.size >= SLATE_MIN && pickerSelection.size <= SLATE_MAX) {
+      pickerMode = "custom";
+      pickerConfirmOpen = true;
+      render();
+    }
+    return true;
+  }
+  const row = event.target.closest("[data-picker-fixture]");
+  if (row) {
+    const id = row.dataset.pickerFixture;
+    if (pickerSelection.has(id)) pickerSelection.delete(id);
+    else pickerSelection.add(id);
+    pickerMode = "custom";
+    render();
+    return true;
+  }
+  return !!event.target.closest(".picker-overlay");
+}
+
 document.addEventListener("click", async (event) => {
+  if (await handlePickerClick(event)) return;
   const nav = event.target.closest("[data-view]");
   if (nav) {
     await navigateToView(nav.dataset.view);
@@ -1449,9 +1783,11 @@ async function savePick(matchId, p1, p2) {
 document.addEventListener("submit", async (event) => {
   if (event.target.matches("[data-create-league]")) {
     event.preventDefault();
-    const name = new FormData(event.target).get("leagueName");
+    const form = new FormData(event.target);
+    const name = form.get("leagueName");
+    const customMix = form.get("customMix") != null;
     try {
-      const response = await api("/league", { uid: uid(), nickname: playerName, name });
+      const response = await api("/league", { uid: uid(), nickname: playerName, name, customMix });
       saveLeague(response.code);
       saveLeagueName(response.code, response.name);
       if (response.recovery) localStorage.setItem(STORAGE.recovery, response.recovery);

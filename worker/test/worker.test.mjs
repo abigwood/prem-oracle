@@ -68,8 +68,8 @@ test("serves apple app site association for universal links", async () => {
 test("manual settlement preserves previous fixture results", async () => {
   const originalFetch = globalThis.fetch;
   const fixtures = [
-    { id: "md1-001", player1: "Arsenal", player2: "Coventry City", startAt: "2026-08-21T20:00:00+01:00" },
-    { id: "md2-001", player1: "Liverpool", player2: "Nottingham Forest", startAt: "2026-08-29T15:00:00+01:00" },
+    { id: "pl-2026-27-001-arsenal-coventry-city", player1: "Arsenal", player2: "Coventry City", startAt: "2026-08-21T20:00:00+01:00" },
+    { id: "pl-2026-27-002-hull-city-manchester-united", player1: "Liverpool", player2: "Nottingham Forest", startAt: "2026-08-29T15:00:00+01:00" },
   ];
   globalThis.fetch = async () => new Response(JSON.stringify({ fixtures }), { status: 200 });
   const store = new Map();
@@ -86,18 +86,18 @@ test("manual settlement preserves previous fixture results", async () => {
     body: JSON.stringify({ secret: "test-secret", results }),
   }), env);
   try {
-    let response = await settle({ "md1-001": { status: "complete", result: [2, 1] } });
+    let response = await settle({ "pl-2026-27-001-arsenal-coventry-city": { status: "complete", result: [2, 1] } });
     assert.equal(response.status, 200);
-    response = await settle({ "md2-001": { status: "complete", result: [0, 0] } });
+    response = await settle({ "pl-2026-27-002-hull-city-manchester-united": { status: "complete", result: [0, 0] } });
     assert.equal(response.status, 200);
-    const results = JSON.parse(store.get("results"));
-    assert.deepEqual(Object.keys(results).sort(), ["md1-001", "md2-001"]);
-    assert.deepEqual(results["md1-001"].result, [2, 1]);
-    assert.deepEqual(results["md2-001"].result, [0, 0]);
-    assert.equal(results["md1-001"].status, "complete");
-    assert.equal(results["md2-001"].status, "complete");
-    assert.ok(results["md1-001"].lockAt);
-    assert.ok(results["md2-001"].lockAt);
+    const results = JSON.parse(store.get("results:PL"));
+    assert.deepEqual(Object.keys(results).sort(), ["pl-2026-27-001-arsenal-coventry-city", "pl-2026-27-002-hull-city-manchester-united"]);
+    assert.deepEqual(results["pl-2026-27-001-arsenal-coventry-city"].result, [2, 1]);
+    assert.deepEqual(results["pl-2026-27-002-hull-city-manchester-united"].result, [0, 0]);
+    assert.equal(results["pl-2026-27-001-arsenal-coventry-city"].status, "complete");
+    assert.equal(results["pl-2026-27-002-hull-city-manchester-united"].status, "complete");
+    assert.ok(results["pl-2026-27-001-arsenal-coventry-city"].lockAt);
+    assert.ok(results["pl-2026-27-002-hull-city-manchester-united"].lockAt);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -106,8 +106,8 @@ test("manual settlement preserves previous fixture results", async () => {
 test("manual settle deletes a fixture result when passed null", async () => {
   const originalFetch = globalThis.fetch;
   const fixtures = [
-    { id: "md1-001", player1: "Arsenal", player2: "Coventry City", startAt: "2026-08-21T20:00:00+01:00" },
-    { id: "md2-001", player1: "Liverpool", player2: "Nottingham Forest", startAt: "2026-08-29T15:00:00+01:00" },
+    { id: "pl-2026-27-001-arsenal-coventry-city", player1: "Arsenal", player2: "Coventry City", startAt: "2026-08-21T20:00:00+01:00" },
+    { id: "pl-2026-27-002-hull-city-manchester-united", player1: "Liverpool", player2: "Nottingham Forest", startAt: "2026-08-29T15:00:00+01:00" },
   ];
   globalThis.fetch = async () => new Response(JSON.stringify({ fixtures }), { status: 200 });
   const store = new Map();
@@ -124,15 +124,15 @@ test("manual settle deletes a fixture result when passed null", async () => {
     body: JSON.stringify({ secret: "test-secret", results }),
   }), env);
   try {
-    await settle({ "md1-001": { status: "complete", result: [2, 1] } });
-    await settle({ "md2-001": { status: "complete", result: [0, 0] } });
-    assert.deepEqual(Object.keys(JSON.parse(store.get("results"))).sort(), ["md1-001", "md2-001"]);
+    await settle({ "pl-2026-27-001-arsenal-coventry-city": { status: "complete", result: [2, 1] } });
+    await settle({ "pl-2026-27-002-hull-city-manchester-united": { status: "complete", result: [0, 0] } });
+    assert.deepEqual(Object.keys(JSON.parse(store.get("results:PL"))).sort(), ["pl-2026-27-001-arsenal-coventry-city", "pl-2026-27-002-hull-city-manchester-united"]);
 
-    const response = await settle({ "md1-001": null });
+    const response = await settle({ "pl-2026-27-001-arsenal-coventry-city": null });
     assert.equal(response.status, 200);
-    const results = JSON.parse(store.get("results"));
-    assert.deepEqual(Object.keys(results), ["md2-001"]);
-    assert.deepEqual(results["md2-001"].result, [0, 0]);
+    const results = JSON.parse(store.get("results:PL"));
+    assert.deepEqual(Object.keys(results), ["pl-2026-27-002-hull-city-manchester-united"]);
+    assert.deepEqual(results["pl-2026-27-002-hull-city-manchester-united"].result, [0, 0]);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -264,7 +264,7 @@ test("simultaneous joins write independent member keys", async () => {
 test("state reports when the current matchday has settled fixtures", async () => {
   const originalFetch = globalThis.fetch;
   const fixtures = [
-    { id: "md1-001", matchday: 1, player1: "Arsenal", player2: "Chelsea", startAt: "2026-08-21T20:00:00+01:00", status: "complete", result: [2, 1] },
+    { id: "pl-2026-27-001-arsenal-coventry-city", matchday: 1, player1: "Arsenal", player2: "Chelsea", startAt: "2026-08-21T20:00:00+01:00", status: "complete", result: [2, 1] },
     { id: "md1-002", matchday: 1, player1: "Everton", player2: "Leeds United", startAt: "2026-08-22T15:00:00+01:00", status: "upcoming", result: null },
   ];
   globalThis.fetch = async () => new Response(JSON.stringify({ fixtures }), { status: 200 });

@@ -7,6 +7,9 @@ crons = ["*/15 * * * *"]
 
 [vars]
 FIXTURES_URL = "https://abigwood.github.io/prem-oracle/data/fixtures.json"
+# Championship feed. Present so the worker can serve ELC; member-facing
+# visibility is gated separately by the app's own feature flag.
+FIXTURES_URL_ELC = "https://abigwood.github.io/prem-oracle/data/fixtures-elc.json"
 ALLOWED_ORIGIN = "https://abigwood.github.io"
 
 [[kv_namespaces]]

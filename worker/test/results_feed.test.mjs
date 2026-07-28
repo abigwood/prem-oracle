@@ -21,7 +21,7 @@ function memoryKV(store = new Map()) {
 }
 
 const fixtures = [
-  { id: "ars-cov", player1: "Arsenal", player2: "Coventry City", startAt: "2026-08-21T20:00:00+01:00" },
+  { id: "pl-2026-27-001-arsenal-coventry-city", player1: "Arsenal", player2: "Coventry City", startAt: "2026-08-21T20:00:00+01:00" },
   { id: "hull-mun", player1: "Hull City", player2: "Manchester United", startAt: "2026-08-22T12:30:00+01:00" },
   { id: "eve-cry", player1: "Everton", player2: "Crystal Palace", startAt: "2026-08-22T15:00:00+01:00" },
   { id: "ips-sun", player1: "Ipswich Town", player2: "Sunderland", startAt: "2026-08-22T15:00:00+01:00" },
@@ -98,10 +98,10 @@ test("FINISHED football-data match settles from scheduled cron", async () => {
     worker.scheduled({}, env, ctx);
     await Promise.all(ctx.waits);
     assert.ok(calls.some((url) => url.includes("api.football-data.org/v4/competitions/PL/matches?season=2026")));
-    const results = JSON.parse(store.get("results"));
-    assert.deepEqual(results["ars-cov"].result, [3, 1]);
-    assert.equal(results["ars-cov"].status, "complete");
-    assert.equal(results["ars-cov"].source, "football-data");
+    const results = JSON.parse(store.get("results:PL"));
+    assert.deepEqual(results["pl-2026-27-001-arsenal-coventry-city"].result, [3, 1]);
+    assert.equal(results["pl-2026-27-001-arsenal-coventry-city"].status, "complete");
+    assert.equal(results["pl-2026-27-001-arsenal-coventry-city"].source, "football-data");
   } finally {
     Date.now = originalNow;
     globalThis.fetch = originalFetch;

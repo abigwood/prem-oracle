@@ -28,11 +28,36 @@ import {
 } from "./logic.js";
 import { apnsConfigured, sendPush } from "./apns.js";
 import { autoSettleResults } from "./results_feed.js";
+import {
+  COMPETITIONS,
+  COMPETITION_CODES,
+  DEFAULT_COMPETITION,
+  competitionOfFixture,
+  isCompetition,
+  leagueCompetition,
+  normaliseCompetition,
+  resultsKey,
+} from "./competitions.js";
+import { readMigration, readResults, resultsWriteKey, rollback, runStage } from "./migration.js";
 
-let fixtureCache = null;
-let fixtureCacheAt = 0;
-let fixtureIntel = { teams: {}, modelVersion: null };
+// Fixtures, results and intel are cached per competition. Everything that used
+// to be a single module-level slot is now keyed by competition code, which is
+// what stops a Championship refresh from evicting the Premier League's cache.
+const fixtureCaches = new Map();
 const CACHE_MS = 60_000;
+
+const cacheFor = (competition) => {
+  const code = normaliseCompetition(competition);
+  if (!fixtureCaches.has(code)) {
+    fixtureCaches.set(code, { list: null, at: 0, intel: { teams: {}, modelVersion: null } });
+  }
+  return fixtureCaches.get(code);
+};
+
+const clearFixtureCache = (competition) => {
+  if (competition) cacheFor(competition).list = null;
+  else for (const cache of fixtureCaches.values()) cache.list = null;
+};
 
 const CORS_ALLOWLIST = ["https://abigwood.github.io", "premoracle://localhost", "capacitor://localhost"];
 
@@ -149,33 +174,77 @@ export function mergeResultOverlay(match, overlay) {
   return merged;
 }
 
-async function fixtures(env, fresh = false) {
+// The URL a competition's fixture feed lives at. Only the Premier League has a
+// guaranteed one; a competition whose feed is not configured simply has no
+// fixtures rather than breaking the request.
+const fixturesUrlFor = (env, competition) => env[COMPETITIONS[normaliseCompetition(competition)].fixturesEnv] || null;
+
+export const competitionConfigured = (env, competition) => !!fixturesUrlFor(env, competition);
+
+async function fixtures(env, competition = DEFAULT_COMPETITION, fresh = false) {
+  const code = normaliseCompetition(competition);
+  const cache = cacheFor(code);
   const now = Date.now();
-  if (!fresh && fixtureCache && now - fixtureCacheAt < CACHE_MS) return fixtureCache;
-  const response = await fetch(`${env.FIXTURES_URL}${fresh ? `?t=${now}` : ""}`, { cf: { cacheTtl: fresh ? 0 : 60 } });
+  if (!fresh && cache.list && now - cache.at < CACHE_MS) return cache.list;
+  const url = fixturesUrlFor(env, code);
+  if (!url) return [];
+  const response = await fetch(`${url}${fresh ? `?t=${now}` : ""}`, { cf: { cacheTtl: fresh ? 0 : 60 } });
   if (!response.ok) throw new Error(`fixture fetch ${response.status}`);
   const body = await response.json();
-  const resultStore = (await kvGet(env, "results")) || {};
-  fixtureCache = (body.fixtures || []).map((match) => {
-    const persisted = resultStore[match.id];
-    return mergeResultOverlay(match, persisted);
-  });
-  fixtureIntel = {
+  const resultStore = await currentResults(env, code);
+  cache.list = (body.fixtures || []).map((match) => mergeResultOverlay(match, resultStore[match.id]));
+  cache.intel = {
     teams: body.teams && typeof body.teams === "object" ? body.teams : {},
     modelVersion: body.modelVersion || null,
   };
-  fixtureCacheAt = now;
-  return fixtureCache;
+  cache.at = now;
+  return cache.list;
+}
+
+/** The effective results map for a competition at the current migration stage. */
+async function currentResults(env, competition) {
+  const { stage } = await readMigration(env);
+  return readResults(env, normaliseCompetition(competition), stage);
+}
+
+/** Every configured competition's fixtures, for the id-addressed endpoints. */
+async function allFixtures(env, fresh = false) {
+  const lists = await Promise.all(COMPETITION_CODES
+    .filter((code) => competitionConfigured(env, code))
+    .map((code) => fixtures(env, code, fresh)));
+  return lists.flat();
+}
+
+/** The fixtures a league actually plays. */
+const leagueFixtures = (env, league, fresh = false) =>
+  fixtures(env, leagueCompetition(league), fresh);
+
+/**
+ * Locates one fixture by id. The id names its own competition, so this is a
+ * single-feed lookup rather than a scan, and an id we do not own resolves to
+ * nothing at all.
+ */
+async function findFixture(env, fixtureId) {
+  const competition = competitionOfFixture(fixtureId);
+  if (!competition) return { competition: null, match: null };
+  const list = await fixtures(env, competition);
+  return { competition, match: list.find((item) => String(item.id) === String(fixtureId)) || null };
 }
 
 async function getFixtures(env, request) {
-  const refresh = new URL(request.url).searchParams.get("refresh") === "1";
-  const list = await fixtures(env, refresh);
+  const url = new URL(request.url);
+  const requested = url.searchParams.get("competition");
+  if (requested && !isCompetition(requested)) return json({ error: "unknown competition" }, 400, env);
+  const competition = normaliseCompetition(requested);
+  const list = await fixtures(env, competition, url.searchParams.get("refresh") === "1");
+  const cache = cacheFor(competition);
   return json({
     ok: true,
+    competition,
+    competitionName: COMPETITIONS[competition].name,
     fixtures: list,
-    teams: fixtureIntel.teams,
-    modelVersion: fixtureIntel.modelVersion,
+    teams: cache.intel.teams,
+    modelVersion: cache.intel.modelVersion,
     settlement: "manual",
   }, 200, env);
 }
@@ -190,8 +259,7 @@ async function getFixtures(env, request) {
 async function fixtureIcs(env, url, path) {
   const matchId = decodeURIComponent(path.slice("/ics/".length));
   if (!matchId) return json({ error: "not found" }, 404, env);
-  const list = await fixtures(env);
-  const match = list.find((fixture) => String(fixture.id) === matchId);
+  const { match } = await findFixture(env, matchId);
   if (!match) return json({ error: "not found" }, 404, env);
   const body = buildFixtureIcs(match, parsePickParam(url.searchParams.get("pick")));
   if (!body) return json({ error: "fixture has no start time" }, 409, env);
@@ -264,7 +332,8 @@ async function allPicks(env, ids) {
 
 async function userPicks(env, uid) {
   if (!uid) return {};
-  const matchList = await fixtures(env);
+  // A player's picks span every competition they play in, not just one.
+  const matchList = await allFixtures(env);
   const picksByMatch = await allPicks(env, matchList.map((match) => match.id));
   return Object.fromEntries(Object.entries(picksByMatch)
     .map(([matchId, matchPicks]) => [matchId, matchPicks[uid]])
@@ -280,9 +349,19 @@ async function createLeague(env, body) {
   do code = makeCode(randomBytes); while (await kvGet(env, `league:${code}`));
   const name = String(body.name || "Saturday Super 6").trim().slice(0, 40);
   const customMix = body.customMix === true;
+  if (body.competition && !isCompetition(body.competition)) {
+    return json({ error: "unknown competition" }, 400, env);
+  }
+  const competition = normaliseCompetition(body.competition);
+  // The Premier League is always available; a second competition can only be
+  // chosen once its feed is actually configured.
+  if (competition !== DEFAULT_COMPETITION && !competitionConfigured(env, competition)) {
+    return json({ error: `${COMPETITIONS[competition].name} is not available yet` }, 400, env);
+  }
   const now = Date.now();
   await kvPut(env, `league:${code}`, {
     code, name, owner: uid,
+    competition,
     customMix,
     createdAt: now,
   });
@@ -290,7 +369,7 @@ async function createLeague(env, body) {
   await kvPut(env, leagueMemberKey(code, uid), { nick: user.nickname || "Anon", since: now });
   user.leagues = [...new Set([...(user.leagues || []), code])];
   await kvPut(env, `user:${uid}`, user);
-  return json({ ok: true, code, name, customMix, recovery: user.recovery }, 200, env);
+  return json({ ok: true, code, name, competition, customMix, recovery: user.recovery }, 200, env);
 }
 
 // Hosts can turn Custom Mix on (or back off) after the league exists. Existing
@@ -328,7 +407,7 @@ async function setSlate(env, body) {
   const existing = await kvGet(env, slateKey(code, matchweek));
   if (existing) return json({ error: "this matchweek's fixtures are already set", slate: existing }, 409, env);
 
-  const matchList = await fixtures(env);
+  const matchList = await leagueFixtures(env, league);
   const roundFixtures = matchList.filter((match) => match.matchday === matchweek);
   const mode = String(body.mode || "custom");
   const validated = validateSlate(mode, body.fixtureIds, roundFixtures);
@@ -512,10 +591,11 @@ async function savePick(env, body) {
   const p1 = Number(body.p1);
   const p2 = Number(body.p2);
   if (!uid || !matchId) return json({ error: "uid and matchId required" }, 400, env);
-  let matchList;
-  try { matchList = await fixtures(env); }
+  // The id names its competition; anything unnamespaced is not ours to store.
+  if (!competitionOfFixture(matchId)) return json({ error: "match not found" }, 404, env);
+  let match;
+  try { ({ match } = await findFixture(env, matchId)); }
   catch { return json({ error: "cannot verify match start; pick not saved" }, 503, env); }
-  const match = matchList.find((item) => String(item.id) === matchId);
   if (!match) return json({ error: "match not found" }, 404, env);
   if (!match.player1 || !match.player2) return json({ error: "players not confirmed" }, 403, env);
   if (!validFootballScore(p1, p2)) return json({ error: "invalid football score" }, 400, env);
@@ -536,12 +616,63 @@ async function savePushToken(env, body) {
   const token = String(body.token || "").trim();
   if (!uid || !token) return json({ error: "uid and token required" }, 400, env);
   await ensureUser(env, uid, body.nickname);
+  const existing = await kvGet(env, `push:${uid}`);
   await kvPut(env, `push:${uid}`, {
     token,
     platform: String(body.platform || "ios").slice(0, 20),
+    // Re-registering a device must not silently un-mute a competition.
+    mute: Array.isArray(existing?.mute) ? existing.mute : [],
     updatedAt: Date.now(),
   });
   return json({ ok: true }, 200, env);
+}
+
+// Per-competition notification preferences. Midweek Champions League nights and
+// Saturday Championship cards must never erode the Premier League core, so a
+// member can mute a whole competition without losing the others.
+async function setNotificationPrefs(env, body) {
+  const uid = String(body.uid || "").trim();
+  if (!uid) return json({ error: "uid required" }, 400, env);
+  if (!Array.isArray(body.mute)) return json({ error: "mute must be an array of competition codes" }, 400, env);
+  const unknown = body.mute.filter((code) => !isCompetition(code));
+  if (unknown.length) return json({ error: `unknown competition: ${unknown[0]}` }, 400, env);
+  const record = await kvGet(env, `push:${uid}`);
+  if (!record) return json({ error: "no push registration for this device" }, 404, env);
+  const mute = [...new Set(body.mute)];
+  await kvPut(env, `push:${uid}`, { ...record, mute, updatedAt: Date.now() });
+  return json({ ok: true, uid, mute }, 200, env);
+}
+
+async function getNotificationPrefs(env, url) {
+  const uid = url.searchParams.get("uid") || "";
+  if (!uid) return json({ error: "uid required" }, 400, env);
+  const record = await kvGet(env, `push:${uid}`);
+  return json({
+    uid,
+    registered: !!record?.token,
+    mute: Array.isArray(record?.mute) ? record.mute : [],
+    competitions: COMPETITION_CODES
+      .filter((code) => competitionConfigured(env, code))
+      .map((code) => ({ code, name: COMPETITIONS[code].name })),
+  }, 200, env);
+}
+
+// Migration control surface. Secret-gated, and deliberately not wired to any
+// automatic trigger: a stage only ever runs because somebody asked for it.
+async function migrationAdmin(env, body) {
+  if (!env.MIGRATION_SECRET || body.secret !== env.MIGRATION_SECRET) {
+    return json({ error: "forbidden" }, 403, env);
+  }
+  if (body.action === "status") return json({ ok: true, ...(await readMigration(env)) }, 200, env);
+  if (body.action === "rollback") return json({ ok: true, ...(await rollback(env)) }, 200, env);
+  if (body.action !== "run") return json({ error: "action must be status, run or rollback" }, 400, env);
+  try {
+    const result = await runStage(env, String(body.stage || ""), { commit: body.commit === true });
+    clearFixtureCache();
+    return json({ ok: true, ...result }, 200, env);
+  } catch (error) {
+    return json({ error: String(error?.message || error) }, 400, env);
+  }
 }
 
 const publicSlate = (slate, matchweek) => (slate ? {
@@ -557,7 +688,8 @@ async function state(env, url) {
   const code = String(url.searchParams.get("code") || "").toUpperCase();
   const league = await kvGet(env, `league:${code}`);
   if (!league) return json({ error: "league not found" }, 404, env);
-  const matchList = await fixtures(env);
+  const competition = leagueCompetition(league);
+  const matchList = await leagueFixtures(env, league);
   const memberList = await members(env, league);
   const picks = await allPicks(env, matchList.map((match) => match.id));
   const completed = matchList
@@ -582,6 +714,8 @@ async function state(env, url) {
       code,
       name: league.name,
       owner: league.owner,
+      competition,
+      competitionName: COMPETITIONS[competition].name,
       customMix: league.customMix === true,
       matchday: md,
       slate: publicSlate(slate, md),
@@ -610,6 +744,8 @@ async function state(env, url) {
     code,
     name: league.name,
     owner: league.owner,
+    competition,
+    competitionName: COMPETITIONS[competition].name,
     customMix: league.customMix === true,
     currentMatchday,
     currentMatchdayStatus: currentMatchday == null ? "complete" : roundStatus(currentMatchdayFixtures),
@@ -624,11 +760,21 @@ async function state(env, url) {
 async function settle(env, body) {
   if (!env.SETTLE_SECRET || body.secret !== env.SETTLE_SECRET) return json({ error: "forbidden" }, 403, env);
   if (!body.results || typeof body.results !== "object") return json({ error: "results object required" }, 400, env);
-  const matchList = await fixtures(env, true);
+  // Settlement is competition-aware: each fixture id names the competition its
+  // result belongs to, and a batch is written to those keys and no others.
+  const matchList = await allFixtures(env, true);
   const validIds = new Set(matchList.map((match) => match.id));
-  const next = { ...((await kvGet(env, "results")) || {}) };
-  for (const [matchId, overlay] of Object.entries(body.results)) {
+  const touched = new Set();
+  for (const matchId of Object.keys(body.results)) {
+    const competition = competitionOfFixture(matchId);
+    if (!competition) return json({ error: `fixture id is not namespaced: ${matchId}` }, 400, env);
     if (!validIds.has(matchId)) return json({ error: `unknown fixture: ${matchId}` }, 400, env);
+    touched.add(competition);
+  }
+  const stores = Object.fromEntries(await Promise.all([...touched].map(async (competition) =>
+    [competition, { ...(await currentResults(env, competition)) }])));
+  for (const [matchId, overlay] of Object.entries(body.results)) {
+    const next = stores[competitionOfFixture(matchId)];
     if (overlay === null) {
       delete next[matchId];
       continue;
@@ -644,9 +790,20 @@ async function settle(env, body) {
       lockAt: overlay.lockAt || new Date().toISOString(),
     };
   }
-  await kvPut(env, "results", next);
-  fixtureCache = null;
-  return json({ ok: true, matches: Object.keys(next).length, settlement: "manual" }, 200, env);
+  const written = {};
+  for (const [competition, next] of Object.entries(stores)) {
+    // resultsWriteKey throws if anything ever resolves to the legacy key.
+    await kvPut(env, resultsWriteKey(competition), next);
+    clearFixtureCache(competition);
+    written[resultsKey(competition)] = Object.keys(next).length;
+  }
+  return json({
+    ok: true,
+    competitions: [...touched],
+    written,
+    matches: Object.values(stores).reduce((total, store) => total + Object.keys(store).length, 0),
+    settlement: "manual",
+  }, 200, env);
 }
 
 async function listAllKeys(env, prefix) {
@@ -694,10 +851,14 @@ const kickoffTime = (startAt) =>
   new Intl.DateTimeFormat("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: "Europe/London" })
     .format(new Date(startAt));
 
+/** A member can mute a whole competition: push:<uid>.mute = ["ELC", ...]. */
+const mutes = (record, competition) =>
+  Array.isArray(record?.mute) && record.mute.includes(competition);
+
 async function notifyKickoffs(env) {
   if (!apnsConfigured(env)) return;
   const now = Date.now();
-  const matchList = await fixtures(env);
+  const matchList = await allFixtures(env);
   const notified = await env.KV.list({ prefix: "notified:" });
   const notifiedIds = new Set(notified.keys.map((key) => key.name.slice("notified:".length)));
   const pending = fixturesNeedingNotification(matchList, notifiedIds, now);
@@ -706,13 +867,15 @@ async function notifyKickoffs(env) {
   const pushKeys = await env.KV.list({ prefix: "push:" });
   const tokens = (await Promise.all(pushKeys.keys.map(async (key) => {
     const record = await kvGet(env, key.name);
-    return record?.token ? { uid: key.name.slice("push:".length), token: record.token } : null;
+    return record?.token ? { uid: key.name.slice("push:".length), token: record.token, record } : null;
   }))).filter(Boolean);
 
   for (const match of pending) {
+    const competition = competitionOfFixture(match.id) || DEFAULT_COMPETITION;
     const body = `⚽ ${match.player1} v ${match.player2} kicks off at ${kickoffTime(match.startAt)} — lock in your prediction!`;
     const payload = { aps: { alert: body, sound: "default" } };
-    await Promise.all(tokens.map(async ({ uid, token }) => {
+    const audience = tokens.filter(({ record }) => !mutes(record, competition));
+    await Promise.all(audience.map(async ({ uid, token }) => {
       try {
         const response = await sendPush(token, payload, env);
         if (response.status === 410) await env.KV.delete(`push:${uid}`);
@@ -811,12 +974,18 @@ async function customMixMaintenance(env) {
   const codes = (await kvGet(env, CUSTOM_MIX_INDEX)) || [];
   if (!codes.length) return;
   const now = Date.now();
-  const matchList = await fixtures(env);
-  const { open, live } = relevantMatchweeks(fixturesByMatchweek(matchList), now);
-  if (!open && !live.length) return;
+  // One fixture list per competition, shared by every league playing it.
+  const weeksByCompetition = new Map();
   for (const code of codes) {
     const league = await kvGet(env, `league:${code}`);
     if (!league?.customMix || !league.owner) continue;
+    const competition = leagueCompetition(league);
+    if (!weeksByCompetition.has(competition)) {
+      const list = await fixtures(env, competition);
+      weeksByCompetition.set(competition, relevantMatchweeks(fixturesByMatchweek(list), now));
+    }
+    const { open, live } = weeksByCompetition.get(competition);
+    if (!open && !live.length) continue;
     for (const week of live) {
       const slate = await kvGet(env, slateKey(code, week.matchweek));
       if (slate) await reconcilePostponements(env, league, slate, week.matchweek, week.fixtures, now);
@@ -842,16 +1011,22 @@ const podiumMessage = (league, matchweek, podium) =>
 async function podiumAnnouncements(env) {
   if (!env.KV.list) return;
   const now = Date.now();
-  const matchList = await fixtures(env);
-  const settled = matchList.filter((match) => normaliseResult(match) || isVoided(match)).length;
+  const everything = await allFixtures(env);
+  const settled = everything.filter((match) => normaliseResult(match) || isVoided(match)).length;
   if ((await kvGet(env, "sweep:settled")) === settled) return;
   const leagueKeys = await listAllKeys(env, "league:");
   if (leagueKeys.length) {
-    const picks = await allPicks(env, matchList.map((match) => match.id));
-    const byMatchweek = [...fixturesByMatchweek(matchList).entries()].sort((a, b) => b[0] - a[0]);
+    const picks = await allPicks(env, everything.map((match) => match.id));
+    const roundsByCompetition = new Map();
     for (const key of leagueKeys) {
       const league = await kvGet(env, key);
       if (!league?.code) continue;
+      const competition = leagueCompetition(league);
+      if (!roundsByCompetition.has(competition)) {
+        const list = await fixtures(env, competition);
+        roundsByCompetition.set(competition, [...fixturesByMatchweek(list).entries()].sort((a, b) => b[0] - a[0]));
+      }
+      const byMatchweek = roundsByCompetition.get(competition);
       const slates = slateAware(league) ? await readSlates(env, league.code) : {};
       let target = null;
       for (const [matchweek, all] of byMatchweek) {
@@ -876,14 +1051,21 @@ async function podiumAnnouncements(env) {
   await kvPut(env, "sweep:settled", settled);
 }
 
+// Auto-settlement is competition-scoped before any second feed exists: the
+// football-data.org job covers the Premier League, reads the Premier League's
+// results and writes results:PL and nothing else. A Champions League or
+// Championship result can therefore never land on a Premier League fixture.
 async function autoSettle(env) {
   if (!env.FOOTBALL_DATA_TOKEN) return;
-  const matchList = await fixtures(env, true);
-  const current = (await kvGet(env, "results")) || {};
+  const competition = DEFAULT_COMPETITION;
+  const matchList = await fixtures(env, competition, true);
+  const current = await currentResults(env, competition);
   const settled = await autoSettleResults(env, matchList, current);
   if (!settled.checked || settled.settled === 0) return;
-  await kvPut(env, "results", settled.results);
-  fixtureCache = null;
+  const foreign = Object.keys(settled.results).filter((id) => competitionOfFixture(id) !== competition);
+  if (foreign.length) throw new Error(`auto-settlement produced foreign fixture ids: ${foreign.slice(0, 3).join(", ")}`);
+  await kvPut(env, resultsWriteKey(competition), settled.results);
+  clearFixtureCache(competition);
 }
 
 export default {
@@ -909,6 +1091,7 @@ async function route(request, env) {
       if (path === "/me") return await getMe(env, url);
       if (path === "/fixtures") return await getFixtures(env, request);
       if (path === "/picks") return await getUserPicks(env, url);
+      if (path === "/notification-prefs") return await getNotificationPrefs(env, url);
       if (path === "/state") return await state(env, url);
       if (path === "/stats") return await stats(env, url);
       if (path.startsWith("/ics/")) return await fixtureIcs(env, url, path);
@@ -926,6 +1109,8 @@ async function route(request, env) {
       if (path === "/restore") return await restore(env, body);
       if (path === "/pick") return await savePick(env, body);
       if (path === "/push-token") return await savePushToken(env, body);
+      if (path === "/notification-prefs") return await setNotificationPrefs(env, body);
+      if (path === "/admin/migration") return await migrationAdmin(env, body);
       if (path === "/settle") return await settle(env, body);
     }
     return json({ error: "not found" }, 404, env);

@@ -140,7 +140,7 @@ class Phase2WiringTests(unittest.TestCase):
         self.assertNotIn("Illustrative form", self.app)
 
     def test_worker_exposes_teams_block(self):
-        self.assertIn("teams: fixtureIntel.teams", self.worker)
+        self.assertIn("teams: cache.intel.teams", self.worker)
 
     def test_per_league_nickname_endpoint_and_control(self):
         self.assertIn('path === "/league/nick"', self.worker)

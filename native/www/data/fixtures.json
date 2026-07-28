@@ -4,7 +4,7 @@
   "season": "2026/27",
   "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
   "sourcePublished": "2026-06-19",
-  "generatedAt": "2026-07-27T06:59:10Z",
+  "generatedAt": "2026-07-28T17:43:36Z",
   "note": "Premier League fixtures are subject to change.",
   "fixtures": [
     {
@@ -7210,7 +7210,7 @@
     {
       "id": "pl-2026-27-301-afc-bournemouth-manchester-city",
       "date": "2027-04-10",
-      "startAt": "2027-04-10T15:00:00+00:00",
+      "startAt": "2027-04-10T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 31",
       "matchday": 31,
@@ -7234,7 +7234,7 @@
     {
       "id": "pl-2026-27-302-aston-villa-brighton-hove-albion",
       "date": "2027-04-10",
-      "startAt": "2027-04-10T15:00:00+00:00",
+      "startAt": "2027-04-10T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 31",
       "matchday": 31,
@@ -7258,7 +7258,7 @@
     {
       "id": "pl-2026-27-303-chelsea-fulham",
       "date": "2027-04-10",
-      "startAt": "2027-04-10T15:00:00+00:00",
+      "startAt": "2027-04-10T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 31",
       "matchday": 31,
@@ -7282,7 +7282,7 @@
     {
       "id": "pl-2026-27-304-coventry-city-arsenal",
       "date": "2027-04-10",
-      "startAt": "2027-04-10T15:00:00+00:00",
+      "startAt": "2027-04-10T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 31",
       "matchday": 31,
@@ -7306,7 +7306,7 @@
     {
       "id": "pl-2026-27-305-crystal-palace-everton",
       "date": "2027-04-10",
-      "startAt": "2027-04-10T15:00:00+00:00",
+      "startAt": "2027-04-10T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 31",
       "matchday": 31,
@@ -7330,7 +7330,7 @@
     {
       "id": "pl-2026-27-306-leeds-united-nottingham-forest",
       "date": "2027-04-10",
-      "startAt": "2027-04-10T15:00:00+00:00",
+      "startAt": "2027-04-10T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 31",
       "matchday": 31,
@@ -7354,7 +7354,7 @@
     {
       "id": "pl-2026-27-307-liverpool-newcastle-united",
       "date": "2027-04-10",
-      "startAt": "2027-04-10T15:00:00+00:00",
+      "startAt": "2027-04-10T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 31",
       "matchday": 31,
@@ -7378,7 +7378,7 @@
     {
       "id": "pl-2026-27-308-manchester-united-hull-city",
       "date": "2027-04-10",
-      "startAt": "2027-04-10T15:00:00+00:00",
+      "startAt": "2027-04-10T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 31",
       "matchday": 31,
@@ -7402,7 +7402,7 @@
     {
       "id": "pl-2026-27-309-sunderland-ipswich-town",
       "date": "2027-04-10",
-      "startAt": "2027-04-10T15:00:00+00:00",
+      "startAt": "2027-04-10T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 31",
       "matchday": 31,
@@ -7426,7 +7426,7 @@
     {
       "id": "pl-2026-27-310-tottenham-hotspur-brentford",
       "date": "2027-04-10",
-      "startAt": "2027-04-10T15:00:00+00:00",
+      "startAt": "2027-04-10T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 31",
       "matchday": 31,
@@ -7450,7 +7450,7 @@
     {
       "id": "pl-2026-27-311-arsenal-aston-villa",
       "date": "2027-04-17",
-      "startAt": "2027-04-17T15:00:00+00:00",
+      "startAt": "2027-04-17T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 32",
       "matchday": 32,
@@ -7474,7 +7474,7 @@
     {
       "id": "pl-2026-27-312-brentford-leeds-united",
       "date": "2027-04-17",
-      "startAt": "2027-04-17T15:00:00+00:00",
+      "startAt": "2027-04-17T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 32",
       "matchday": 32,
@@ -7498,7 +7498,7 @@
     {
       "id": "pl-2026-27-313-brighton-hove-albion-chelsea",
       "date": "2027-04-17",
-      "startAt": "2027-04-17T15:00:00+00:00",
+      "startAt": "2027-04-17T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 32",
       "matchday": 32,
@@ -7522,7 +7522,7 @@
     {
       "id": "pl-2026-27-314-everton-afc-bournemouth",
       "date": "2027-04-17",
-      "startAt": "2027-04-17T15:00:00+00:00",
+      "startAt": "2027-04-17T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 32",
       "matchday": 32,
@@ -7546,7 +7546,7 @@
     {
       "id": "pl-2026-27-315-fulham-sunderland",
       "date": "2027-04-17",
-      "startAt": "2027-04-17T15:00:00+00:00",
+      "startAt": "2027-04-17T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 32",
       "matchday": 32,
@@ -7570,7 +7570,7 @@
     {
       "id": "pl-2026-27-316-hull-city-coventry-city",
       "date": "2027-04-17",
-      "startAt": "2027-04-17T15:00:00+00:00",
+      "startAt": "2027-04-17T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 32",
       "matchday": 32,
@@ -7594,7 +7594,7 @@
     {
       "id": "pl-2026-27-317-ipswich-town-manchester-united",
       "date": "2027-04-17",
-      "startAt": "2027-04-17T15:00:00+00:00",
+      "startAt": "2027-04-17T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 32",
       "matchday": 32,
@@ -7618,7 +7618,7 @@
     {
       "id": "pl-2026-27-318-manchester-city-crystal-palace",
       "date": "2027-04-17",
-      "startAt": "2027-04-17T15:00:00+00:00",
+      "startAt": "2027-04-17T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 32",
       "matchday": 32,
@@ -7642,7 +7642,7 @@
     {
       "id": "pl-2026-27-319-newcastle-united-tottenham-hotspur",
       "date": "2027-04-17",
-      "startAt": "2027-04-17T15:00:00+00:00",
+      "startAt": "2027-04-17T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 32",
       "matchday": 32,
@@ -7666,7 +7666,7 @@
     {
       "id": "pl-2026-27-320-nottingham-forest-liverpool",
       "date": "2027-04-17",
-      "startAt": "2027-04-17T15:00:00+00:00",
+      "startAt": "2027-04-17T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 32",
       "matchday": 32,
@@ -7690,7 +7690,7 @@
     {
       "id": "pl-2026-27-321-afc-bournemouth-arsenal",
       "date": "2027-04-24",
-      "startAt": "2027-04-24T15:00:00+00:00",
+      "startAt": "2027-04-24T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 33",
       "matchday": 33,
@@ -7714,7 +7714,7 @@
     {
       "id": "pl-2026-27-322-aston-villa-coventry-city",
       "date": "2027-04-24",
-      "startAt": "2027-04-24T15:00:00+00:00",
+      "startAt": "2027-04-24T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 33",
       "matchday": 33,
@@ -7738,7 +7738,7 @@
     {
       "id": "pl-2026-27-323-brentford-fulham",
       "date": "2027-04-24",
-      "startAt": "2027-04-24T15:00:00+00:00",
+      "startAt": "2027-04-24T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 33",
       "matchday": 33,
@@ -7762,7 +7762,7 @@
     {
       "id": "pl-2026-27-324-chelsea-manchester-city",
       "date": "2027-04-24",
-      "startAt": "2027-04-24T15:00:00+00:00",
+      "startAt": "2027-04-24T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 33",
       "matchday": 33,
@@ -7786,7 +7786,7 @@
     {
       "id": "pl-2026-27-325-everton-brighton-hove-albion",
       "date": "2027-04-24",
-      "startAt": "2027-04-24T15:00:00+00:00",
+      "startAt": "2027-04-24T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 33",
       "matchday": 33,
@@ -7810,7 +7810,7 @@
     {
       "id": "pl-2026-27-326-leeds-united-liverpool",
       "date": "2027-04-24",
-      "startAt": "2027-04-24T15:00:00+00:00",
+      "startAt": "2027-04-24T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 33",
       "matchday": 33,
@@ -7834,7 +7834,7 @@
     {
       "id": "pl-2026-27-327-manchester-united-crystal-palace",
       "date": "2027-04-24",
-      "startAt": "2027-04-24T15:00:00+00:00",
+      "startAt": "2027-04-24T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 33",
       "matchday": 33,
@@ -7858,7 +7858,7 @@
     {
       "id": "pl-2026-27-328-newcastle-united-ipswich-town",
       "date": "2027-04-24",
-      "startAt": "2027-04-24T15:00:00+00:00",
+      "startAt": "2027-04-24T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 33",
       "matchday": 33,
@@ -7882,7 +7882,7 @@
     {
       "id": "pl-2026-27-329-nottingham-forest-sunderland",
       "date": "2027-04-24",
-      "startAt": "2027-04-24T15:00:00+00:00",
+      "startAt": "2027-04-24T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 33",
       "matchday": 33,
@@ -7906,7 +7906,7 @@
     {
       "id": "pl-2026-27-330-tottenham-hotspur-hull-city",
       "date": "2027-04-24",
-      "startAt": "2027-04-24T15:00:00+00:00",
+      "startAt": "2027-04-24T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 33",
       "matchday": 33,
@@ -7930,7 +7930,7 @@
     {
       "id": "pl-2026-27-331-arsenal-tottenham-hotspur",
       "date": "2027-05-01",
-      "startAt": "2027-05-01T15:00:00+00:00",
+      "startAt": "2027-05-01T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 34",
       "matchday": 34,
@@ -7954,7 +7954,7 @@
     {
       "id": "pl-2026-27-332-brighton-hove-albion-nottingham-forest",
       "date": "2027-05-01",
-      "startAt": "2027-05-01T15:00:00+00:00",
+      "startAt": "2027-05-01T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 34",
       "matchday": 34,
@@ -7978,7 +7978,7 @@
     {
       "id": "pl-2026-27-333-coventry-city-manchester-united",
       "date": "2027-05-01",
-      "startAt": "2027-05-01T15:00:00+00:00",
+      "startAt": "2027-05-01T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 34",
       "matchday": 34,
@@ -8002,7 +8002,7 @@
     {
       "id": "pl-2026-27-334-crystal-palace-aston-villa",
       "date": "2027-05-01",
-      "startAt": "2027-05-01T15:00:00+00:00",
+      "startAt": "2027-05-01T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 34",
       "matchday": 34,
@@ -8026,7 +8026,7 @@
     {
       "id": "pl-2026-27-335-fulham-everton",
       "date": "2027-05-01",
-      "startAt": "2027-05-01T15:00:00+00:00",
+      "startAt": "2027-05-01T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 34",
       "matchday": 34,
@@ -8050,7 +8050,7 @@
     {
       "id": "pl-2026-27-336-hull-city-afc-bournemouth",
       "date": "2027-05-01",
-      "startAt": "2027-05-01T15:00:00+00:00",
+      "startAt": "2027-05-01T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 34",
       "matchday": 34,
@@ -8074,7 +8074,7 @@
     {
       "id": "pl-2026-27-337-ipswich-town-leeds-united",
       "date": "2027-05-01",
-      "startAt": "2027-05-01T15:00:00+00:00",
+      "startAt": "2027-05-01T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 34",
       "matchday": 34,
@@ -8098,7 +8098,7 @@
     {
       "id": "pl-2026-27-338-liverpool-chelsea",
       "date": "2027-05-01",
-      "startAt": "2027-05-01T15:00:00+00:00",
+      "startAt": "2027-05-01T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 34",
       "matchday": 34,
@@ -8122,7 +8122,7 @@
     {
       "id": "pl-2026-27-339-manchester-city-brentford",
       "date": "2027-05-01",
-      "startAt": "2027-05-01T15:00:00+00:00",
+      "startAt": "2027-05-01T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 34",
       "matchday": 34,
@@ -8146,7 +8146,7 @@
     {
       "id": "pl-2026-27-340-sunderland-newcastle-united",
       "date": "2027-05-01",
-      "startAt": "2027-05-01T15:00:00+00:00",
+      "startAt": "2027-05-01T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 34",
       "matchday": 34,
@@ -8170,7 +8170,7 @@
     {
       "id": "pl-2026-27-341-afc-bournemouth-manchester-united",
       "date": "2027-05-08",
-      "startAt": "2027-05-08T15:00:00+00:00",
+      "startAt": "2027-05-08T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 35",
       "matchday": 35,
@@ -8194,7 +8194,7 @@
     {
       "id": "pl-2026-27-342-brentford-aston-villa",
       "date": "2027-05-08",
-      "startAt": "2027-05-08T15:00:00+00:00",
+      "startAt": "2027-05-08T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 35",
       "matchday": 35,
@@ -8218,7 +8218,7 @@
     {
       "id": "pl-2026-27-343-brighton-hove-albion-sunderland",
       "date": "2027-05-08",
-      "startAt": "2027-05-08T15:00:00+00:00",
+      "startAt": "2027-05-08T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 35",
       "matchday": 35,
@@ -8242,7 +8242,7 @@
     {
       "id": "pl-2026-27-344-everton-hull-city",
       "date": "2027-05-08",
-      "startAt": "2027-05-08T15:00:00+00:00",
+      "startAt": "2027-05-08T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 35",
       "matchday": 35,
@@ -8266,7 +8266,7 @@
     {
       "id": "pl-2026-27-345-fulham-ipswich-town",
       "date": "2027-05-08",
-      "startAt": "2027-05-08T15:00:00+00:00",
+      "startAt": "2027-05-08T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 35",
       "matchday": 35,
@@ -8290,7 +8290,7 @@
     {
       "id": "pl-2026-27-346-leeds-united-arsenal",
       "date": "2027-05-08",
-      "startAt": "2027-05-08T15:00:00+00:00",
+      "startAt": "2027-05-08T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 35",
       "matchday": 35,
@@ -8314,7 +8314,7 @@
     {
       "id": "pl-2026-27-347-manchester-city-liverpool",
       "date": "2027-05-08",
-      "startAt": "2027-05-08T15:00:00+00:00",
+      "startAt": "2027-05-08T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 35",
       "matchday": 35,
@@ -8338,7 +8338,7 @@
     {
       "id": "pl-2026-27-348-newcastle-united-coventry-city",
       "date": "2027-05-08",
-      "startAt": "2027-05-08T15:00:00+00:00",
+      "startAt": "2027-05-08T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 35",
       "matchday": 35,
@@ -8362,7 +8362,7 @@
     {
       "id": "pl-2026-27-349-nottingham-forest-crystal-palace",
       "date": "2027-05-08",
-      "startAt": "2027-05-08T15:00:00+00:00",
+      "startAt": "2027-05-08T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 35",
       "matchday": 35,
@@ -8386,7 +8386,7 @@
     {
       "id": "pl-2026-27-350-tottenham-hotspur-chelsea",
       "date": "2027-05-08",
-      "startAt": "2027-05-08T15:00:00+00:00",
+      "startAt": "2027-05-08T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 35",
       "matchday": 35,
@@ -8410,7 +8410,7 @@
     {
       "id": "pl-2026-27-351-arsenal-nottingham-forest",
       "date": "2027-05-15",
-      "startAt": "2027-05-15T15:00:00+00:00",
+      "startAt": "2027-05-15T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 36",
       "matchday": 36,
@@ -8434,7 +8434,7 @@
     {
       "id": "pl-2026-27-352-aston-villa-newcastle-united",
       "date": "2027-05-15",
-      "startAt": "2027-05-15T15:00:00+00:00",
+      "startAt": "2027-05-15T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 36",
       "matchday": 36,
@@ -8458,7 +8458,7 @@
     {
       "id": "pl-2026-27-353-chelsea-everton",
       "date": "2027-05-15",
-      "startAt": "2027-05-15T15:00:00+00:00",
+      "startAt": "2027-05-15T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 36",
       "matchday": 36,
@@ -8482,7 +8482,7 @@
     {
       "id": "pl-2026-27-354-coventry-city-tottenham-hotspur",
       "date": "2027-05-15",
-      "startAt": "2027-05-15T15:00:00+00:00",
+      "startAt": "2027-05-15T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 36",
       "matchday": 36,
@@ -8506,7 +8506,7 @@
     {
       "id": "pl-2026-27-355-crystal-palace-brighton-hove-albion",
       "date": "2027-05-15",
-      "startAt": "2027-05-15T15:00:00+00:00",
+      "startAt": "2027-05-15T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 36",
       "matchday": 36,
@@ -8530,7 +8530,7 @@
     {
       "id": "pl-2026-27-356-hull-city-fulham",
       "date": "2027-05-15",
-      "startAt": "2027-05-15T15:00:00+00:00",
+      "startAt": "2027-05-15T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 36",
       "matchday": 36,
@@ -8554,7 +8554,7 @@
     {
       "id": "pl-2026-27-357-ipswich-town-manchester-city",
       "date": "2027-05-15",
-      "startAt": "2027-05-15T15:00:00+00:00",
+      "startAt": "2027-05-15T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 36",
       "matchday": 36,
@@ -8578,7 +8578,7 @@
     {
       "id": "pl-2026-27-358-liverpool-brentford",
       "date": "2027-05-15",
-      "startAt": "2027-05-15T15:00:00+00:00",
+      "startAt": "2027-05-15T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 36",
       "matchday": 36,
@@ -8602,7 +8602,7 @@
     {
       "id": "pl-2026-27-359-manchester-united-leeds-united",
       "date": "2027-05-15",
-      "startAt": "2027-05-15T15:00:00+00:00",
+      "startAt": "2027-05-15T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 36",
       "matchday": 36,
@@ -8626,7 +8626,7 @@
     {
       "id": "pl-2026-27-360-sunderland-afc-bournemouth",
       "date": "2027-05-15",
-      "startAt": "2027-05-15T15:00:00+00:00",
+      "startAt": "2027-05-15T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 36",
       "matchday": 36,
@@ -8650,7 +8650,7 @@
     {
       "id": "pl-2026-27-361-afc-bournemouth-chelsea",
       "date": "2027-05-23",
-      "startAt": "2027-05-23T15:00:00+00:00",
+      "startAt": "2027-05-23T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 37",
       "matchday": 37,
@@ -8674,7 +8674,7 @@
     {
       "id": "pl-2026-27-362-brentford-hull-city",
       "date": "2027-05-23",
-      "startAt": "2027-05-23T15:00:00+00:00",
+      "startAt": "2027-05-23T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 37",
       "matchday": 37,
@@ -8698,7 +8698,7 @@
     {
       "id": "pl-2026-27-363-brighton-hove-albion-liverpool",
       "date": "2027-05-23",
-      "startAt": "2027-05-23T15:00:00+00:00",
+      "startAt": "2027-05-23T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 37",
       "matchday": 37,
@@ -8722,7 +8722,7 @@
     {
       "id": "pl-2026-27-364-everton-arsenal",
       "date": "2027-05-23",
-      "startAt": "2027-05-23T15:00:00+00:00",
+      "startAt": "2027-05-23T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 37",
       "matchday": 37,
@@ -8746,7 +8746,7 @@
     {
       "id": "pl-2026-27-365-fulham-coventry-city",
       "date": "2027-05-23",
-      "startAt": "2027-05-23T15:00:00+00:00",
+      "startAt": "2027-05-23T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 37",
       "matchday": 37,
@@ -8770,7 +8770,7 @@
     {
       "id": "pl-2026-27-366-leeds-united-sunderland",
       "date": "2027-05-23",
-      "startAt": "2027-05-23T15:00:00+00:00",
+      "startAt": "2027-05-23T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 37",
       "matchday": 37,
@@ -8794,7 +8794,7 @@
     {
       "id": "pl-2026-27-367-manchester-city-aston-villa",
       "date": "2027-05-23",
-      "startAt": "2027-05-23T15:00:00+00:00",
+      "startAt": "2027-05-23T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 37",
       "matchday": 37,
@@ -8818,7 +8818,7 @@
     {
       "id": "pl-2026-27-368-newcastle-united-crystal-palace",
       "date": "2027-05-23",
-      "startAt": "2027-05-23T15:00:00+00:00",
+      "startAt": "2027-05-23T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 37",
       "matchday": 37,
@@ -8842,7 +8842,7 @@
     {
       "id": "pl-2026-27-369-nottingham-forest-ipswich-town",
       "date": "2027-05-23",
-      "startAt": "2027-05-23T15:00:00+00:00",
+      "startAt": "2027-05-23T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 37",
       "matchday": 37,
@@ -8866,7 +8866,7 @@
     {
       "id": "pl-2026-27-370-tottenham-hotspur-manchester-united",
       "date": "2027-05-23",
-      "startAt": "2027-05-23T15:00:00+00:00",
+      "startAt": "2027-05-23T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 37",
       "matchday": 37,
@@ -8890,7 +8890,7 @@
     {
       "id": "pl-2026-27-371-arsenal-brighton-hove-albion",
       "date": "2027-05-30",
-      "startAt": "2027-05-30T15:00:00+00:00",
+      "startAt": "2027-05-30T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 38",
       "matchday": 38,
@@ -8914,7 +8914,7 @@
     {
       "id": "pl-2026-27-372-aston-villa-tottenham-hotspur",
       "date": "2027-05-30",
-      "startAt": "2027-05-30T15:00:00+00:00",
+      "startAt": "2027-05-30T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 38",
       "matchday": 38,
@@ -8938,7 +8938,7 @@
     {
       "id": "pl-2026-27-373-chelsea-brentford",
       "date": "2027-05-30",
-      "startAt": "2027-05-30T15:00:00+00:00",
+      "startAt": "2027-05-30T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 38",
       "matchday": 38,
@@ -8962,7 +8962,7 @@
     {
       "id": "pl-2026-27-374-coventry-city-nottingham-forest",
       "date": "2027-05-30",
-      "startAt": "2027-05-30T15:00:00+00:00",
+      "startAt": "2027-05-30T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 38",
       "matchday": 38,
@@ -8986,7 +8986,7 @@
     {
       "id": "pl-2026-27-375-crystal-palace-leeds-united",
       "date": "2027-05-30",
-      "startAt": "2027-05-30T15:00:00+00:00",
+      "startAt": "2027-05-30T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 38",
       "matchday": 38,
@@ -9010,7 +9010,7 @@
     {
       "id": "pl-2026-27-376-hull-city-newcastle-united",
       "date": "2027-05-30",
-      "startAt": "2027-05-30T15:00:00+00:00",
+      "startAt": "2027-05-30T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 38",
       "matchday": 38,
@@ -9034,7 +9034,7 @@
     {
       "id": "pl-2026-27-377-ipswich-town-everton",
       "date": "2027-05-30",
-      "startAt": "2027-05-30T15:00:00+00:00",
+      "startAt": "2027-05-30T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 38",
       "matchday": 38,
@@ -9058,7 +9058,7 @@
     {
       "id": "pl-2026-27-378-liverpool-afc-bournemouth",
       "date": "2027-05-30",
-      "startAt": "2027-05-30T15:00:00+00:00",
+      "startAt": "2027-05-30T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 38",
       "matchday": 38,
@@ -9082,7 +9082,7 @@
     {
       "id": "pl-2026-27-379-manchester-united-fulham",
       "date": "2027-05-30",
-      "startAt": "2027-05-30T15:00:00+00:00",
+      "startAt": "2027-05-30T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 38",
       "matchday": 38,
@@ -9106,7 +9106,7 @@
     {
       "id": "pl-2026-27-380-sunderland-manchester-city",
       "date": "2027-05-30",
-      "startAt": "2027-05-30T15:00:00+00:00",
+      "startAt": "2027-05-30T15:00:00+01:00",
       "time": "15:00",
       "round": "Matchweek 38",
       "matchday": 38,

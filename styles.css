@@ -1274,3 +1274,37 @@ body.picker-open { overflow: hidden; }
   .picker-confirm { max-width: 560px; margin: 0 auto; border-radius: 20px; }
   .picker-confirm-scrim { align-items: center; padding: 0 20px; }
 }
+
+/* --- Competition choice and notification preferences --------------------- */
+
+.competition-choice { display: flex; gap: 8px; margin-top: 11px; }
+.competition-option { flex: 1; }
+.competition-option input { position: absolute; opacity: 0; pointer-events: none; }
+.competition-option span {
+  display: block;
+  padding: 10px 8px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: var(--white);
+  color: var(--muted);
+  font-size: .78rem;
+  font-weight: 900;
+  text-align: center;
+  cursor: pointer;
+}
+.competition-option input:checked + span { border-color: var(--purple); color: var(--purple); background: var(--purple-soft); }
+.competition-option input:focus-visible + span { box-shadow: 0 0 0 3px var(--purple-soft); }
+
+.notif-prefs { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--line); }
+.notif-hint { margin: 4px 0 10px; color: var(--muted); font-size: .78rem; }
+.notif-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 0;
+  font-size: .84rem;
+  font-weight: 800;
+}
+.notif-row + .notif-row { border-top: 1px solid var(--line); }
+.notif-row input { width: 20px; height: 20px; margin: 0; padding: 0; accent-color: var(--purple); }

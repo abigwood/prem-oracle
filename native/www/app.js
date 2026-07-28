@@ -1,6 +1,6 @@
 const SEASON_START = new Date("2026-08-21T20:00:00+01:00");
 const SEASON_START_DATE = "2026-08-21";
-const APP_BUILD = "20260728a";
+const APP_BUILD = "20260728b";
 const API = window.PREM_API || null;
 // Canonical public home of the web app. Inside the Capacitor shell the page is
 // served from premoracle://localhost, so location.origin can never be used to
@@ -16,6 +16,8 @@ const STORAGE = {
   activeLeague: "prem_oracle_active_league",
   recovery: "prem_oracle_recovery",
   pushToken: "prem_oracle_push_token",
+  competition: "prem_oracle_competition",
+  mutedCompetitions: "prem_oracle_muted_competitions",
 };
 
 function isNativeApp() {
@@ -28,6 +30,25 @@ function isNativeApp() {
 if (isNativeApp()) {
   document.documentElement.classList.add("is-native");
 }
+// --- Competitions -----------------------------------------------------------
+// Mirrors worker/src/competitions.js. A league is created for one competition
+// and stays there, so the app only ever holds one competition's fixtures at a
+// time — chosen by whichever league is active.
+const COMPETITIONS = {
+  PL: { code: "PL", name: "Premier League", short: "Premier League", rounds: 38, data: "data/fixtures.json" },
+  ELC: { code: "ELC", name: "EFL Championship", short: "Championship", rounds: 46, data: "data/fixtures-elc.json" },
+};
+const DEFAULT_COMPETITION = "PL";
+
+// Single flag gating Championship visibility. Flipped on once the v1.3 parity
+// gates pass; until then the Championship is invisible to members even though
+// the data and the worker are ready for it.
+const FEATURES = { elc: false };
+
+const competitionEnabled = (code) => code === DEFAULT_COMPETITION || (code === "ELC" && FEATURES.elc);
+const availableCompetitions = () => Object.keys(COMPETITIONS).filter(competitionEnabled);
+const competitionMeta = (code) => COMPETITIONS[code] || COMPETITIONS[DEFAULT_COMPETITION];
+
 const TEAM_MARKERS = {
   "AFC Bournemouth": { bg: "#DA291C", fg: "#FFFFFF", border: "#C8A657" },
   "Arsenal": { bg: "#E20613", fg: "#FFFFFF", border: "#9C824A" },
@@ -49,6 +70,33 @@ const TEAM_MARKERS = {
   "Nottingham Forest": { bg: "#DD0000", fg: "#FFFFFF", border: "#D1D5DB" },
   "Sunderland": { bg: "#E30613", fg: "#FFFFFF", border: "#111111" },
   "Tottenham Hotspur": { bg: "#FFFFFF", fg: "#132257", border: "#132257" },
+  // EFL Championship 2026/27. Same shape as above: primary kit colour, a
+  // readable foreground, and a secondary accent used for the badge outline —
+  // which is what keeps the white and pale kits visible on a white card.
+  "Birmingham City": { bg: "#0000A6", fg: "#FFFFFF", border: "#D1D5DB" },
+  "Blackburn Rovers": { bg: "#0B4EA2", fg: "#FFFFFF", border: "#8FD3F4" },
+  "Bolton Wanderers": { bg: "#FFFFFF", fg: "#20397C", border: "#20397C" },
+  "Bristol City": { bg: "#E21C38", fg: "#FFFFFF", border: "#1C1C1C" },
+  "Burnley": { bg: "#6C1D45", fg: "#FFFFFF", border: "#99D6EA" },
+  "Cardiff City": { bg: "#0070B5", fg: "#FFFFFF", border: "#D11524" },
+  "Charlton Athletic": { bg: "#D6161E", fg: "#FFFFFF", border: "#1C1C1C" },
+  "Derby County": { bg: "#FFFFFF", fg: "#000000", border: "#000000" },
+  "Lincoln City": { bg: "#D0161C", fg: "#FFFFFF", border: "#111111" },
+  "Middlesbrough": { bg: "#E21C38", fg: "#FFFFFF", border: "#000000" },
+  "Millwall": { bg: "#001D5B", fg: "#FFFFFF", border: "#D1D5DB" },
+  "Norwich City": { bg: "#FFF200", fg: "#00543C", border: "#00A650" },
+  "Portsmouth": { bg: "#001489", fg: "#FFFFFF", border: "#F2A900" },
+  "Preston North End": { bg: "#FFFFFF", fg: "#1B1F62", border: "#1B1F62" },
+  "Queens Park Rangers": { bg: "#1D5BA4", fg: "#FFFFFF", border: "#D1D5DB" },
+  "Sheffield United": { bg: "#CE1B22", fg: "#FFFFFF", border: "#000000" },
+  "Southampton": { bg: "#D71920", fg: "#FFFFFF", border: "#130C0E" },
+  "Stoke City": { bg: "#CE1F24", fg: "#FFFFFF", border: "#1B1B1B" },
+  "Swansea City": { bg: "#FFFFFF", fg: "#121212", border: "#121212" },
+  "Watford": { bg: "#FBEE23", fg: "#11210F", border: "#ED2127" },
+  "West Bromwich Albion": { bg: "#122F67", fg: "#FFFFFF", border: "#D1D5DB" },
+  "West Ham United": { bg: "#7A263A", fg: "#FFFFFF", border: "#1BB1E7" },
+  "Wolverhampton Wanderers": { bg: "#FDB913", fg: "#231F20", border: "#231F20" },
+  "Wrexham": { bg: "#C8001A", fg: "#FFFFFF", border: "#D1D5DB" },
 };
 // Official Premier League 3-letter club codes for all 2026/27 sides (incl. the
 // promoted trio: Coventry COV, Hull HUL, Ipswich IPS). Used everywhere a team
@@ -74,6 +122,31 @@ const TEAM_CODES = {
   "Nottingham Forest": "NFO",
   "Sunderland": "SUN",
   "Tottenham Hotspur": "TOT",
+  // EFL Championship 2026/27.
+  "Birmingham City": "BIR",
+  "Blackburn Rovers": "BLB",
+  "Bolton Wanderers": "BOL",
+  "Bristol City": "BRC",
+  "Burnley": "BUR",
+  "Cardiff City": "CAR",
+  "Charlton Athletic": "CHA",
+  "Derby County": "DER",
+  "Lincoln City": "LIN",
+  "Middlesbrough": "MID",
+  "Millwall": "MIL",
+  "Norwich City": "NOR",
+  "Portsmouth": "POR",
+  "Preston North End": "PNE",
+  "Queens Park Rangers": "QPR",
+  "Sheffield United": "SHU",
+  "Southampton": "SOU",
+  "Stoke City": "STK",
+  "Swansea City": "SWA",
+  "Watford": "WAT",
+  "West Bromwich Albion": "WBA",
+  "West Ham United": "WHU",
+  "Wolverhampton Wanderers": "WOL",
+  "Wrexham": "WRE",
 };
 // Real per-team forecast intel (rating + last-6 form) is loaded at runtime from
 // the fixtures feed's `teams` block — see loadFixtures(). It is intentionally
@@ -179,12 +252,16 @@ async function registerPushToken(token) {
 }
 
 async function loadFixtures(refresh = false) {
+  const competition = activeCompetition();
   try {
     let response = null;
     if (API) {
-      response = await fetch(`${API}/fixtures?${refresh ? "refresh=1&" : ""}t=${Date.now()}`, { cache: "no-store" }).catch(() => null);
+      response = await fetch(
+        `${API}/fixtures?competition=${competition}&${refresh ? "refresh=1&" : ""}t=${Date.now()}`,
+        { cache: "no-store" }
+      ).catch(() => null);
     }
-    if (!response?.ok) response = await fetch(`data/fixtures.json?t=${Date.now()}`, { cache: "no-store" });
+    if (!response?.ok) response = await fetch(`${competitionMeta(competition).data}?t=${Date.now()}`, { cache: "no-store" });
     if (!response.ok) throw new Error();
     const data = await response.json();
     fixtures = (data.fixtures || []).sort((a, b) =>
@@ -192,9 +269,11 @@ async function loadFixtures(refresh = false) {
       String(a.id).localeCompare(String(b.id))
     );
     teamIntel = (data.teams && typeof data.teams === "object") ? data.teams : {};
+    loadedCompetition = competition;
   } catch {
     fixtures = [];
     teamIntel = {};
+    loadedCompetition = null;
   }
 }
 
@@ -233,12 +312,36 @@ function leagueSupportsRounds(state) {
   return !!state && !state.error && "currentMatchday" in state;
 }
 
+// The competition the app is currently showing: whichever the active league
+// plays, remembered across launches so the first paint is never the wrong one.
+function activeCompetition() {
+  const code = leagueState?.competition || localStorage.getItem(STORAGE.competition) || DEFAULT_COMPETITION;
+  return competitionEnabled(code) ? code : DEFAULT_COMPETITION;
+}
+
+const seasonRounds = () => competitionMeta(activeCompetition()).rounds;
+const competitionName = () => competitionMeta(activeCompetition()).name;
+
+// Which competition the fixtures currently in memory belong to. Compared
+// against the active league rather than against the last remembered value,
+// because on a first run there is nothing remembered and the fixtures loaded
+// before the league state arrived — that mismatch is exactly the case that
+// would otherwise render a Championship league against Premier League cards.
+let loadedCompetition = null;
+
+function rememberCompetition(code) {
+  if (!code || !competitionEnabled(code)) return false;
+  localStorage.setItem(STORAGE.competition, code);
+  return code !== loadedCompetition;
+}
+
 async function loadLeagueState() {
   if (!activeLeague || !API) { leagueState = null; roundState = null; return; }
   try {
     // `uid` asks the worker for this viewer's own Trophy Cabinet alongside the
     // table; older workers simply ignore it.
     leagueState = await api(`/state?code=${encodeURIComponent(activeLeague)}&uid=${encodeURIComponent(uid())}`);
+    if (rememberCompetition(leagueState.competition)) await loadFixtures();
     saveLeagueName(leagueState.code, leagueState.name);
   } catch (error) {
     roundState = null;
@@ -448,9 +551,9 @@ function countPhrase(count, word) {
 
 function hero() {
   return `<section class="hero">
-    <span class="eyebrow">Premier League 2026/27 · ${countPhrase(38, "Matchweeks")}</span>
+    <span class="eyebrow">${escapeHTML(competitionName())} 2026/27 · ${countPhrase(seasonRounds(), "Matchweeks")}</span>
     <h1>Predict the scores.</h1>
-    <p>All ${countPhrase(380, "fixtures")}. Private leagues. Picks lock at kick-off.</p>
+    <p>All ${countPhrase(seasonRounds() * (activeCompetition() === "ELC" ? 12 : 10), "fixtures")}. Private leagues. Picks lock at kick-off.</p>
     <div class="countdown">⚽ <span>${daysToStart()}</span></div>
   </section>`;
 }
@@ -826,7 +929,7 @@ function todayView() {
     : "";
   return `${hero()}${installNotice()}${inviteCode && !leagueCodes.includes(inviteCode) ? `<div class="notice invite-notice"><span class="notice-icon">🏆</span><div><strong>League invitation: ${inviteCode}</strong><p>Open the League tab to join.</p></div></div>` : ""}${fixtureNotice()}
     <div class="section-head">
-      <div><span class="eyebrow">Next up · <span class="nowrap">Game ${homeMatchday} of 38</span></span><h2>${title}</h2><p>${subtitle}</p>${slateSummary(slate)}${progress}</div>
+      <div><span class="eyebrow">Next up · <span class="nowrap">Game ${homeMatchday} of ${seasonRounds()}</span></span><h2>${title}</h2><p>${subtitle}</p>${slateSummary(slate)}${progress}</div>
     </div>
     ${slateNotice(homeMatchday)}
     ${waiting ? "" : dayMatches.map(matchCard).join("")}`;
@@ -892,7 +995,7 @@ function leagueTableText(state) {
     const marker = movement > 0 ? `▲${movement}` : movement < 0 ? `▼${Math.abs(movement)}` : "-";
     return `${rank}. ${row.nick} ${marker} - ${row.pts} pts (${row.exact} exact)${row.wins ? ` 🏆x${row.wins}` : ""}`;
   });
-  return `Prem Oracle league table - ${state.name}\nUpdated ${updated}\n\n${rows.join("\n")}\n\nJoin on the web or in the app with code ${state.code}`;
+  return `Prem Oracle ${competitionMeta(state.competition || DEFAULT_COMPETITION).name} table - ${state.name}\nUpdated ${updated}\n\n${rows.join("\n")}\n\nJoin on the web or in the app with code ${state.code}`;
 }
 
 function winnerNames(round) {
@@ -902,12 +1005,22 @@ function winnerNames(round) {
     .join(" & ");
 }
 
+// The shared matchweek result leads with the podium — the same three names,
+// in the same order, as the banner on the League tab.
+function podiumShareLines(round) {
+  const podium = round?.podium || [];
+  if (!podium.length) return "";
+  const medals = { gold: "🏆", silver: "🥈", bronze: "🥉" };
+  return `${podium.map((entry) => `${medals[entry.place]} ${entry.nick} ${entry.pts} pts`).join("\n")}\n\n`;
+}
+
 function roundShareText(state, round) {
+  const competition = competitionMeta(state.competition || DEFAULT_COMPETITION).name;
   const head = round.complete
-    ? `🏆 Matchweek ${round.matchday}: won by ${winnerNames(round) || "nobody"}`
-    : `🏆 Matchweek ${round.matchday} · in progress`;
+    ? `🏆 ${competition} Matchweek ${round.matchday}: won by ${winnerNames(round) || "nobody"}`
+    : `🏆 ${competition} Matchweek ${round.matchday} · in progress`;
   const rows = (round.table || []).map((row, index) => `${row.rank || index + 1}. ${row.nick} - ${row.pts} pts (${row.exact} exact)`);
-  return `${head}\n\n${rows.join("\n")}\n\nJoin on the web or in the app with code ${state.code}`;
+  return `${head}\n\n${podiumShareLines(round)}${rows.join("\n")}\n\nJoin on the web or in the app with code ${state.code}`;
 }
 
 function roundToggle() {
@@ -921,7 +1034,7 @@ function roundToggle() {
 function matchdayPicker() {
   if (!matchdayPickerOpen) return "";
   const md = selectedMatchday || 1;
-  return `<div class="md-picker" role="group" aria-label="Choose matchweek">${Array.from({ length: 38 }, (_, i) => i + 1).map((n) =>
+  return `<div class="md-picker" role="group" aria-label="Choose matchweek">${Array.from({ length: seasonRounds() }, (_, i) => i + 1).map((n) =>
     `<button type="button" class="md-cell${n === md ? " active" : ""}" data-round-md="${n}">${n}</button>`).join("")}</div>`;
 }
 
@@ -932,12 +1045,12 @@ function fixtureHasResult(match) {
 }
 
 function seasonBanner(state) {
-  const played = state.currentMatchday == null ? 38 : Math.max(0, state.currentMatchday - 1);
+  const played = state.currentMatchday == null ? seasonRounds() : Math.max(0, state.currentMatchday - 1);
   const currentMatchdayHasResults = state.currentMatchdayHasResults ||
     fixtures.some((fixture) => fixture.matchday === state.currentMatchday && fixtureHasResult(fixture));
   const detail = currentMatchdayHasResults && state.currentMatchday != null
     ? `Matchweek ${state.currentMatchday} in progress`
-    : played === 0 ? `starts Matchweek ${state.currentMatchday || 1}` : `after Matchweek ${played} of 38`;
+    : played === 0 ? `starts Matchweek ${state.currentMatchday || 1}` : `after Matchweek ${played} of ${seasonRounds()}`;
   return `<div class="round-banner"><strong>Season 2026/27</strong><span>${detail}</span></div>`;
 }
 
@@ -984,12 +1097,12 @@ function roundBanner(round) {
   const md = round.matchday;
   if (round.complete) {
     const names = winnerNames(round);
-    return `<div class="round-banner is-success"><strong>Matchweek ${md} complete — won by ${names ? escapeHTML(names) : "nobody"} 🏆</strong><span><span class="nowrap">Game ${md} of 38 ·</span>all fixtures settled</span>${roundSlateLine(round)}${podiumSteps(round)}</div>`;
+    return `<div class="round-banner is-success"><strong>Matchweek ${md} complete — won by ${names ? escapeHTML(names) : "nobody"} 🏆</strong><span><span class="nowrap">Game ${md} of ${seasonRounds()} ·</span>all fixtures settled</span>${roundSlateLine(round)}${podiumSteps(round)}</div>`;
   }
   if (!round.status || round.status === "in progress") {
-    return `<div class="round-banner"><strong><span class="nowrap">Game ${md} of 38 ·</span>in progress</strong>${roundSlateLine(round)}</div>`;
+    return `<div class="round-banner"><strong><span class="nowrap">Game ${md} of ${seasonRounds()} ·</span>in progress</strong>${roundSlateLine(round)}</div>`;
   }
-  return `<div class="round-banner is-pending"><strong><span class="nowrap">Game ${md} of 38 ·</span>${escapeHTML(round.status)}</strong>${roundSlateLine(round)}</div>`;
+  return `<div class="round-banner is-pending"><strong><span class="nowrap">Game ${md} of ${seasonRounds()} ·</span>${escapeHTML(round.status)}</strong>${roundSlateLine(round)}</div>`;
 }
 
 function roundTableHtml(round) {
@@ -1354,6 +1467,12 @@ function leagueView() {
     <form class="league-form" data-create-league>
       <span class="eyebrow">Start a competition</span><h3>Create a league</h3>
       <input name="leagueName" maxlength="40" placeholder="Saturday Super 6" required>
+      ${availableCompetitions().length > 1 ? `<div class="competition-choice" role="radiogroup" aria-label="Competition">
+        ${availableCompetitions().map((code, index) => `<label class="competition-option">
+          <input type="radio" name="competition" value="${code}"${index === 0 ? " checked" : ""}>
+          <span>${escapeHTML(competitionMeta(code).short)}</span>
+        </label>`).join("")}
+      </div>` : ""}
       <label class="league-toggle">
         <input type="checkbox" name="customMix">
         <span><strong>Custom matchweek picks</strong><em>Host chooses ${SLATE_MIN}–${SLATE_MAX} fixtures each week</em></span>
@@ -1399,7 +1518,7 @@ function leagueView() {
     : state.error
       ? `<div class="empty"><strong>${escapeHTML(state.error)}</strong></div>`
       : `<section class="league-card">
-          <span class="eyebrow">Private predictor league</span>
+          <span class="eyebrow">${escapeHTML(competitionMeta(state.competition || DEFAULT_COMPETITION).name)}</span>
           <h2>${escapeHTML(state.name)}</h2>
           <div class="league-code"><span>League code</span><strong>${state.code}</strong></div>
           ${isOwner && state.customMix && state.currentMatchday != null && !state.currentSlate
@@ -1808,11 +1927,13 @@ document.addEventListener("submit", async (event) => {
     const form = new FormData(event.target);
     const name = form.get("leagueName");
     const customMix = form.get("customMix") != null;
+    const competition = String(form.get("competition") || DEFAULT_COMPETITION);
     try {
-      const response = await api("/league", { uid: uid(), nickname: playerName, name, customMix });
+      const response = await api("/league", { uid: uid(), nickname: playerName, name, customMix, competition });
       saveLeague(response.code);
       saveLeagueName(response.code, response.name);
       if (response.recovery) localStorage.setItem(STORAGE.recovery, response.recovery);
+      if (rememberCompetition(response.competition)) await loadFixtures();
       setFlash(`League created: ${response.code}`);
       await loadLeagueState();
     } catch (error) {
@@ -1867,8 +1988,51 @@ document.addEventListener("toggle", (event) => {
   else openScheduleDates.delete(card.dataset.dayCard);
 }, true);
 
+// --- Per-competition notification preferences -------------------------------
+// Midweek Champions League nights and Saturday Championship cards must never
+// erode the Premier League core, so a member can mute a whole competition
+// without losing the others. Only shown once more than one exists.
+
+let mutedCompetitions = readJSON(STORAGE.mutedCompetitions, []);
+
+function renderNotificationPrefs() {
+  const wrap = document.getElementById("notificationPrefs");
+  const list = document.getElementById("notificationPrefsList");
+  const codes = availableCompetitions();
+  if (!wrap || !list || codes.length < 2) {
+    if (wrap) wrap.hidden = true;
+    return;
+  }
+  wrap.hidden = false;
+  list.innerHTML = codes.map((code) => `<label class="notif-row">
+    <span>${escapeHTML(competitionMeta(code).name)}</span>
+    <input type="checkbox" data-notif-competition="${code}"${mutedCompetitions.includes(code) ? "" : " checked"}>
+  </label>`).join("");
+}
+
+async function saveNotificationPrefs() {
+  localStorage.setItem(STORAGE.mutedCompetitions, JSON.stringify(mutedCompetitions));
+  if (!API) return;
+  try {
+    await api("/notification-prefs", { uid: uid(), mute: mutedCompetitions });
+  } catch {
+    // Preferences are stored locally either way; the next launch retries.
+  }
+}
+
+document.addEventListener("change", (event) => {
+  const toggle = event.target.closest("[data-notif-competition]");
+  if (!toggle) return;
+  const code = toggle.dataset.notifCompetition;
+  mutedCompetitions = toggle.checked
+    ? mutedCompetitions.filter((entry) => entry !== code)
+    : [...new Set([...mutedCompetitions, code])];
+  saveNotificationPrefs();
+});
+
 document.getElementById("profileButton").addEventListener("click", () => {
   document.getElementById("playerName").value = playerName;
+  renderNotificationPrefs();
   document.getElementById("profileDialog").showModal();
 });
 

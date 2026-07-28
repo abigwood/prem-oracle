@@ -13,7 +13,7 @@
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" href="icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
-  <link rel="stylesheet" href="styles.css?v=20260728a">
+  <link rel="stylesheet" href="styles.css?v=20260728b">
 </head>
 <body>
   <header class="app-header">
@@ -54,6 +54,11 @@
       </div>
       <label for="playerName">Display name</label>
       <input id="playerName" maxlength="24" autocomplete="nickname" placeholder="Adam">
+      <div id="notificationPrefs" class="notif-prefs" hidden>
+        <span class="eyebrow">Notifications</span>
+        <p class="notif-hint">Kick-off reminders, per competition.</p>
+        <div id="notificationPrefsList"></div>
+      </div>
       <button class="primary wide" value="save">Save name</button>
     </form>
   </dialog>
@@ -63,6 +68,6 @@
   <script src="vendor/capacitor/push-notifications.js" defer></script>
   <script src="vendor/capacitor/app.js" defer></script>
   <script src="vendor/capacitor/share.js" defer></script>
-  <script src="app.js?v=20260728a" defer></script>
+  <script src="app.js?v=20260728b" defer></script>
 </body>
 </html>

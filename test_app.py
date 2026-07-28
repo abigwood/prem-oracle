@@ -20,9 +20,9 @@ class PremOracleTests(unittest.TestCase):
         sw = (ROOT / "sw.js").read_text()
         self.assertIn("Prem Oracle", html)
         self.assertIn("Prem Oracle", manifest)
-        self.assertIn("styles.css?v=20260728a", html)
-        self.assertIn("app.js?v=20260728a", html)
-        self.assertIn("prem-oracle-v1-20260728a", sw)
+        self.assertIn("styles.css?v=20260728b", html)
+        self.assertIn("app.js?v=20260728b", html)
+        self.assertIn("prem-oracle-v1-20260728b", sw)
         self.assertIn("https://prem-oracle-window.abigwood.workers.dev", html)
         self.assertIn("vendor/capacitor/push-notifications.js", html)
         self.assertIn("vendor/capacitor/share.js", html)
@@ -315,8 +315,23 @@ class ClubColourTests(unittest.TestCase):
         la, lb = cls._luminance(a), cls._luminance(b)
         return (max(la, lb) + 0.05) / (min(la, lb) + 0.05)
 
-    def test_all_twenty_clubs_have_markers(self):
-        self.assertEqual(len(self.markers), 20)
+    PREMIER_LEAGUE = {
+        "Arsenal", "Aston Villa", "AFC Bournemouth", "Brentford", "Brighton & Hove Albion",
+        "Chelsea", "Coventry City", "Crystal Palace", "Everton", "Fulham", "Hull City",
+        "Ipswich Town", "Leeds United", "Liverpool", "Manchester City", "Manchester United",
+        "Newcastle United", "Nottingham Forest", "Sunderland", "Tottenham Hotspur",
+    }
+
+    def test_all_twenty_premier_league_clubs_have_markers(self):
+        self.assertTrue(self.PREMIER_LEAGUE <= set(self.markers), self.PREMIER_LEAGUE - set(self.markers))
+
+    def test_all_twenty_four_championship_clubs_have_markers(self):
+        clubs = {c for f in json.loads((ROOT / "data/fixtures-elc.json").read_text())["fixtures"]
+                 for c in (f["player1"], f["player2"])}
+        self.assertEqual(len(clubs), 24)
+        self.assertTrue(clubs <= set(self.markers), clubs - set(self.markers))
+        # The two competitions between them are the whole marker table.
+        self.assertEqual(set(self.markers), self.PREMIER_LEAGUE | clubs)
 
     def test_approved_colour_refinements(self):
         expected = {
@@ -378,12 +393,12 @@ class MatchweekTerminologyTests(unittest.TestCase):
 
     def test_user_facing_strings_say_matchweek(self):
         for snippet in (
-            'countPhrase(38, "Matchweeks")',
+            'countPhrase(seasonRounds(), "Matchweeks")',
             'class="tour-badge">Matchweek ',
             "Opening matchweek",
             "Next matchweek",
             "MW ${value}",
-            "🏆 Matchweek ",
+            "🏆 ${competition} Matchweek ",
             "Matchweek ${md} \u25be",
             "Share Matchweek ",
             "Loading matchweek",
@@ -500,6 +515,73 @@ class ChampionshipTests(unittest.TestCase):
     def test_forecasts_remain_opt_in_in_the_builder(self):
         source = (ROOT / "scripts/build_elc_intel.mjs").read_text()
         self.assertIn('process.argv.includes("--with-forecasts")', source)
+
+
+class CompetitionAppTests(unittest.TestCase):
+    """v1.3: the app side of the competition foundation."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = (ROOT / "app.js").read_text()
+        cls.css = (ROOT / "styles.css").read_text()
+        cls.html = (ROOT / "index.html").read_text()
+        cls.worker = (ROOT / "worker/src/worker.js").read_text()
+
+    def test_championship_is_behind_a_single_flag_defaulting_off(self):
+        self.assertIn("const FEATURES = { elc: false };", self.app)
+        # With the flag off the Championship is not offered anywhere.
+        self.assertIn('code === "ELC" && FEATURES.elc', self.app)
+        self.assertIn("function availableCompetitions()", self.app.replace("const availableCompetitions = ()", "function availableCompetitions()"))
+
+    def test_competition_choice_only_appears_when_there_is_a_choice(self):
+        self.assertIn("availableCompetitions().length > 1", self.app)
+        self.assertIn('name="competition"', self.app)
+        self.assertIn('role="radiogroup"', self.app)
+        self.assertIn(".competition-choice", self.css)
+        # Premier League is the default and is listed first.
+        self.assertIn('const DEFAULT_COMPETITION = "PL";', self.app)
+        self.assertIn('const competition = String(form.get("competition") || DEFAULT_COMPETITION);', self.app)
+
+    def test_season_length_is_never_hardcoded(self):
+        self.assertIn("const seasonRounds = () => competitionMeta(activeCompetition()).rounds;", self.app)
+        self.assertIn("rounds: 38", self.app)
+        self.assertIn("rounds: 46", self.app)
+        # No stray "of 38" survives the change.
+        self.assertNotIn("of 38", self.app)
+
+    def test_the_app_loads_the_active_competitions_fixtures(self):
+        self.assertIn("`${API}/fixtures?competition=${competition}&", self.app)
+        self.assertIn("competitionMeta(competition).data", self.app)
+        self.assertIn('data: "data/fixtures-elc.json"', self.app)
+        # Switching league can switch competition, which means new fixtures.
+        self.assertIn("if (rememberCompetition(leagueState.competition)) await loadFixtures();", self.app)
+
+    def test_competition_identity_is_visible_in_header_and_shares(self):
+        self.assertIn("competitionMeta(state.competition || DEFAULT_COMPETITION).name", self.app)
+        self.assertIn("🏆 ${competition} Matchweek ", self.app)
+        self.assertIn("Prem Oracle ${competitionMeta(state.competition || DEFAULT_COMPETITION).name} table", self.app)
+
+    def test_matchweek_share_leads_with_the_podium(self):
+        self.assertIn("function podiumShareLines(round)", self.app)
+        self.assertIn('{ gold: "🏆", silver: "🥈", bronze: "🥉" }', self.app)
+        self.assertIn("${podiumShareLines(round)}${rows.join", self.app)
+
+    def test_per_competition_notification_preferences(self):
+        self.assertIn('id="notificationPrefs"', self.html)
+        self.assertIn("function renderNotificationPrefs()", self.app)
+        self.assertIn("data-notif-competition", self.app)
+        self.assertIn('await api("/notification-prefs", { uid: uid(), mute: mutedCompetitions });', self.app)
+        self.assertIn(".notif-row", self.css)
+        # Only worth showing once there is more than one competition.
+        self.assertIn("codes.length < 2", self.app)
+        # Server side honours it and re-registering a device does not un-mute.
+        self.assertIn("const mutes = (record, competition) =>", self.worker)
+        self.assertIn("mute: Array.isArray(existing?.mute) ? existing.mute : []", self.worker)
+
+    def test_worker_exposes_competition_endpoints(self):
+        for route in ('path === "/notification-prefs"', 'path === "/admin/migration"'):
+            self.assertIn(route, self.worker)
+        self.assertIn('FIXTURES_URL_ELC', (ROOT / "worker/wrangler.toml").read_text())
 
 
 class CustomMixTests(unittest.TestCase):
@@ -648,13 +730,13 @@ class TrophyTests(unittest.TestCase):
     def test_number_and_word_pairs_wrap_as_one_unit(self):
         self.assertIn(".nowrap { white-space: nowrap; }", self.css)
         self.assertIn('function countPhrase(count, word)', self.app)
-        for phrase in ('countPhrase(38, "Matchweeks")',
-                       'countPhrase(380, "fixtures")',
-                       '<span class="nowrap">Game ${homeMatchday} of 38</span>',
-                       '<span class="nowrap">Game ${md} of 38 ·</span>'):
+        for phrase in ('countPhrase(seasonRounds(), "Matchweeks")',
+                       '<span class="nowrap">Game ${homeMatchday} of ${seasonRounds()}</span>',
+                       '<span class="nowrap">Game ${md} of ${seasonRounds()} ·</span>'):
             self.assertIn(phrase, self.app, phrase)
         # The separator rides inside the wrapper, so a line never opens with "·".
         self.assertNotIn("of 38</span> ·", self.app)
+        self.assertNotIn("of 38", self.app)
 
 
 if __name__ == "__main__":

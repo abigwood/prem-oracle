@@ -949,20 +949,42 @@ function roundSlateLine(round) {
   return `<span class="round-slate">Custom Mix · ${countPhrase(count, count === 1 ? "fixture" : "fixtures")}</span>`;
 }
 
-// The weekly podium: one strip, up to three names, gold first.
-function podiumStrip(round) {
+const PLACE_NUMBER = { gold: "1", silver: "2", bronze: "3" };
+
+// One rostrum step. A shared place puts every name on the same widened step —
+// there is no second step to demote anyone to, because the podium rules never
+// award the place below a tie.
+function podiumStep(place, entries) {
+  return `<div class="podium-step podium-step-${place}${entries.length > 1 ? " podium-step-shared" : ""}">
+    <div class="podium-label">
+      <span class="podium-medal" aria-hidden="true">${PLACE_EMOJI[place]}</span>
+      ${entries.map((entry) => `<span class="podium-name">${escapeHTML(entry.nick)}</span>`).join("")}
+      <span class="podium-points">${countPhrase(entries[0].pts, "pts")}</span>
+    </div>
+    <div class="podium-block"><span>${PLACE_NUMBER[place]}</span></div>
+  </div>`;
+}
+
+// The weekly podium as a three-step rostrum: winner on the tallest middle step,
+// second to its left, third to its right. Steps are emitted gold-first so the
+// reading order matches the result, and ordered visually in CSS. A place nobody
+// reached simply has no step, so a two-player league renders two.
+function podiumSteps(round) {
   const podium = round?.podium || [];
   if (!podium.length) return "";
-  return `<div class="podium-strip">${podium.map((entry) =>
-    `<span class="podium-place podium-${entry.place}"><i aria-hidden="true">${PLACE_EMOJI[entry.place]}</i><span>${escapeHTML(entry.nick)}</span><b>${entry.pts}</b></span>`
-  ).join("")}</div>`;
+  const steps = ["gold", "silver", "bronze"]
+    .map((place) => [place, podium.filter((entry) => entry.place === place)])
+    .filter(([, entries]) => entries.length)
+    .map(([place, entries]) => podiumStep(place, entries))
+    .join("");
+  return `<div class="podium-steps" role="group" aria-label="Matchweek podium">${steps}</div>`;
 }
 
 function roundBanner(round) {
   const md = round.matchday;
   if (round.complete) {
     const names = winnerNames(round);
-    return `<div class="round-banner is-success"><strong>Matchweek ${md} complete — won by ${names ? escapeHTML(names) : "nobody"} 🏆</strong><span><span class="nowrap">Game ${md} of 38 ·</span>all fixtures settled</span>${roundSlateLine(round)}${podiumStrip(round)}</div>`;
+    return `<div class="round-banner is-success"><strong>Matchweek ${md} complete — won by ${names ? escapeHTML(names) : "nobody"} 🏆</strong><span><span class="nowrap">Game ${md} of 38 ·</span>all fixtures settled</span>${roundSlateLine(round)}${podiumSteps(round)}</div>`;
   }
   if (!round.status || round.status === "in progress") {
     return `<div class="round-banner"><strong><span class="nowrap">Game ${md} of 38 ·</span>in progress</strong>${roundSlateLine(round)}</div>`;

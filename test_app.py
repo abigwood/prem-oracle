@@ -514,9 +514,41 @@ class TrophyTests(unittest.TestCase):
         self.assertIn('countPhrase(week.pts, "pts")', self.app)
 
     def test_winner_banner_extends_to_a_podium(self):
-        self.assertIn("function podiumStrip(round)", self.app)
-        self.assertIn("podium-strip", self.css)
+        self.assertIn("function podiumSteps(round)", self.app)
         self.assertIn("Matchweek ${md} complete — won by", self.app)
+        # The banner header and the share button are unchanged by the restyle.
+        self.assertIn("Share Matchweek ", self.app)
+
+    def test_podium_renders_as_a_rostrum_of_steps(self):
+        self.assertIn("function podiumStep(place, entries)", self.app)
+        self.assertIn('PLACE_NUMBER = { gold: "1", silver: "2", bronze: "3" }', self.app)
+        for token in (".podium-steps", ".podium-step-gold", ".podium-step-silver",
+                      ".podium-step-bronze", ".podium-block"):
+            self.assertIn(token, self.css, token)
+        # Winner on the tallest middle step, second to its left, third to its right.
+        self.assertIn(".podium-step-gold { order: 2; }", self.css)
+        self.assertIn(".podium-step-silver { order: 1; }", self.css)
+        self.assertIn(".podium-step-bronze { order: 3; }", self.css)
+        self.assertIn(".podium-step-gold .podium-block { height: 52px; background: #F5B800; }", self.css)
+        self.assertIn(".podium-step-silver .podium-block { height: 34px; background: #C9CDD4; }", self.css)
+        self.assertIn(".podium-step-bronze .podium-block { height: 24px; background: #D9A276; }", self.css)
+        self.assertIn("border-radius: 9px 9px 0 0;", self.css)
+        # A shared place widens one step rather than inventing a second.
+        self.assertIn("podium-step-shared", self.app)
+        self.assertIn(".podium-step-shared { min-width: 108px; }", self.css)
+        # The old pill strip is gone.
+        self.assertNotIn("podium-strip", self.app)
+        self.assertNotIn("podium-strip", self.css)
+        self.assertNotIn(".podium-place", self.css)
+
+    def test_podium_steps_follow_the_award_rules(self):
+        source = self.app[self.app.index("function podiumSteps(round)"):][:700]
+        # No podium at all (dead week) still renders nothing.
+        self.assertIn("if (!podium.length) return \"\";", source)
+        # A place nobody reached has no step, so a two-player league gets two.
+        self.assertIn("filter(([, entries]) => entries.length)", source)
+        # Steps are emitted gold-first for reading order, placed visually by CSS.
+        self.assertIn('["gold", "silver", "bronze"]', source)
 
     def test_number_and_word_pairs_wrap_as_one_unit(self):
         self.assertIn(".nowrap { white-space: nowrap; }", self.css)

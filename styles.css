@@ -1048,29 +1048,49 @@ dialog label { display: block; margin-bottom: 6px; color: var(--muted); font-siz
 .host-slate-banner { margin: 0 0 12px; }
 .round-slate { display: block; margin-top: 4px; color: var(--purple); font-size: .72rem; font-weight: 800; }
 
-.podium-strip {
+/* The matchweek podium as a rostrum. Steps are written gold-silver-bronze so a
+   screen reader hears the result in order; `order` puts them on screen in the
+   classic second-first-third arrangement. */
+.podium-steps {
   display: flex;
-  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: center;
   gap: 6px;
-  margin-top: 9px;
+  margin-top: 14px;
 }
-.podium-place {
-  display: inline-flex;
+.podium-step {
+  display: flex;
+  flex-direction: column;
   align-items: center;
-  gap: 5px;
-  padding: 5px 9px;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  background: var(--white);
-  color: var(--ink);
-  font-size: .73rem;
-  font-weight: 800;
+  min-width: 76px;
 }
-.podium-place i { font-style: normal; }
-.podium-place b { color: var(--green); }
-.podium-gold { border-color: #e2c14a; background: #fffaea; }
-.podium-silver { border-color: #c3cad3; background: #f8fafc; }
-.podium-bronze { border-color: #d7a97f; background: #fdf5ec; }
+.podium-step-shared { min-width: 108px; }
+.podium-step-gold { order: 2; }
+.podium-step-silver { order: 1; }
+.podium-step-bronze { order: 3; }
+.podium-label {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  padding: 0 4px 6px;
+  text-align: center;
+}
+.podium-medal { font-size: 1.15rem; line-height: 1.1; }
+.podium-name { color: var(--ink); font-size: .78rem; font-weight: 900; overflow-wrap: anywhere; }
+.podium-points { color: var(--muted); font-size: .68rem; font-weight: 800; }
+.podium-block {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  border-radius: 9px 9px 0 0;
+  color: rgba(23, 32, 42, .62);
+  font-size: .72rem;
+  font-weight: 900;
+}
+.podium-step-gold .podium-block { height: 52px; background: #F5B800; }
+.podium-step-silver .podium-block { height: 34px; background: #C9CDD4; }
+.podium-step-bronze .podium-block { height: 24px; background: #D9A276; }
 
 .cabinet { margin-top: 20px; }
 .cabinet h3 { margin: 0 0 10px; font-family: Georgia, serif; font-size: 1rem; }

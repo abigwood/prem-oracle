@@ -1,9 +1,13 @@
 import {
+  applySlates,
   buildFixtureIcs,
   buildReveals,
+  computeCabinet,
+  computePodium,
   computeRoundTable,
   computeRoundWins,
   computeTableWithMovement,
+  fixturesByMatchweek,
   fixturesNeedingNotification,
   isVoided,
   matchLocked,
@@ -13,10 +17,14 @@ import {
   normRecovery,
   normaliseResult,
   parsePickParam,
+  reconcileSlate,
   roundComplete,
   roundStatus,
   roundWinners,
+  slateFixtures,
+  slateKey,
   validFootballScore,
+  validateSlate,
 } from "./logic.js";
 import { apnsConfigured, sendPush } from "./apns.js";
 import { autoSettleResults } from "./results_feed.js";
@@ -73,6 +81,64 @@ const kvPut = (env, key, value) => env.KV.put(key, JSON.stringify(value));
 const randomBytes = (n) => crypto.getRandomValues(new Uint8Array(n));
 const leagueMemberPrefix = (code) => `member:${code}:`;
 const leagueMemberKey = (code, uid) => `${leagueMemberPrefix(code)}${uid}`;
+const CUSTOM_MIX_INDEX = "index:custom_mix";
+
+// A league reads its slates when it is running Custom Mix, or ever has: turning
+// the toggle off must never silently rewrite the history of weeks that were
+// genuinely played on a curated slate. Every other league does zero extra KV
+// reads and keeps exactly today's behaviour.
+const slateAware = (league) => league?.customMix === true || league?.hadSlates === true;
+
+async function readSlates(env, code, matchweeks = null) {
+  if (matchweeks) {
+    const rows = await Promise.all(matchweeks.map(async (matchweek) =>
+      [matchweek, await kvGet(env, slateKey(code, matchweek))]));
+    return Object.fromEntries(rows.filter(([, slate]) => slate));
+  }
+  if (!env.KV.list) return {};
+  const prefix = `custom_slate:${code}:`;
+  const slates = {};
+  let cursor;
+  for (;;) {
+    const page = await env.KV.list({ prefix, cursor });
+    const rows = await Promise.all(page.keys.map(async (key) =>
+      [Number(key.name.slice(prefix.length)), await kvGet(env, key.name)]));
+    for (const [matchweek, slate] of rows) {
+      if (Number.isInteger(matchweek) && slate) slates[matchweek] = slate;
+    }
+    if (page.list_complete) break;
+    cursor = page.cursor;
+  }
+  return slates;
+}
+
+async function updateCustomMixIndex(env, code, member) {
+  const current = (await kvGet(env, CUSTOM_MIX_INDEX)) || [];
+  const next = member ? [...new Set([...current, code])] : current.filter((entry) => entry !== code);
+  if (next.length === current.length && next.every((entry, i) => entry === current[i])) return;
+  await kvPut(env, CUSTOM_MIX_INDEX, next);
+}
+
+// Sends one alert to a specific set of members. Everything league-scoped rides
+// the existing APNs path and the existing push:<uid> token records.
+async function pushToUids(env, uids, body) {
+  if (!apnsConfigured(env) || !uids?.length) return 0;
+  const payload = { aps: { alert: body, sound: "default" } };
+  let sent = 0;
+  await Promise.all([...new Set(uids)].map(async (uid) => {
+    const record = await kvGet(env, `push:${uid}`);
+    if (!record?.token) return;
+    try {
+      const response = await sendPush(record.token, payload, env);
+      if (response.status === 410) await env.KV.delete(`push:${uid}`);
+      else sent++;
+    } catch { /* transient APNs failure; retried on the next cron tick */ }
+  }));
+  return sent;
+}
+
+const hostNick = (memberList, league) =>
+  memberList.find((member) => member.uid === league.owner)?.nick || "Your host";
 
 export function mergeResultOverlay(match, overlay) {
   if (!overlay) return match;
@@ -213,15 +279,122 @@ async function createLeague(env, body) {
   let code;
   do code = makeCode(randomBytes); while (await kvGet(env, `league:${code}`));
   const name = String(body.name || "Saturday Super 6").trim().slice(0, 40);
+  const customMix = body.customMix === true;
   const now = Date.now();
   await kvPut(env, `league:${code}`, {
     code, name, owner: uid,
+    customMix,
     createdAt: now,
   });
+  if (customMix) await updateCustomMixIndex(env, code, true);
   await kvPut(env, leagueMemberKey(code, uid), { nick: user.nickname || "Anon", since: now });
   user.leagues = [...new Set([...(user.leagues || []), code])];
   await kvPut(env, `user:${uid}`, user);
-  return json({ ok: true, code, name, recovery: user.recovery }, 200, env);
+  return json({ ok: true, code, name, customMix, recovery: user.recovery }, 200, env);
+}
+
+// Hosts can turn Custom Mix on (or back off) after the league exists. Existing
+// slates are never touched — `hadSlates` keeps already-played weeks scored on
+// the slate they were actually played on.
+async function setCustomMix(env, body) {
+  const uid = String(body.uid || "").trim();
+  const code = String(body.code || "").trim().toUpperCase();
+  if (!uid || !code) return json({ error: "uid and code required" }, 400, env);
+  if (typeof body.enabled !== "boolean") return json({ error: "enabled must be true or false" }, 400, env);
+  const league = await kvGet(env, `league:${code}`);
+  if (!league) return json({ error: "league not found" }, 404, env);
+  if (uid !== league.owner) return json({ error: "only the league host can change custom matchweek picks" }, 403, env);
+  league.customMix = body.enabled;
+  await kvPut(env, `league:${code}`, league);
+  await updateCustomMixIndex(env, code, body.enabled);
+  return json({ ok: true, code, customMix: league.customMix }, 200, env);
+}
+
+// POST /league/slate — the host curates Matchweek N.
+//
+// `mode` is always stored explicitly: "custom" is a 6-10 fixture selection,
+// "full" is a host who deliberately chose the whole card. A slate is immutable
+// once set (409), because members may already hold picks against it.
+async function setSlate(env, body) {
+  const uid = String(body.uid || "").trim();
+  const code = String(body.code || "").trim().toUpperCase();
+  const matchweek = Number(body.matchweek);
+  if (!uid || !code) return json({ error: "uid and code required" }, 400, env);
+  if (!Number.isInteger(matchweek) || matchweek < 1) return json({ error: "matchweek required" }, 400, env);
+  const league = await kvGet(env, `league:${code}`);
+  if (!league) return json({ error: "league not found" }, 404, env);
+  if (uid !== league.owner) return json({ error: "only the league host can set the fixtures" }, 403, env);
+  if (!league.customMix) return json({ error: "custom matchweek picks are not enabled for this league" }, 400, env);
+  const existing = await kvGet(env, slateKey(code, matchweek));
+  if (existing) return json({ error: "this matchweek's fixtures are already set", slate: existing }, 409, env);
+
+  const matchList = await fixtures(env);
+  const roundFixtures = matchList.filter((match) => match.matchday === matchweek);
+  const mode = String(body.mode || "custom");
+  const validated = validateSlate(mode, body.fixtureIds, roundFixtures);
+  if (validated.error) return json({ error: validated.error }, 400, env);
+
+  const slate = {
+    mode,
+    fixtureIds: validated.fixtureIds,
+    lockedAt: new Date().toISOString(),
+    setBy: uid,
+  };
+  await kvPut(env, slateKey(code, matchweek), slate);
+  if (!league.hadSlates) {
+    league.hadSlates = true;
+    await kvPut(env, `league:${code}`, league);
+  }
+
+  const memberList = await members(env, league);
+  await pushToUids(
+    env,
+    memberList.filter((member) => member.uid !== uid).map((member) => member.uid),
+    `${hostNick(memberList, league)} has set ${slate.fixtureIds.length} fixtures for Matchweek ${matchweek}. Make your picks!`
+  );
+  return json({ ok: true, code, matchweek, slate }, 200, env);
+}
+
+// Account deletion, and with it host succession: a league never ends up ownerless.
+// Authority passes to the longest-standing remaining member (the member list is
+// already ordered by join time), who is told they are now the host.
+async function deleteAccount(env, body) {
+  const uid = String(body.uid || "").trim();
+  if (!uid) return json({ error: "uid required" }, 400, env);
+  const user = await kvGet(env, `user:${uid}`);
+  const codes = [...new Set(user?.leagues || [])];
+  const succession = [];
+  const closed = [];
+  for (const code of codes) {
+    const league = await kvGet(env, `league:${code}`);
+    if (!league) continue;
+    const remaining = (await members(env, league)).filter((member) => member.uid !== uid);
+    await env.KV.delete(leagueMemberKey(code, uid));
+    if (league.owner !== uid) continue;
+    if (!remaining.length) {
+      await env.KV.delete(`league:${code}`);
+      await updateCustomMixIndex(env, code, false);
+      closed.push(code);
+      continue;
+    }
+    const heir = remaining[0];
+    league.owner = heir.uid;
+    league.members = (league.members || []).filter((entry) => entry !== uid);
+    await kvPut(env, `league:${code}`, league);
+    succession.push({ code, name: league.name, uid: heir.uid, nick: heir.nick });
+  }
+  if (user?.recovery) await env.KV.delete(`recovery:${user.recovery}`);
+  await env.KV.delete(`push:${uid}`);
+  await env.KV.delete(`user:${uid}`);
+  for (const entry of succession) {
+    await pushToUids(env, [entry.uid], `You're now the host of ${entry.name} — you pick the fixtures each matchweek.`);
+  }
+  return json({
+    ok: true,
+    uid,
+    closed,
+    succession: succession.map(({ code, uid: heirUid, nick }) => ({ code, owner: heirUid, nick })),
+  }, 200, env);
 }
 
 async function joinLeague(env, body) {
@@ -256,6 +429,11 @@ async function deleteLeague(env, body) {
     await kvPut(env, `user:${memberUid}`, user);
   }));
   await Promise.all(memberList.map(({ uid: memberUid }) => env.KV.delete(leagueMemberKey(code, memberUid))));
+  if (env.KV.list) {
+    const slateKeys = await listAllKeys(env, `custom_slate:${code}:`);
+    await Promise.all(slateKeys.map((key) => env.KV.delete(key)));
+  }
+  await updateCustomMixIndex(env, code, false);
   await env.KV.delete(`league:${code}`);
   return json({ ok: true, code }, 200, env);
 }
@@ -366,6 +544,15 @@ async function savePushToken(env, body) {
   return json({ ok: true }, 200, env);
 }
 
+const publicSlate = (slate, matchweek) => (slate ? {
+  matchweek,
+  mode: slate.mode,
+  fixtureIds: slate.fixtureIds,
+  count: slate.fixtureIds.length,
+  setBy: slate.setBy || null,
+  lockedAt: slate.lockedAt || null,
+} : null);
+
 async function state(env, url) {
   const code = String(url.searchParams.get("code") || "").toUpperCase();
   const league = await kvGet(env, `league:${code}`);
@@ -386,34 +573,51 @@ async function state(env, url) {
   const mdParam = url.searchParams.get("md");
   const md = mdParam == null ? null : Number(mdParam);
   if (md != null && Number.isInteger(md) && md > 0) {
-    const roundFixtures = matchList.filter((match) => match.matchday === md);
-    const table = computeRoundTable(memberList, completed, picks, md).map((row, index) => ({ ...row, rank: index + 1 }));
+    // Round view: one slate read, and only for a league that runs Custom Mix.
+    const slate = slateAware(league) ? await kvGet(env, slateKey(code, md)) : null;
+    const roundFixtures = slateFixtures(slate, matchList.filter((match) => match.matchday === md));
+    const scoped = slate ? applySlates(completed, { [md]: slate }) : completed;
+    const table = computeRoundTable(memberList, scoped, picks, md).map((row, index) => ({ ...row, rank: index + 1 }));
     return json({
       code,
       name: league.name,
       owner: league.owner,
+      customMix: league.customMix === true,
       matchday: md,
+      slate: publicSlate(slate, md),
       table,
       status: roundStatus(roundFixtures),
       complete: roundComplete(roundFixtures),
       winners: roundWinners(memberList, roundFixtures, picks),
+      podium: computePodium(memberList, roundFixtures, picks),
     }, 200, env);
   }
 
-  const wins = computeRoundWins(memberList, matchList, picks);
-  const unplayed = matchList.filter((match) => match.matchday != null && !normaliseResult(match) && !isVoided(match));
+  // Season view. Every week is scored on whatever slate it was played on, so a
+  // season total accumulates across full cards and curated weeks alike.
+  const slates = slateAware(league) ? await readSlates(env, code) : {};
+  const scopedFixtures = applySlates(matchList, slates);
+  const scopedCompleted = applySlates(completed, slates);
+  const wins = computeRoundWins(memberList, matchList, picks, slates);
+  const unplayed = scopedFixtures.filter((match) => match.matchday != null && !normaliseResult(match) && !isVoided(match));
   const currentMatchday = unplayed.length ? Math.min(...unplayed.map((match) => match.matchday)) : null;
-  const currentMatchdayFixtures = currentMatchday == null ? [] : matchList.filter((match) => match.matchday === currentMatchday);
+  const currentMatchdayFixtures = currentMatchday == null
+    ? []
+    : scopedFixtures.filter((match) => match.matchday === currentMatchday);
   const currentMatchdayHasResults = currentMatchdayFixtures.some((match) => !!normaliseResult(match));
+  const viewer = url.searchParams.get("uid") || "";
   return json({
     code,
     name: league.name,
     owner: league.owner,
+    customMix: league.customMix === true,
     currentMatchday,
     currentMatchdayStatus: currentMatchday == null ? "complete" : roundStatus(currentMatchdayFixtures),
     currentMatchdayHasResults,
-    table: computeTableWithMovement(memberList, completed, picks).map((row) => ({ ...row, wins: wins[row.uid] || 0 })),
-    reveals: buildReveals(memberList, matchList, picks, Date.now()).slice(0, 20),
+    currentSlate: currentMatchday == null ? null : publicSlate(slates[currentMatchday] || null, currentMatchday),
+    table: computeTableWithMovement(memberList, scopedCompleted, picks).map((row) => ({ ...row, wins: wins[row.uid] || 0 })),
+    reveals: buildReveals(memberList, scopedFixtures, picks, Date.now()).slice(0, 20),
+    cabinet: viewer ? computeCabinet(viewer, memberList, matchList, picks, slates) : null,
   }, 200, env);
 }
 
@@ -518,6 +722,160 @@ async function notifyKickoffs(env) {
   }
 }
 
+// A host who never answers must not ambush their league with a full card two
+// hours before kick-off, so the fallback runs a clear day out: once the next
+// matchweek is inside 24 hours and still has no slate, the whole card unlocks
+// and every member is told.
+const FALLBACK_LEAD_MS = 24 * 60 * 60 * 1000;
+const SLATE_NOTICE_TTL_S = 60 * 24 * 60 * 60;
+const PODIUM_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000;
+const PLACE_EMOJI = { gold: "🏆", silver: "🥈", bronze: "🥉" };
+
+const kickoffMs = (match) => Date.parse(match.startAt || match.lockAt) || Infinity;
+const byKickoff = (a, b) => kickoffMs(a) - kickoffMs(b) || String(a.id).localeCompare(String(b.id));
+const fixtureLabel = (match) => (match ? `${match.player1} v ${match.player2}` : "a fixture");
+
+// The next matchweek to kick off. Schedule-driven rather than results-driven so
+// a lingering postponement in an earlier week can't stall the host reminder.
+// `open` is the next matchweek to kick off — reminder and fallback territory.
+// `live` is anything already under way but not yet settled, where a fixture can
+// still be postponed out of a slate members are actively picking.
+function relevantMatchweeks(byMatchweek, nowMs) {
+  let open = null;
+  const live = [];
+  for (const [matchweek, list] of byMatchweek) {
+    const first = Math.min(...list.map(kickoffMs));
+    if (!Number.isFinite(first)) continue;
+    const entry = { matchweek, firstKickoff: first, fixtures: list };
+    if (first > nowMs) {
+      if (!open || first < open.firstKickoff) open = entry;
+      continue;
+    }
+    if (roundComplete(list)) continue;
+    // A week nobody has played for a fortnight is done with, whatever a stray
+    // unsettled fixture says — don't re-read its slate on every tick forever.
+    if (Math.max(...list.map(kickoffMs)) < nowMs - PODIUM_LOOKBACK_MS) continue;
+    live.push(entry);
+  }
+  return { open, live };
+}
+
+async function remindHost(env, league, matchweek) {
+  const key = `notified:slate-open:${league.code}:${matchweek}`;
+  if (await env.KV.get(key)) return;
+  await pushToUids(env, [league.owner], `Matchweek ${matchweek} is open — pick your fixtures for ${league.name}.`);
+  await env.KV.put(key, "1", { expirationTtl: SLATE_NOTICE_TTL_S });
+}
+
+async function applyFallback(env, league, matchweek, roundFixtures) {
+  const slate = {
+    mode: "fallback",
+    fixtureIds: [...roundFixtures].sort(byKickoff).map((match) => String(match.id)),
+    lockedAt: new Date().toISOString(),
+    setBy: null,
+  };
+  await kvPut(env, slateKey(league.code, matchweek), slate);
+  if (!league.hadSlates) {
+    league.hadSlates = true;
+    await kvPut(env, `league:${league.code}`, league);
+  }
+  const memberList = await members(env, league);
+  await pushToUids(
+    env,
+    memberList.map((member) => member.uid),
+    `Matchweek ${matchweek} in ${league.name} is a full card — all ${slate.fixtureIds.length} fixtures are open. Get your picks in!`
+  );
+}
+
+async function reconcilePostponements(env, league, slate, matchweek, roundFixtures, nowMs) {
+  const change = reconcileSlate(slate, roundFixtures, nowMs);
+  if (!change) return;
+  await kvPut(env, slateKey(league.code, matchweek), {
+    ...slate,
+    fixtureIds: change.fixtureIds,
+    revisedAt: new Date().toISOString(),
+  });
+  const byId = new Map(roundFixtures.map((match) => [String(match.id), match]));
+  const gone = change.dropped.map((id) => fixtureLabel(byId.get(id))).join(", ");
+  const body = change.added.length
+    ? `${gone} was postponed in ${league.name} — ${change.added.map((id) => fixtureLabel(byId.get(id))).join(", ")} takes its place in Matchweek ${matchweek}.`
+    : `${gone} was postponed and no longer counts in ${league.name}. Matchweek ${matchweek} now scores ${change.fixtureIds.length} fixtures.`;
+  const memberList = await members(env, league);
+  await pushToUids(env, memberList.map((member) => member.uid), body);
+}
+
+// Per-tick Custom Mix upkeep: remind an idle host, unlock the full card when the
+// deadline arrives, and keep a live slate honest through postponements. Reads
+// are proportional to the number of Custom Mix leagues, not to every league.
+async function customMixMaintenance(env) {
+  const codes = (await kvGet(env, CUSTOM_MIX_INDEX)) || [];
+  if (!codes.length) return;
+  const now = Date.now();
+  const matchList = await fixtures(env);
+  const { open, live } = relevantMatchweeks(fixturesByMatchweek(matchList), now);
+  if (!open && !live.length) return;
+  for (const code of codes) {
+    const league = await kvGet(env, `league:${code}`);
+    if (!league?.customMix || !league.owner) continue;
+    for (const week of live) {
+      const slate = await kvGet(env, slateKey(code, week.matchweek));
+      if (slate) await reconcilePostponements(env, league, slate, week.matchweek, week.fixtures, now);
+    }
+    if (!open) continue;
+    const slate = await kvGet(env, slateKey(code, open.matchweek));
+    if (slate) {
+      await reconcilePostponements(env, league, slate, open.matchweek, open.fixtures, now);
+    } else if (now >= open.firstKickoff - FALLBACK_LEAD_MS) {
+      await applyFallback(env, league, open.matchweek, open.fixtures);
+    } else {
+      await remindHost(env, league, open.matchweek);
+    }
+  }
+}
+
+const podiumMessage = (league, matchweek, podium) =>
+  `Matchweek ${matchweek} podium in ${league.name}: ${podium.map((entry) => `${PLACE_EMOJI[entry.place]} ${entry.nick} ${entry.pts}`).join(" · ")}`;
+
+// One podium announcement per league per matchweek, on the existing APNs path.
+// The whole sweep is skipped unless the settled-fixture count has moved since
+// last time, so idle ticks cost a single KV read rather than a pick scan.
+async function podiumAnnouncements(env) {
+  if (!env.KV.list) return;
+  const now = Date.now();
+  const matchList = await fixtures(env);
+  const settled = matchList.filter((match) => normaliseResult(match) || isVoided(match)).length;
+  if ((await kvGet(env, "sweep:settled")) === settled) return;
+  const leagueKeys = await listAllKeys(env, "league:");
+  if (leagueKeys.length) {
+    const picks = await allPicks(env, matchList.map((match) => match.id));
+    const byMatchweek = [...fixturesByMatchweek(matchList).entries()].sort((a, b) => b[0] - a[0]);
+    for (const key of leagueKeys) {
+      const league = await kvGet(env, key);
+      if (!league?.code) continue;
+      const slates = slateAware(league) ? await readSlates(env, league.code) : {};
+      let target = null;
+      for (const [matchweek, all] of byMatchweek) {
+        const roundFixtures = slateFixtures(slates[matchweek] || null, all);
+        if (!roundComplete(roundFixtures)) continue;
+        // Only ever announce a week that has just wrapped, so switching this on
+        // mid-season can never replay the whole back catalogue.
+        if (Math.max(...roundFixtures.map(kickoffMs)) < now - PODIUM_LOOKBACK_MS) break;
+        target = { matchweek, roundFixtures };
+        break;
+      }
+      if (!target) continue;
+      const noticeKey = `notified:podium:${league.code}:${target.matchweek}`;
+      if (await env.KV.get(noticeKey)) continue;
+      const memberList = await members(env, league);
+      const podium = computePodium(memberList, target.roundFixtures, picks);
+      await env.KV.put(noticeKey, "1", { expirationTtl: SLATE_NOTICE_TTL_S });
+      if (!podium.length) continue;
+      await pushToUids(env, memberList.map((member) => member.uid), podiumMessage(league, target.matchweek, podium));
+    }
+  }
+  await kvPut(env, "sweep:settled", settled);
+}
+
 async function autoSettle(env) {
   if (!env.FOOTBALL_DATA_TOKEN) return;
   const matchList = await fixtures(env, true);
@@ -532,6 +890,8 @@ export default {
   async scheduled(_event, env, ctx) {
     ctx.waitUntil(notifyKickoffs(env));
     ctx.waitUntil(autoSettle(env));
+    ctx.waitUntil(customMixMaintenance(env));
+    ctx.waitUntil(podiumAnnouncements(env));
   },
   async fetch(request, env) {
     if (request.method === "OPTIONS") return applyCors(new Response(null, { headers: cors(env) }), env, request);
@@ -560,6 +920,9 @@ async function route(request, env) {
       if (path === "/league/delete") return await deleteLeague(env, body);
       if (path === "/league/kick") return await kickMember(env, body);
       if (path === "/league/nick") return await updateLeagueNick(env, body);
+      if (path === "/league/slate") return await setSlate(env, body);
+      if (path === "/league/custom-mix") return await setCustomMix(env, body);
+      if (path === "/account/delete") return await deleteAccount(env, body);
       if (path === "/restore") return await restore(env, body);
       if (path === "/pick") return await savePick(env, body);
       if (path === "/push-token") return await savePushToken(env, body);

@@ -121,22 +121,211 @@ export function roundWinners(members, roundFixtures, picksByMatch) {
   return table.filter((row) => row.pts === top).map((row) => row.uid);
 }
 
-// Per-uid tally of matchday wins across every complete round.
-export function computeRoundWins(members, fixtures, picksByMatch) {
-  const wins = Object.fromEntries(members.map((member) => [member.uid, 0]));
-  const byMatchday = new Map();
+export const PODIUM_PLACES = ["gold", "silver", "bronze"];
+
+// Competition ranking on POINTS ONLY. The season table's exact/correct
+// tie-breakers order rows for display but must never split a podium place:
+// 9-9-7 is gold, gold, bronze; 9-7-7 is gold, silver, silver and no bronze;
+// 9-9-9 is three golds. A zero score is never a podium finish, so a week where
+// nobody scored awards nothing at all (matching roundWinners' suppression).
+export function podiumFromTable(table, memberCount) {
+  const rows = table || [];
+  if (!rows.length || rows[0].pts <= 0) return [];
+  // Explicit guard: a two-player league has a gold and a silver and no third
+  // place — never assume a third player exists to fill the bronze slot.
+  const places = Math.min(PODIUM_PLACES.length, memberCount);
+  const podium = [];
+  for (const row of rows) {
+    if (row.pts <= 0) continue;
+    const rank = rows.filter((other) => other.pts > row.pts).length + 1;
+    if (rank > places) continue;
+    podium.push({ uid: row.uid, nick: row.nick, pts: row.pts, rank, place: PODIUM_PLACES[rank - 1] });
+  }
+  return podium;
+}
+
+// The podium for one completed round, over whatever slate the round was played
+// on (full card or a Custom Mix selection — the caller filters the fixtures).
+export function computePodium(members, roundFixtures, picksByMatch) {
+  if (!roundComplete(roundFixtures)) return [];
+  return podiumFromTable(
+    computeTable(members, roundFixtures.map(matchToCompleted), picksByMatch),
+    members.length
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Custom Mix slates
+//
+// A slate is one league's answer to "which fixtures does Matchweek N score?".
+// The record is `{ mode, fixtureIds, lockedAt, setBy }` under
+// custom_slate:<code>:<matchweek>, and intent is always stored, never inferred
+// from the absence of a key: "custom" is a host selection, "full" is a host who
+// deliberately chose the whole card, "fallback" is a host who never answered and
+// had the full card unlocked for them. No record at all means a league that
+// isn't running Custom Mix, which keeps every existing league untouched.
+// ---------------------------------------------------------------------------
+
+export const SLATE_MIN = 6;
+export const SLATE_MAX = 10;
+export const SLATE_MODES = ["custom", "full", "fallback"];
+
+export const slateKey = (code, matchweek) => `custom_slate:${code}:${matchweek}`;
+
+// Slate types the member-facing UI distinguishes: an unanswered fallback reads
+// as a full card, because that is exactly what the league played.
+export const slateType = (slate) => (slate?.mode === "custom" ? "custom" : "full");
+
+// Validates a host submission against the fixtures actually in that matchweek.
+// Returns the canonical id list (deduped, in kickoff order) or an error string.
+export function validateSlate(mode, fixtureIds, roundFixtures) {
+  if (!roundFixtures.length) return { error: "matchweek has no fixtures" };
+  const ordered = [...roundFixtures].sort((a, b) =>
+    (Date.parse(a.startAt || a.lockAt) || 0) - (Date.parse(b.startAt || b.lockAt) || 0) ||
+    String(a.id).localeCompare(String(b.id))
+  );
+  if (mode === "full") return { fixtureIds: ordered.map((match) => String(match.id)) };
+  if (mode !== "custom") return { error: "mode must be custom or full" };
+  if (!Array.isArray(fixtureIds)) return { error: "fixtureIds must be an array" };
+  const requested = fixtureIds.map((id) => String(id ?? "").trim()).filter(Boolean);
+  if (new Set(requested).size !== requested.length) return { error: "fixtureIds must be unique" };
+  const available = new Map(ordered.map((match) => [String(match.id), match]));
+  const unknown = requested.find((id) => !available.has(id));
+  if (unknown) return { error: `fixture not in this matchweek: ${unknown}` };
+  if (requested.length < SLATE_MIN || requested.length > SLATE_MAX) {
+    return { error: `select between ${SLATE_MIN} and ${SLATE_MAX} fixtures` };
+  }
+  const chosen = new Set(requested);
+  return { fixtureIds: ordered.filter((match) => chosen.has(String(match.id))).map((match) => String(match.id)) };
+}
+
+// The fixtures a league actually scores for one matchweek. A league with no
+// slate for that week keeps today's behaviour: the whole card.
+export function slateFixtures(slate, roundFixtures) {
+  if (!slate?.fixtureIds?.length) return roundFixtures;
+  const allow = new Set(slate.fixtureIds.map(String));
+  return roundFixtures.filter((match) => allow.has(String(match.id)));
+}
+
+// Season-wide version: every fixture whose own matchweek slate includes it.
+// Weeks without a slate contribute their full card, so a season total
+// accumulates across whatever each week's slate happened to be.
+export function applySlates(matches, slatesByMatchweek) {
+  const weeks = Object.keys(slatesByMatchweek || {});
+  if (!weeks.length) return matches;
+  const allowByWeek = new Map(weeks
+    .filter((week) => slatesByMatchweek[week]?.fixtureIds?.length)
+    .map((week) => [Number(week), new Set(slatesByMatchweek[week].fixtureIds.map(String))]));
+  if (!allowByWeek.size) return matches;
+  return matches.filter((match) => {
+    const allow = allowByWeek.get(Number(match.matchday));
+    return !allow || allow.has(String(match.id));
+  });
+}
+
+export function fixturesByMatchweek(fixtures) {
+  const byMatchweek = new Map();
   for (const match of fixtures) {
     if (match?.matchday == null) continue;
-    const list = byMatchday.get(match.matchday) || [];
+    const list = byMatchweek.get(match.matchday) || [];
     list.push(match);
-    byMatchday.set(match.matchday, list);
+    byMatchweek.set(match.matchday, list);
   }
-  for (const roundFixtures of byMatchday.values()) {
+  return byMatchweek;
+}
+
+// One member's Trophy Cabinet: the summary shelf plus a week-by-week history of
+// played matchweeks. Derived entirely from picks, results and the slate records
+// that already exist — deliberately no new stored state.
+export function computeCabinet(uid, members, fixtures, picksByMatch, slatesByMatchweek = {}) {
+  const member = members.find((row) => row.uid === uid);
+  if (!member) return null;
+  const totals = { gold: 0, silver: 0, bronze: 0 };
+  const weeks = [];
+  const ordered = [...fixturesByMatchweek(fixtures).entries()].sort((a, b) => b[0] - a[0]);
+  for (const [matchweek, all] of ordered) {
+    const slate = slatesByMatchweek[matchweek] || null;
+    const roundFixtures = slateFixtures(slate, all);
+    if (!roundComplete(roundFixtures)) continue;
+    const completed = roundFixtures.map(matchToCompleted);
+    // A member who joined mid-season has no claim on weeks that had already
+    // kicked off — computeTable scores those as zero, which is not a played week.
+    if (member.since && !completed.some((match) => match.startMs >= member.since)) continue;
+    const table = computeTable(members, completed, picksByMatch);
+    const row = table.find((entry) => entry.uid === uid);
+    if (!row) continue;
+    const award = podiumFromTable(table, members.length).find((entry) => entry.uid === uid) || null;
+    if (award) totals[award.place] += 1;
+    weeks.push({
+      matchweek,
+      place: award?.place || null,
+      rank: table.filter((other) => other.pts > row.pts).length + 1,
+      pts: row.pts,
+      slateType: slateType(slate),
+      fixtures: roundFixtures.length,
+    });
+  }
+  return {
+    uid,
+    nick: member.nick,
+    ...totals,
+    podiums: totals.gold + totals.silver + totals.bronze,
+    weeks,
+  };
+}
+
+// Per-uid tally of matchday wins across every complete round.
+export function computeRoundWins(members, fixtures, picksByMatch, slatesByMatchweek = {}) {
+  const wins = Object.fromEntries(members.map((member) => [member.uid, 0]));
+  for (const [matchweek, all] of fixturesByMatchweek(fixtures)) {
+    const roundFixtures = slateFixtures(slatesByMatchweek[matchweek] || null, all);
     for (const uid of roundWinners(members, roundFixtures, picksByMatch)) {
       if (uid in wins) wins[uid] += 1;
     }
   }
   return wins;
+}
+
+// Keeps a live Custom Mix slate honest when a curated fixture is postponed.
+//
+// Fairness beats slate size: a fixture may only be swapped in while NOTHING on
+// the slate has locked, because after that members already hold picks and would
+// be ambushed by a fixture they never saw. Once any slate fixture has locked the
+// postponed one is simply dropped, even if that leaves fewer than six.
+export function reconcileSlate(slate, roundFixtures, nowMs) {
+  if (slate?.mode !== "custom" || !slate.fixtureIds?.length) return null;
+  const byId = new Map(roundFixtures.map((match) => [String(match.id), match]));
+  const current = slate.fixtureIds.map(String);
+  const dropped = current.filter((id) => {
+    const match = byId.get(id);
+    return !match || isVoided(match) || String(match.status || "").toLowerCase() === "postponed";
+  });
+  if (!dropped.length) return null;
+  const kept = current.filter((id) => !dropped.includes(id));
+  const anyLocked = current.some((id) => {
+    const match = byId.get(id);
+    return match && matchLocked(match, nowMs);
+  });
+  if (anyLocked) {
+    return { fixtureIds: kept, dropped, added: [], reason: "locked" };
+  }
+  const candidates = [...roundFixtures]
+    .filter((match) => !current.includes(String(match.id)) && !isVoided(match) &&
+      String(match.status || "").toLowerCase() !== "postponed" && !matchLocked(match, nowMs))
+    .sort((a, b) =>
+      (Date.parse(a.startAt || a.lockAt) || 0) - (Date.parse(b.startAt || b.lockAt) || 0) ||
+      String(a.id).localeCompare(String(b.id))
+    );
+  const added = candidates.slice(0, dropped.length).map((match) => String(match.id));
+  const nextIds = [...kept, ...added];
+  const ordered = [...roundFixtures]
+    .filter((match) => nextIds.includes(String(match.id)))
+    .sort((a, b) =>
+      (Date.parse(a.startAt || a.lockAt) || 0) - (Date.parse(b.startAt || b.lockAt) || 0) ||
+      String(a.id).localeCompare(String(b.id))
+    )
+    .map((match) => String(match.id));
+  return { fixtureIds: ordered, dropped, added, reason: "replaced" };
 }
 
 export function buildReveals(members, matches, picksByMatch, nowMs) {

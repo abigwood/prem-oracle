@@ -407,6 +407,101 @@ class MatchweekTerminologyTests(unittest.TestCase):
             self.assertEqual(fixture["round"], f"Matchweek {fixture['matchday']}", fixture["id"])
 
 
+class KickoffOffsetTests(unittest.TestCase):
+    """Kick-off offsets must follow British Summer Time at BOTH boundaries.
+
+    Checking only the October end left the whole April-May run-in stamped an
+    hour early, which would have locked picks an hour before kick-off.
+    """
+
+    BST_ENDS = "2026-10-25"      # clocks go back
+    BST_RESUMES = "2027-03-28"   # clocks go forward
+
+    def offsets(self, path):
+        return [(f["date"], f["startAt"][-6:]) for f in json.loads((ROOT / path).read_text())["fixtures"]]
+
+    def assert_bst_correct(self, path):
+        for date, offset in self.offsets(path):
+            expected = "+01:00" if date < self.BST_ENDS or date >= self.BST_RESUMES else "+00:00"
+            self.assertEqual(offset, expected, f"{path} {date}")
+
+    def test_premier_league_offsets_follow_bst(self):
+        self.assert_bst_correct("data/fixtures.json")
+
+    def test_championship_offsets_follow_bst(self):
+        self.assert_bst_correct("data/fixtures-elc.json")
+
+    def test_bst_resumes_on_28_march_2027(self):
+        # The specific regression: the run-in is BST, not GMT.
+        runin = [o for d, o in self.offsets("data/fixtures.json") if d >= self.BST_RESUMES]
+        self.assertTrue(runin, "expected fixtures after BST resumes")
+        self.assertEqual(set(runin), {"+01:00"})
+        winter = [o for d, o in self.offsets("data/fixtures.json")
+                  if self.BST_ENDS <= d < self.BST_RESUMES]
+        self.assertEqual(set(winter), {"+00:00"})
+
+    def test_both_builders_encode_both_boundaries(self):
+        for script in ("scripts/build_fixtures.py", "scripts/build_elc_fixtures.py"):
+            source = (ROOT / script).read_text()
+            self.assertIn(f'BST_ENDS = "{self.BST_ENDS}"', source, script)
+            self.assertIn(f'BST_RESUMES = "{self.BST_RESUMES}"', source, script)
+
+
+class ChampionshipTests(unittest.TestCase):
+    """v1.3: the EFL Championship fixture list and its forecast posture."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.data = json.loads((ROOT / "data/fixtures-elc.json").read_text())
+        cls.fixtures = cls.data["fixtures"]
+
+    def test_full_season_of_46_rounds(self):
+        self.assertEqual(self.data["competitionCode"], "ELC")
+        self.assertEqual(self.data["competition"], "EFL Championship")
+        self.assertEqual(len(self.fixtures), 552)
+        self.assertEqual(len({f["id"] for f in self.fixtures}), 552)
+        self.assertEqual({f["matchday"] for f in self.fixtures}, set(range(1, 47)))
+        for round_number in range(1, 47):
+            self.assertEqual(sum(1 for f in self.fixtures if f["matchday"] == round_number), 12)
+
+    def test_fixture_ids_are_elc_namespaced(self):
+        self.assertTrue(all(f["id"].startswith("elc-2026-27-") for f in self.fixtures))
+
+    def test_every_club_plays_23_home_and_23_away(self):
+        clubs = {c for f in self.fixtures for c in (f["player1"], f["player2"])}
+        self.assertEqual(len(clubs), 24)
+        for club in clubs:
+            self.assertEqual(sum(1 for f in self.fixtures if f["player1"] == club), 23, club)
+            self.assertEqual(sum(1 for f in self.fixtures if f["player2"] == club), 23, club)
+            self.assertTrue(all(f["venue"] for f in self.fixtures if f["player1"] == club), club)
+
+    def test_no_club_appears_twice_in_a_round(self):
+        # The round-grouping rule: fragmentation across Fri-Mon must not merge rounds.
+        for round_number in range(1, 47):
+            group = [f for f in self.fixtures if f["matchday"] == round_number]
+            clubs = [c for f in group for c in (f["player1"], f["player2"])]
+            self.assertEqual(len(set(clubs)), 24, f"round {round_number}")
+
+    def test_opening_round_spans_the_efl_opening_weekend(self):
+        opener = sorted({f["date"] for f in self.fixtures if f["matchday"] == 1})
+        self.assertEqual(opener[0], "2026-08-14")
+        self.assertLessEqual(opener[-1], "2026-08-17")
+
+    def test_forecasts_are_absent_until_validated(self):
+        # Cross-division Elo seeding does not calibrate for this division, so
+        # probabilities are withheld and the app shows "Forecast unavailable".
+        self.assertTrue(all(f["probabilities"] is None for f in self.fixtures))
+        self.assertIsNone(self.data["modelVersion"])
+        self.assertIn("awaiting validation", self.data["forecast"]["status"])
+        # Form is real data whatever division it came from, so it still ships.
+        self.assertEqual(len(self.data["teams"]), 24)
+        self.assertTrue(all(re.fullmatch(r"[WDL]{6}", t["form"]) for t in self.data["teams"].values()))
+
+    def test_forecasts_remain_opt_in_in_the_builder(self):
+        source = (ROOT / "scripts/build_elc_intel.mjs").read_text()
+        self.assertIn('process.argv.includes("--with-forecasts")', source)
+
+
 class CustomMixTests(unittest.TestCase):
     """v1.2: the host-curated slate, from the creation toggle to the picker."""
 

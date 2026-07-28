@@ -23,6 +23,8 @@ MONTHS = {
     "August": 8, "September": 9, "October": 10, "November": 11, "December": 12,
     "January": 1, "February": 2, "March": 3, "April": 4, "May": 5,
 }
+BST_ENDS = "2026-10-25"
+BST_RESUMES = "2027-03-28"
 STADIUMS = {
     "AFC Bournemouth": "Vitality Stadium",
     "Arsenal": "Emirates Stadium",
@@ -130,9 +132,12 @@ def build():
         time, home, away, broadcaster = parsed_match
         index = len(matches) + 1
         matchday = ((index - 1) // 10) + 1
-        kickoff = f"{current_date}T{time}:00+01:00"
-        if current_date >= "2026-10-25":
-            kickoff = f"{current_date}T{time}:00+00:00"
+        # British Summer Time runs to the last Sunday in October and resumes on
+        # the last Sunday in March, so a season spanning the turn of the year
+        # crosses the boundary twice. Checking only the October end left the
+        # whole April-May run-in stamped an hour early.
+        in_bst = current_date < BST_ENDS or current_date >= BST_RESUMES
+        kickoff = f"{current_date}T{time}:00{'+01:00' if in_bst else '+00:00'}"
         matches.append({
             "id": f"pl-2026-27-{index:03d}-{slug(home)}-{slug(away)}",
             "date": current_date,

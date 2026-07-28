@@ -25,8 +25,14 @@ const clamp = (value, lo, hi) => Math.max(lo, Math.min(hi, value));
 
 /**
  * Elo seed from one season's aggregate record.
+ *
+ * A record only means something relative to the division it was earned in.
+ * `promoted` discounts a record set one tier below the competition being
+ * rated; `relegated` is its mirror, crediting a record set one tier above —
+ * a bottom-three Premier League season is a strong Championship baseline.
+ *
  * @param {{played:number, points:number, gf:number, ga:number}} season
- * @param {{promoted?:boolean}} [opts] promoted => apply division handicap
+ * @param {{promoted?:boolean, relegated?:boolean}} [opts]
  * @returns {number} integer Elo, clamped to [MIN, MAX]
  */
 export function ratingFromSeason(season, opts = {}) {
@@ -39,6 +45,7 @@ export function ratingFromSeason(season, opts = {}) {
     (ppg - RATING.NEUTRAL_PPG) * RATING.PPG_WEIGHT +
     gdpg * RATING.GDPG_WEIGHT;
   if (opts.promoted) rating -= RATING.DIVISION_PENALTY;
+  if (opts.relegated) rating += RATING.DIVISION_PENALTY;
   return Math.round(clamp(rating, RATING.MIN, RATING.MAX));
 }
 

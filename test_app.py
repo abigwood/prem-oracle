@@ -517,6 +517,65 @@ class ChampionshipTests(unittest.TestCase):
         self.assertIn('process.argv.includes("--with-forecasts")', source)
 
 
+class MigrationVocabularyTests(unittest.TestCase):
+    """The migration is copy-and-freeze. There is no such stage as the one this
+    class scans for, and the term must not survive anywhere a reader could take
+    it as one.
+
+    The banned terms are assembled at runtime rather than written out, so this
+    file can scan itself without matching its own assertions.
+    """
+
+    BANNED = tuple("dual" + sep + "write" for sep in ("-", " ", "_", ""))
+
+    SCANNED = (
+        "worker/src", "worker/test", "scripts", "docs",
+        "app.js", "test_app.py", "worker/wrangler.toml",
+    )
+    SUFFIXES = (".js", ".mjs", ".py", ".md", ".toml", ".json")
+
+    @classmethod
+    def files(cls):
+        for entry in cls.SCANNED:
+            target = ROOT / entry
+            if target.is_file():
+                yield target
+            elif target.is_dir():
+                for path in sorted(target.rglob("*")):
+                    if path.is_file() and path.suffix in cls.SUFFIXES:
+                        yield path
+
+    def test_no_bridge_write_language_survives(self):
+        offenders = []
+        for path in self.files():
+            text = path.read_text(errors="replace").lower()
+            for term in self.BANNED:
+                if term in text:
+                    offenders.append(f"{path.relative_to(ROOT)}: {term}")
+        self.assertEqual(offenders, [], f"banned migration term remains: {offenders}")
+
+    def test_the_stage_is_named_for_what_it_proves(self):
+        migration = (ROOT / "worker/src/migration.js").read_text()
+        self.assertIn('"scoped-write-proof"', migration)
+        # It is a read-only evidence gate over the write plan.
+        self.assertIn('"scoped-write-proof": (env) => stageReadOnlyCheck(env, "scoped-write-proof")', migration)
+        runbook = (ROOT / "docs/results-split-runbook.md").read_text()
+        self.assertIn("mig run scoped-write-proof true", runbook)
+
+    def test_dual_read_survives_because_it_is_real(self):
+        # Reads genuinely do union both keys before the freeze; it was only ever
+        # the write side that was never paired.
+        self.assertIn('"dual-read"', (ROOT / "worker/src/migration.js").read_text())
+
+    def test_runbook_warns_operators_about_the_fixture_cache(self):
+        runbook = (ROOT / "docs/results-split-runbook.md").read_text()
+        self.assertIn("60 seconds", runbook)
+        self.assertIn("cache-bust", runbook)
+        self.assertIn('curl -sS "$API/fixtures?refresh=1" >/dev/null', runbook)
+        # The warning belongs before the first stage command, not buried at the end.
+        self.assertLess(runbook.index("Operational note"), runbook.index("## Step 0"))
+
+
 class CompetitionAppTests(unittest.TestCase):
     """v1.3: the app side of the competition foundation."""
 

@@ -1,18 +1,20 @@
 // The results-split migration: one shared `results` object becomes one object
 // per competition, without ever putting the original at risk.
 //
-// The plan is the doc's copy-verify-switch, expressed as seven stages that each
-// run on their own and each emit evidence. Nothing here is automatic: a stage
-// only advances when it is asked to, and every stage records what it saw so the
-// parity gate can be reviewed before the next one runs.
+// The plan is copy-and-freeze, expressed as seven stages that each run on their
+// own and each emit evidence. Nothing here is automatic: a stage only advances
+// when it is asked to, and every stage records what it saw so the parity gate
+// can be reviewed before the next one runs.
 //
-// One deliberate departure from the written plan. The doc's bridge period
-// dual-WRITES to both the legacy key and the competition key; the build brief
-// forbids mutating the legacy key at all. The brief wins, because it is also
-// the safer reading: the legacy object stays byte-identical to what it was
-// before the migration started, which makes rollback a pure read-side switch
-// with nothing to undo. "dual-write" therefore means writes go to the
-// competition key while reads still union the legacy one.
+// The legacy key is never written. That is what makes the shape copy-and-freeze
+// rather than a cutover: the legacy object stays byte-identical to its
+// pre-migration state, so rollback is a pure read-side move with nothing to
+// undo. Writes go to the competition key from the first stage, which is also
+// why reads consult it from the first stage — see resultsReadKeys.
+//
+// Only two stages change behaviour: `copy` duplicates the legacy history onto
+// the competition key, and `freeze` drops the legacy key from the read path.
+// The rest are evidence gates.
 
 import {
   COMPETITION_CODES,
@@ -32,7 +34,7 @@ export const STAGES = [
   "verify",      // per-fixture id/score/status equality, counts and hashes
   "dual-read",   // reads union both, behind the test route only
   "switch",      // reads prefer results:PL, legacy retained as fallback
-  "dual-write",  // writes land on the competition key; legacy stays frozen
+  "scoped-write-proof", // proves writes resolve to results:<competition>, never legacy
   "freeze",      // legacy is never read again, and still never deleted
 ];
 
@@ -204,7 +206,7 @@ const RUNNERS = {
   verify: stageVerify,
   "dual-read": (env) => stageReadOnlyCheck(env, "dual-read"),
   switch: (env) => stageReadOnlyCheck(env, "switch"),
-  "dual-write": (env) => stageReadOnlyCheck(env, "dual-write"),
+  "scoped-write-proof": (env) => stageReadOnlyCheck(env, "scoped-write-proof"),
   freeze: stageFreeze,
 };
 

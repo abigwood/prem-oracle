@@ -109,7 +109,7 @@ test("the competition key is consulted first from the very first stage", () => {
   assert.deepEqual(resultsReadKeys("verify", "PL"), ["results:PL", "results"]);
   assert.deepEqual(resultsReadKeys("dual-read", "PL"), ["results:PL", "results"]);
   assert.deepEqual(resultsReadKeys("switch", "PL"), ["results:PL", "results"]);
-  assert.deepEqual(resultsReadKeys("dual-write", "PL"), ["results:PL", "results"]);
+  assert.deepEqual(resultsReadKeys("scoped-write-proof", "PL"), ["results:PL", "results"]);
   // After the freeze the legacy key leaves the read path but still exists.
   assert.deepEqual(resultsReadKeys("freeze", "PL"), ["results:PL"]);
 });

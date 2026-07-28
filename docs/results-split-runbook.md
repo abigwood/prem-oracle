@@ -6,7 +6,8 @@ stage is an explicit call, and the two that change behaviour (`copy`, `freeze`)
 are called out.
 
 Per Ashton's confirmed reading of §5b: this is **copy-and-freeze**. The
-intermediate stages are evidence gates, not switches. There is no dual-write.
+intermediate stages are evidence gates, not switches. Nothing ever writes the
+legacy key, so there is no bridge period to run.
 Settlement and read paths are competition-key aware from stage one.
 
 ## Before you start
@@ -25,6 +26,25 @@ export SECRET='<MIGRATION_SECRET>'
 mig () { curl -sS -X POST "$API/admin/migration" -H 'content-type: application/json' \
   -d "{\"secret\":\"$SECRET\",\"action\":\"$1\",\"stage\":\"$2\",\"commit\":${3:-false}}" | python3 -m json.tool; }
 ```
+
+### Operational note — wait out the fixture cache before spot-checking
+
+The worker caches each competition's fixture list for **60 seconds**, and
+`/state` reads that cache. After any stage transition, a manual check made
+inside that window can return pre-transition data and look like a false pass —
+or, worse, mask a real gap.
+
+After every `mig run ... true`, do one of:
+
+- wait **more than 60 seconds** before checking anything, or
+- cache-bust deliberately: `curl -sS "$API/fixtures?refresh=1" >/dev/null`
+  first, then run the check.
+
+This bit us during evidence-gathering: the dual-read fallback check appeared to
+pass at `freeze` with an entry deliberately missing from `results:PL`, purely
+because `/state` was serving a stale cached list. The harness avoids it by
+driving every transition through `/admin/migration`, which clears the cache;
+a human operator with a terminal does not get that for free.
 
 Take the snapshot first. It is the rollback artefact of last resort and it is
 the input to the evidence run.
@@ -92,13 +112,13 @@ freeze is what removes the legacy fallback that is currently covering the gap.
 
 Run this as many times as you like. It writes nothing.
 
-## Steps 4–6 — dual-read, switch, dual-write (evidence gates)
+## Steps 4–6 — dual-read, switch, scoped-write-proof (evidence gates)
 
 ```sh
 mig run dual-read true
 mig run switch true
 mig run switch          # re-run without commit to re-read the plan
-mig run dual-write true
+mig run scoped-write-proof true
 ```
 
 Each returns the read and write plan in force. Expect
@@ -111,9 +131,11 @@ one, because writes have gone there since stage one. Sit at `switch` for a
 release cycle if you want the soak; the system is already in its post-switch
 read configuration.
 
-Between them, spot-check production:
+Between them, spot-check production — remembering the 60-second cache note
+above:
 
 ```sh
+curl -sS "$API/fixtures?refresh=1" >/dev/null   # cache-bust first
 curl -sS "$API/state?code=<LEAGUE>" | python3 -m json.tool | head -30
 curl -sS "$API/fixtures" | python3 -c "import json,sys; d=json.load(sys.stdin); print(len(d['fixtures']), d['modelVersion'])"
 ```
@@ -136,7 +158,8 @@ and `readKeys.PL: ["results:PL"]`.
 Freeze removes the legacy key from the read path. From here, anything the copy
 missed becomes invisible. That is why verify runs immediately beforehand.
 
-Immediately after, re-check the same leagues and fixture counts as above.
+Immediately after, cache-bust and re-check the same leagues and fixture counts
+as above. A check made inside the 60-second window proves nothing.
 
 ## Rollback
 
@@ -149,8 +172,9 @@ object has never been written, so it is byte-identical to its pre-migration
 state. Verify:
 
 ```sh
-mig status                      # stage back to "inventory"
-curl -sS "$API/state?code=<LEAGUE>"   # identical to baseline
+mig status                                      # stage back to "inventory"
+curl -sS "$API/fixtures?refresh=1" >/dev/null   # cache-bust
+curl -sS "$API/state?code=<LEAGUE>"             # identical to baseline
 ```
 
 Rollback is safe at any point, including after freeze.
@@ -167,6 +191,10 @@ Stop immediately and roll back if any of these hold:
 5. `/fixtures` returns a different fixture count or `modelVersion`.
 6. A settlement lands on a key other than `results:<competition>`.
 7. The legacy key's entry count or hash changes at any point.
+
+A check that contradicts one of these but was made within 60 seconds of a stage
+transition is inconclusive, not a failure — cache-bust and repeat it before
+acting.
 
 ## What the supervised session touches
 

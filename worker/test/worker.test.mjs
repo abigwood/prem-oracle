@@ -524,3 +524,59 @@ test("ics endpoint serves one fixture as text/calendar", async () => {
     globalThis.fetch = originalFetch;
   }
 });
+
+test("/picks scans only the competitions the player actually plays", async () => {
+  const originalFetch = globalThis.fetch;
+  const pl = [{ id: "pl-2026-27-001-a-b", matchday: 1, player1: "A", player2: "B", startAt: "2026-08-21T19:00:00Z" }];
+  const elc = [{ id: "elc-2026-27-001-c-d", matchday: 1, player1: "C", player2: "D", startAt: "2026-08-14T19:00:00Z" }];
+  globalThis.fetch = async (url) => new Response(JSON.stringify({
+    fixtures: String(url).includes("elc") ? elc : pl,
+  }), { status: 200 });
+
+  const store = new Map();
+  const reads = [];
+  const base = memoryKV(store);
+  const env = {
+    FIXTURES_URL: "https://example.com/pl.json",
+    FIXTURES_URL_ELC: "https://example.com/elc.json",
+    KV: { ...base, async get(key, type) { reads.push(key); return base.get(key, type); } },
+  };
+  try {
+    // The fixture cache is module-level and shared across tests in this file,
+    // so prime both competitions from these feeds before asserting on reads.
+    await worker.fetch(new Request("https://worker.test/fixtures?competition=PL&refresh=1"), env);
+    await worker.fetch(new Request("https://worker.test/fixtures?competition=ELC&refresh=1"), env);
+
+    // A Premier-League-only player.
+    store.set("user:plonly", JSON.stringify({ nickname: "PL", leagues: ["AAAAAA"] }));
+    store.set("league:AAAAAA", JSON.stringify({ code: "AAAAAA", name: "PL league", owner: "plonly", competition: "PL" }));
+    reads.length = 0;
+    await worker.fetch(new Request("https://worker.test/picks?uid=plonly"), env);
+    assert.ok(reads.some((k) => k === "picks:pl-2026-27-001-a-b"), "reads its own competition's picks");
+    assert.ok(!reads.some((k) => k.startsWith("picks:elc-")), "never touches Championship picks");
+
+    // A Championship-only player.
+    store.set("user:elconly", JSON.stringify({ nickname: "ELC", leagues: ["BBBBBB"] }));
+    store.set("league:BBBBBB", JSON.stringify({ code: "BBBBBB", name: "ELC league", owner: "elconly", competition: "ELC" }));
+    reads.length = 0;
+    await worker.fetch(new Request("https://worker.test/picks?uid=elconly"), env);
+    assert.ok(reads.some((k) => k === "picks:elc-2026-27-001-c-d"), "reads its own competition's picks");
+    assert.ok(!reads.some((k) => k.startsWith("picks:pl-")), "never touches Premier League picks");
+
+    // Someone in both pays for both, and only then.
+    store.set("user:both", JSON.stringify({ nickname: "Both", leagues: ["AAAAAA", "BBBBBB"] }));
+    reads.length = 0;
+    await worker.fetch(new Request("https://worker.test/picks?uid=both"), env);
+    assert.ok(reads.some((k) => k.startsWith("picks:pl-")));
+    assert.ok(reads.some((k) => k.startsWith("picks:elc-")));
+
+    // A player with no leagues at all falls back to the default competition.
+    store.set("user:none", JSON.stringify({ nickname: "None", leagues: [] }));
+    reads.length = 0;
+    await worker.fetch(new Request("https://worker.test/picks?uid=none"), env);
+    assert.ok(reads.some((k) => k.startsWith("picks:pl-")));
+    assert.ok(!reads.some((k) => k.startsWith("picks:elc-")));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

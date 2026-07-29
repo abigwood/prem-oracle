@@ -330,10 +330,30 @@ async function allPicks(env, ids) {
   return Object.fromEntries(await Promise.all(ids.map(async (id) => [id, (await kvGet(env, `picks:${id}`)) || {}])));
 }
 
+/**
+ * The competitions a player actually plays, from their own league list.
+ *
+ * Costs one user read plus one read per league, and saves scanning every
+ * fixture of a competition they have nothing in — which for a Premier League
+ * player is 552 pointless KV reads on the Championship.
+ */
+async function userCompetitions(env, uid) {
+  const user = await kvGet(env, `user:${uid}`);
+  const codes = [...new Set(user?.leagues || [])];
+  if (!codes.length) return [DEFAULT_COMPETITION];
+  const leagues = await Promise.all(codes.map((code) => kvGet(env, `league:${code}`)));
+  const competitions = [...new Set(leagues.filter(Boolean).map(leagueCompetition))];
+  return competitions.length ? competitions : [DEFAULT_COMPETITION];
+}
+
 async function userPicks(env, uid) {
   if (!uid) return {};
-  // A player's picks span every competition they play in, not just one.
-  const matchList = await allFixtures(env);
+  // A player's picks span every competition they play in — but only those. This
+  // endpoint runs on every launch, so scanning a competition they have no
+  // league in would be the chattiest per-user read in the whole app.
+  const competitions = (await userCompetitions(env, uid)).filter((code) => competitionConfigured(env, code));
+  const lists = await Promise.all(competitions.map((code) => fixtures(env, code)));
+  const matchList = lists.flat();
   const picksByMatch = await allPicks(env, matchList.map((match) => match.id));
   return Object.fromEntries(Object.entries(picksByMatch)
     .map(([matchId, matchPicks]) => [matchId, matchPicks[uid]])

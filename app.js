@@ -2118,6 +2118,12 @@ async function setupNativeUniversalLinks() {
   }
 }
 
+// Paint the shell before any network work. Identity and league state take a few
+// seconds to settle — longer for a Championship league, whose fixture list is
+// half again as large — and until this call existed the app showed an empty
+// content area for the whole of it.
+render();
+
 Promise.all([loadFixtures(), hydrateIdentity()]).then(() => {
   if (inviteCode && !leagueCodes.includes(inviteCode)) currentView = "league";
   render();

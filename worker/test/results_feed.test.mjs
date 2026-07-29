@@ -1,12 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import worker from "../src/worker.js";
-import {
-  FOOTBALL_DATA_TEAM_MAP,
-  autoSettleResults,
-  fixturesNeedingAutoSettle,
-  mapFootballDataTeam,
-} from "../src/results_feed.js";
+import { FOOTBALL_DATA_TEAM_MAP, autoSettleResults, feedForCompetition, fixturesNeedingAutoSettle, mapFootballDataTeam } from "../src/results_feed.js";
 
 function memoryKV(store = new Map()) {
   return {
@@ -166,6 +161,93 @@ test("no football-data token is a no-op", async () => {
     assert.equal(settled.checked, false);
     assert.equal(settled.settled, 0);
     assert.deepEqual(settled.results, {});
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+// --- competition-scoped settlement (v1.3) -----------------------------------
+
+test("club names resolve only within the competition being settled", () => {
+  // A Championship club is invisible to the Premier League map and vice versa,
+  // so a feed name has no route into the wrong competition's fixtures.
+  assert.equal(mapFootballDataTeam("Wrexham", "ELC"), "Wrexham");
+  assert.equal(mapFootballDataTeam("Wrexham", "PL"), null);
+  assert.equal(mapFootballDataTeam("Arsenal", "PL"), "Arsenal");
+  assert.equal(mapFootballDataTeam("Arsenal", "ELC"), null);
+  // Short forms and the FC/AFC suffixes both canonicalise.
+  assert.equal(mapFootballDataTeam("Wolves", "ELC"), "Wolverhampton Wanderers");
+  assert.equal(mapFootballDataTeam("Wolverhampton Wanderers FC", "ELC"), "Wolverhampton Wanderers");
+  assert.equal(mapFootballDataTeam("West Brom", "ELC"), "West Bromwich Albion");
+  assert.equal(mapFootballDataTeam("QPR", "ELC"), "Queens Park Rangers");
+  assert.equal(mapFootballDataTeam("Spurs", "PL"), "Tottenham Hotspur");
+  // An unknown competition resolves nothing rather than falling back to PL.
+  assert.equal(mapFootballDataTeam("Arsenal", "CL"), null);
+});
+
+test("every Championship club in the fixture list is mappable", async () => {
+  const { readFileSync } = await import("node:fs");
+  const data = JSON.parse(readFileSync(new URL("../../data/fixtures-elc.json", import.meta.url), "utf8"));
+  const clubs = [...new Set(data.fixtures.flatMap((fx) => [fx.player1, fx.player2]))];
+  assert.equal(clubs.length, 24);
+  for (const club of clubs) {
+    assert.equal(mapFootballDataTeam(club, "ELC"), club, `unmappable: ${club}`);
+  }
+});
+
+test("only competitions with a configured feed are auto-settled", () => {
+  assert.ok(feedForCompetition("PL"));
+  assert.equal(feedForCompetition("PL").feedCode, "PL");
+  assert.ok(feedForCompetition("ELC"));
+  assert.equal(feedForCompetition("ELC").feedCode, "ELC");
+  // The Champions League has no feed until its draw has happened.
+  assert.equal(feedForCompetition("CL"), null);
+});
+
+test("a competition without a feed settles nothing", async () => {
+  const fixtures = [{ id: "cl-2026-001-a-b", player1: "A", player2: "B", startAt: new Date().toISOString() }];
+  const outcome = await autoSettleResults({ FOOTBALL_DATA_TOKEN: "t" }, fixtures, {}, Date.now(), "CL");
+  assert.deepEqual(outcome, { checked: false, settled: 0, results: {} });
+});
+
+test("the Championship feed is queried on its own competition path", async () => {
+  const originalFetch = globalThis.fetch;
+  const seen = [];
+  globalThis.fetch = async (url) => {
+    seen.push(String(url));
+    return new Response(JSON.stringify({ matches: [] }), { status: 200 });
+  };
+  try {
+    const start = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    const fixtures = [{ id: "elc-2026-27-001-wrexham-burnley", player1: "Wrexham", player2: "Burnley", startAt: start }];
+    await autoSettleResults({ FOOTBALL_DATA_TOKEN: "t" }, fixtures, {}, Date.now(), "ELC");
+    assert.equal(seen.length, 1);
+    assert.match(seen[0], /\/v4\/competitions\/ELC\/matches/);
+    assert.doesNotMatch(seen[0], /competitions\/PL\//);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("a Championship result settles onto its own fixture id only", async () => {
+  const originalFetch = globalThis.fetch;
+  const start = new Date(Date.now() - 60 * 60 * 1000);
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    matches: [{
+      status: "FINISHED",
+      utcDate: start.toISOString(),
+      homeTeam: { name: "Wrexham AFC" },
+      awayTeam: { name: "Burnley FC" },
+      score: { fullTime: { home: 2, away: 1 } },
+    }],
+  }), { status: 200 });
+  try {
+    const fixtures = [{ id: "elc-2026-27-001-wrexham-burnley", player1: "Wrexham", player2: "Burnley", startAt: start.toISOString() }];
+    const outcome = await autoSettleResults({ FOOTBALL_DATA_TOKEN: "t" }, fixtures, {}, Date.now(), "ELC");
+    assert.equal(outcome.settled, 1);
+    assert.deepEqual(Object.keys(outcome.results), ["elc-2026-27-001-wrexham-burnley"]);
+    assert.deepEqual(outcome.results["elc-2026-27-001-wrexham-burnley"].result, [2, 1]);
+    assert.ok(Object.keys(outcome.results).every((id) => id.startsWith("elc-")));
   } finally {
     globalThis.fetch = originalFetch;
   }

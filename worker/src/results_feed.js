@@ -1,6 +1,6 @@
 import { isVoided, normaliseResult } from "./logic.js";
 
-const FEED_URL = "https://api.football-data.org/v4/competitions/PL/matches";
+const FEED_BASE = "https://api.football-data.org/v4/competitions";
 const RECENT_KICKOFF_MS = 6 * 60 * 60 * 1000;
 
 export const FOOTBALL_DATA_TEAM_MAP = {
@@ -40,6 +40,66 @@ export const FOOTBALL_DATA_TEAM_MAP = {
   Spurs: "Tottenham Hotspur",
 };
 
+// EFL Championship 2026/27. Kept as its own map rather than merged into the
+// Premier League one: a feed name can then only ever resolve to a club in the
+// competition being settled, so a Championship result has no route by which to
+// reach a Premier League fixture even if the two ever shared a club name.
+export const FOOTBALL_DATA_TEAM_MAP_ELC = {
+  "Birmingham City": "Birmingham City",
+  Birmingham: "Birmingham City",
+  "Blackburn Rovers": "Blackburn Rovers",
+  Blackburn: "Blackburn Rovers",
+  "Bolton Wanderers": "Bolton Wanderers",
+  Bolton: "Bolton Wanderers",
+  "Bristol City": "Bristol City",
+  Burnley: "Burnley",
+  "Cardiff City": "Cardiff City",
+  Cardiff: "Cardiff City",
+  "Charlton Athletic": "Charlton Athletic",
+  Charlton: "Charlton Athletic",
+  "Derby County": "Derby County",
+  Derby: "Derby County",
+  "Lincoln City": "Lincoln City",
+  Lincoln: "Lincoln City",
+  Middlesbrough: "Middlesbrough",
+  Boro: "Middlesbrough",
+  Millwall: "Millwall",
+  "Norwich City": "Norwich City",
+  Norwich: "Norwich City",
+  Portsmouth: "Portsmouth",
+  "Preston North End": "Preston North End",
+  Preston: "Preston North End",
+  "Queens Park Rangers": "Queens Park Rangers",
+  QPR: "Queens Park Rangers",
+  "Sheffield United": "Sheffield United",
+  "Sheffield Utd": "Sheffield United",
+  Southampton: "Southampton",
+  "Stoke City": "Stoke City",
+  Stoke: "Stoke City",
+  "Swansea City": "Swansea City",
+  Swansea: "Swansea City",
+  Watford: "Watford",
+  "West Bromwich Albion": "West Bromwich Albion",
+  "West Brom": "West Bromwich Albion",
+  "West Bromwich": "West Bromwich Albion",
+  "West Ham United": "West Ham United",
+  "West Ham": "West Ham United",
+  "Wolverhampton Wanderers": "Wolverhampton Wanderers",
+  Wolves: "Wolverhampton Wanderers",
+  Wrexham: "Wrexham",
+};
+
+// Which football-data.org competition each of ours maps to, and the name map to
+// resolve its clubs with. A competition absent from here simply has no feed and
+// is never auto-settled \u2014 which is the Champions League's position until its
+// draw has happened.
+export const COMPETITION_FEEDS = {
+  PL: { feedCode: "PL", teams: FOOTBALL_DATA_TEAM_MAP },
+  ELC: { feedCode: "ELC", teams: FOOTBALL_DATA_TEAM_MAP_ELC },
+};
+
+export const feedForCompetition = (competition) => COMPETITION_FEEDS[competition] || null;
+
 const canonicalName = (value) =>
   String(value || "")
     .normalize("NFKD")
@@ -50,11 +110,14 @@ const canonicalName = (value) =>
     .trim()
     .toLowerCase();
 
-const TEAM_LOOKUP = new Map(Object.entries(FOOTBALL_DATA_TEAM_MAP)
+const lookupFor = (teams) => new Map(Object.entries(teams)
   .map(([feedName, fixtureName]) => [canonicalName(feedName), fixtureName]));
 
-export function mapFootballDataTeam(name) {
-  return TEAM_LOOKUP.get(canonicalName(name)) || null;
+const LOOKUPS = Object.fromEntries(Object.entries(COMPETITION_FEEDS)
+  .map(([code, feed]) => [code, lookupFor(feed.teams)]));
+
+export function mapFootballDataTeam(name, competition = "PL") {
+  return LOOKUPS[competition]?.get(canonicalName(name)) || null;
 }
 
 export function fixturesNeedingAutoSettle(fixtures, results, nowMs = Date.now()) {
@@ -87,8 +150,10 @@ function indexFixtures(fixtures) {
   return indexed;
 }
 
-async function fetchFootballDataMatches(env, fixtures) {
-  const url = new URL(FEED_URL);
+async function fetchFootballDataMatches(env, fixtures, competition) {
+  const feed = feedForCompetition(competition);
+  if (!feed) throw new Error(`no results feed configured for ${competition}`);
+  const url = new URL(`${FEED_BASE}/${feed.feedCode}/matches`);
   url.searchParams.set("season", String(fixtureSeason(fixtures)));
   const response = await fetch(url.toString(), {
     headers: { "X-Auth-Token": env.FOOTBALL_DATA_TOKEN },
@@ -98,15 +163,17 @@ async function fetchFootballDataMatches(env, fixtures) {
   return Array.isArray(body.matches) ? body.matches : [];
 }
 
-export async function footballDataResults(env, fixtures) {
+export async function footballDataResults(env, fixtures, competition = "PL") {
   const indexedFixtures = indexFixtures(fixtures);
-  const feedMatches = await fetchFootballDataMatches(env, fixtures);
+  const feedMatches = await fetchFootballDataMatches(env, fixtures, competition);
   const results = {};
 
   for (const item of feedMatches) {
     if (item?.status !== "FINISHED") continue;
-    const home = mapFootballDataTeam(item.homeTeam?.name || item.homeTeam?.shortName);
-    const away = mapFootballDataTeam(item.awayTeam?.name || item.awayTeam?.shortName);
+    // Names resolve against this competition's map only, so a club that is not
+    // in it cannot be matched at all.
+    const home = mapFootballDataTeam(item.homeTeam?.name || item.homeTeam?.shortName, competition);
+    const away = mapFootballDataTeam(item.awayTeam?.name || item.awayTeam?.shortName, competition);
     if (!home || !away) continue;
     const score = item.score?.fullTime;
     if (!Number.isInteger(score?.home) || !Number.isInteger(score?.away)) continue;
@@ -123,12 +190,13 @@ export async function footballDataResults(env, fixtures) {
   return results;
 }
 
-export async function autoSettleResults(env, fixtures, existingResults, nowMs = Date.now()) {
+export async function autoSettleResults(env, fixtures, existingResults, nowMs = Date.now(), competition = "PL") {
   if (!env.FOOTBALL_DATA_TOKEN) return { checked: false, settled: 0, results: existingResults || {} };
+  if (!feedForCompetition(competition)) return { checked: false, settled: 0, results: existingResults || {} };
   const pending = fixturesNeedingAutoSettle(fixtures, existingResults, nowMs);
   if (!pending.length) return { checked: false, settled: 0, results: existingResults || {} };
 
-  const feedResults = await footballDataResults(env, fixtures);
+  const feedResults = await footballDataResults(env, fixtures, competition);
   const pendingIds = new Set(pending.map((match) => match.id));
   const next = { ...(existingResults || {}) };
   let settled = 0;

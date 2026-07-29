@@ -1,6 +1,6 @@
 const SEASON_START = new Date("2026-08-21T20:00:00+01:00");
 const SEASON_START_DATE = "2026-08-21";
-const APP_BUILD = "20260728b";
+const APP_BUILD = "20260729a";
 const API = window.PREM_API || null;
 // Canonical public home of the web app. Inside the Capacitor shell the page is
 // served from premoracle://localhost, so location.origin can never be used to
@@ -43,7 +43,7 @@ const DEFAULT_COMPETITION = "PL";
 // Single flag gating Championship visibility. Flipped on once the v1.3 parity
 // gates pass; until then the Championship is invisible to members even though
 // the data and the worker are ready for it.
-const FEATURES = { elc: false };
+const FEATURES = { elc: true };
 
 const competitionEnabled = (code) => code === DEFAULT_COMPETITION || (code === "ELC" && FEATURES.elc);
 const availableCompetitions = () => Object.keys(COMPETITIONS).filter(competitionEnabled);

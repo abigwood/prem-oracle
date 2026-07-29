@@ -20,9 +20,9 @@ class PremOracleTests(unittest.TestCase):
         sw = (ROOT / "sw.js").read_text()
         self.assertIn("Prem Oracle", html)
         self.assertIn("Prem Oracle", manifest)
-        self.assertIn("styles.css?v=20260728b", html)
-        self.assertIn("app.js?v=20260728b", html)
-        self.assertIn("prem-oracle-v1-20260728b", sw)
+        self.assertIn("styles.css?v=20260729a", html)
+        self.assertIn("app.js?v=20260729a", html)
+        self.assertIn("prem-oracle-v1-20260729a", sw)
         self.assertIn("https://prem-oracle-window.abigwood.workers.dev", html)
         self.assertIn("vendor/capacitor/push-notifications.js", html)
         self.assertIn("vendor/capacitor/share.js", html)
@@ -586,9 +586,10 @@ class CompetitionAppTests(unittest.TestCase):
         cls.html = (ROOT / "index.html").read_text()
         cls.worker = (ROOT / "worker/src/worker.js").read_text()
 
-    def test_championship_is_behind_a_single_flag_defaulting_off(self):
-        self.assertIn("const FEATURES = { elc: false };", self.app)
-        # With the flag off the Championship is not offered anywhere.
+    def test_championship_is_gated_by_a_single_flag(self):
+        # Live as of v1.3. The gate itself must stay — it is how the Champions
+        # League will ship dormant — but the Championship is now on.
+        self.assertIn("const FEATURES = { elc: true };", self.app)
         self.assertIn('code === "ELC" && FEATURES.elc', self.app)
         self.assertIn("function availableCompetitions()", self.app.replace("const availableCompetitions = ()", "function availableCompetitions()"))
 

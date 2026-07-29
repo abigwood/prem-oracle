@@ -2,6 +2,11 @@ name: Refresh forecast intel
 
 # Rolling in-season update of the Prem Oracle forecast model.
 #
+# Scope note: this workflow refreshes FORECAST INTEL only. Results settlement is
+# not here — it runs in the worker's 15-minute cron (autoSettle), once per
+# competition, writing only results:<competition>. Nothing in this file settles
+# anything.
+#
 # Re-runs the intel pipeline with 2026/27 results folded in (last-6 form across
 # the season/division boundary + rating blend) and commits data/fixtures.json
 # when the forecast actually changes. The build is idempotent, so quiet weeks
@@ -35,19 +40,26 @@ jobs:
         with:
           node-version: "20"
 
-      - name: Rebuild forecast intel (with current-season results)
+      - name: Rebuild Premier League forecast intel (with current-season results)
         env:
           FOOTBALL_DATA_TOKEN: ${{ secrets.FOOTBALL_DATA_TOKEN }}
         run: node scripts/build_intel.mjs --refresh
 
-      - name: Commit if the forecast changed
+      # Championship forecasts are withheld until the model is validated against
+      # real Championship results, so this rebuild deliberately does NOT pass
+      # --with-forecasts: it refreshes the teams block (form is real data
+      # whatever division it came from) and leaves every probability null.
+      - name: Rebuild Championship intel (forecast-absent)
+        run: node scripts/build_elc_intel.mjs
+
+      - name: Commit if anything changed
         run: |
-          if git diff --quiet -- data/fixtures.json; then
+          if git diff --quiet -- data/fixtures.json data/fixtures-elc.json; then
             echo "No forecast change — nothing to commit."
             exit 0
           fi
           git config user.name "prem-oracle-bot"
           git config user.email "bot@users.noreply.github.com"
-          git add data/fixtures.json
+          git add data/fixtures.json data/fixtures-elc.json
           git commit -m "chore(intel): refresh 2026/27 forecast [skip ci]"
           git push

@@ -27,7 +27,7 @@ import {
   validateSlate,
 } from "./logic.js";
 import { apnsConfigured, sendPush } from "./apns.js";
-import { autoSettleResults } from "./results_feed.js";
+import { autoSettleResults, feedForCompetition } from "./results_feed.js";
 import {
   COMPETITIONS,
   COMPETITION_CODES,
@@ -1051,21 +1051,41 @@ async function podiumAnnouncements(env) {
   await kvPut(env, "sweep:settled", settled);
 }
 
-// Auto-settlement is competition-scoped before any second feed exists: the
-// football-data.org job covers the Premier League, reads the Premier League's
-// results and writes results:PL and nothing else. A Champions League or
-// Championship result can therefore never land on a Premier League fixture.
+// Auto-settlement runs once per competition, entirely independently: each pass
+// reads only its own competition's fixtures and results, resolves club names
+// against only that competition's map, and writes only results:<competition>.
+// A foreign id in the output is treated as a bug and aborts that competition's
+// write rather than being filtered — silently dropping it would hide the fault.
+//
+// Each competition is isolated, so a Championship feed outage cannot stop the
+// Premier League settling. A competition with no configured feed (the Champions
+// League, until its draw) is skipped by autoSettleResults itself.
 async function autoSettle(env) {
   if (!env.FOOTBALL_DATA_TOKEN) return;
-  const competition = DEFAULT_COMPETITION;
-  const matchList = await fixtures(env, competition, true);
-  const current = await currentResults(env, competition);
-  const settled = await autoSettleResults(env, matchList, current);
-  if (!settled.checked || settled.settled === 0) return;
-  const foreign = Object.keys(settled.results).filter((id) => competitionOfFixture(id) !== competition);
-  if (foreign.length) throw new Error(`auto-settlement produced foreign fixture ids: ${foreign.slice(0, 3).join(", ")}`);
-  await kvPut(env, resultsWriteKey(competition), settled.results);
-  clearFixtureCache(competition);
+  const outcomes = [];
+  for (const competition of COMPETITION_CODES) {
+    if (!competitionConfigured(env, competition)) continue;
+    if (!feedForCompetition(competition)) continue;
+    try {
+      const matchList = await fixtures(env, competition, true);
+      if (!matchList.length) continue;
+      const current = await currentResults(env, competition);
+      const settled = await autoSettleResults(env, matchList, current, Date.now(), competition);
+      if (!settled.checked || settled.settled === 0) continue;
+      const foreign = Object.keys(settled.results).filter((id) => competitionOfFixture(id) !== competition);
+      if (foreign.length) {
+        throw new Error(`auto-settlement produced foreign fixture ids: ${foreign.slice(0, 3).join(", ")}`);
+      }
+      await kvPut(env, resultsWriteKey(competition), settled.results);
+      clearFixtureCache(competition);
+      outcomes.push({ competition, settled: settled.settled });
+    } catch (error) {
+      // Isolated on purpose: one competition's feed failing must not stop the
+      // others. The next cron tick retries.
+      outcomes.push({ competition, error: String(error?.message || error) });
+    }
+  }
+  return outcomes;
 }
 
 export default {

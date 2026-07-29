@@ -7,3 +7,4 @@ worker/.wrangler/
 node_modules/
 ios/App/build/
 ios/Pods/
+worker/.migration-secret

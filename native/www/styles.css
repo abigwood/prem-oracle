@@ -1308,3 +1308,69 @@ body.picker-open { overflow: hidden; }
 }
 .notif-row + .notif-row { border-top: 1px solid var(--line); }
 .notif-row input { width: 20px; height: 20px; margin: 0; padding: 0; accent-color: var(--purple); }
+
+/* --- Competition set, fixture count, mixed picker ------------------------ */
+
+.create-hint { margin: 6px 0 0; color: var(--muted); font-size: .78rem; line-height: 1.45; }
+.competition-option input[type="checkbox"] { position: absolute; opacity: 0; pointer-events: none; }
+.fixture-plan { margin-top: 11px; }
+/* A `display` declaration outranks the hidden attribute's own display:none, so
+   any element styled here must opt back out explicitly. */
+.fixture-count[hidden] { display: none; }
+.fixture-count {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 9px;
+  padding: 11px 13px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--white);
+}
+.fixture-count > span { color: var(--muted); font-size: .78rem; font-weight: 800; }
+.count-stepper { display: flex; align-items: center; gap: 10px; }
+.count-stepper button {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--white);
+  color: var(--purple);
+  font-size: 1rem;
+  font-weight: 900;
+}
+.count-stepper b { min-width: 22px; text-align: center; font-size: 1rem; }
+
+/* A chip only appears where a fixture's competition is genuinely ambiguous —
+   that is, in a league drawing on more than one. */
+.comp-chip {
+  flex: none;
+  padding: 3px 7px;
+  border-radius: 999px;
+  font-size: .6rem;
+  font-weight: 900;
+  letter-spacing: .06em;
+}
+.comp-chip-pl { color: #38003c; background: #e9d9ee; }
+.comp-chip-elc { color: #0b4c2f; background: #d5efe0; }
+
+.picker-group {
+  margin: 14px 2px 8px;
+  color: var(--muted);
+  font-size: .68rem;
+  font-weight: 900;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+}
+.picker-group:first-child { margin-top: 4px; }
+.picker-note {
+  margin: 10px 16px 0;
+  padding: 9px 12px;
+  border-radius: 11px;
+  background: var(--purple-soft);
+  color: var(--purple);
+  font-size: .74rem;
+  font-weight: 800;
+}

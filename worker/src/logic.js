@@ -170,20 +170,31 @@ export const SLATE_MIN = 6;
 export const SLATE_MAX = 10;
 export const SLATE_MODES = ["custom", "full", "fallback"];
 
-export const slateKey = (code, matchweek) => `custom_slate:${code}:${matchweek}`;
+/**
+ * Slates key on a period, not a matchweek number. For a single-competition
+ * league the period IS the matchweek number, so every slate written before
+ * windows existed keeps exactly the key it already has.
+ */
+export const slateKey = (code, period) => `custom_slate:${code}:${period}`;
 
 // Slate types the member-facing UI distinguishes: an unanswered fallback reads
 // as a full card, because that is exactly what the league played.
 export const slateType = (slate) => (slate?.mode === "custom" ? "custom" : "full");
 
-// Validates a host submission against the fixtures actually in that matchweek.
-// Returns the canonical id list (deduped, in kickoff order) or an error string.
-export function validateSlate(mode, fixtureIds, roundFixtures) {
-  if (!roundFixtures.length) return { error: "matchweek has no fixtures" };
-  const ordered = [...roundFixtures].sort((a, b) =>
-    (Date.parse(a.startAt || a.lockAt) || 0) - (Date.parse(b.startAt || b.lockAt) || 0) ||
-    String(a.id).localeCompare(String(b.id))
-  );
+export const byKickoffOrder = (a, b) =>
+  (Date.parse(a.startAt || a.lockAt) || 0) - (Date.parse(b.startAt || b.lockAt) || 0) ||
+  String(a.id).localeCompare(String(b.id));
+
+/**
+ * Validates a host submission against the pool actually available this period.
+ *
+ * `bounds` is `{ min, max }` for the week. The league's configured count is a
+ * default the picker opens on, not a limit the host is held to, so the only
+ * hard constraints are the floor and the size of the pool itself.
+ */
+export function validateSlate(mode, fixtureIds, pool, bounds = null) {
+  if (!pool.length) return { error: "no fixtures available this week" };
+  const ordered = [...pool].sort(byKickoffOrder);
   if (mode === "full") return { fixtureIds: ordered.map((match) => String(match.id)) };
   if (mode !== "custom") return { error: "mode must be custom or full" };
   if (!Array.isArray(fixtureIds)) return { error: "fixtureIds must be an array" };
@@ -191,9 +202,13 @@ export function validateSlate(mode, fixtureIds, roundFixtures) {
   if (new Set(requested).size !== requested.length) return { error: "fixtureIds must be unique" };
   const available = new Map(ordered.map((match) => [String(match.id), match]));
   const unknown = requested.find((id) => !available.has(id));
-  if (unknown) return { error: `fixture not in this matchweek: ${unknown}` };
-  if (requested.length < SLATE_MIN || requested.length > SLATE_MAX) {
-    return { error: `select between ${SLATE_MIN} and ${SLATE_MAX} fixtures` };
+  if (unknown) return { error: `fixture not available this week: ${unknown}` };
+
+  const limits = bounds || { min: SLATE_MIN, max: SLATE_MAX };
+  const max = Math.min(limits.max ?? SLATE_MAX, pool.length);
+  const min = Math.min(limits.min ?? SLATE_MIN, max);
+  if (requested.length < min || requested.length > max) {
+    return { error: `select between ${min} and ${max} fixtures` };
   }
   const chosen = new Set(requested);
   return { fixtureIds: ordered.filter((match) => chosen.has(String(match.id))).map((match) => String(match.id)) };
@@ -207,20 +222,40 @@ export function slateFixtures(slate, roundFixtures) {
   return roundFixtures.filter((match) => allow.has(String(match.id)));
 }
 
-// Season-wide version: every fixture whose own matchweek slate includes it.
-// Weeks without a slate contribute their full card, so a season total
-// accumulates across whatever each week's slate happened to be.
-export function applySlates(matches, slatesByMatchweek) {
-  const weeks = Object.keys(slatesByMatchweek || {});
-  if (!weeks.length) return matches;
-  const allowByWeek = new Map(weeks
-    .filter((week) => slatesByMatchweek[week]?.fixtureIds?.length)
-    .map((week) => [Number(week), new Set(slatesByMatchweek[week].fixtureIds.map(String))]));
-  if (!allowByWeek.size) return matches;
+// The period a scoring row belongs to. A mixed league stamps `period` on each
+// row (a window key); everything else falls back to the matchweek number, so a
+// single-competition league behaves exactly as it always has.
+export const periodOf = (match) =>
+  (match?.period != null ? String(match.period) : match?.matchday == null ? null : String(match.matchday));
+
+// Season-wide version: every fixture whose own period slate includes it.
+// Periods without a slate contribute their full pool, so a season total
+// accumulates across whatever each period's slate happened to be.
+export function applySlates(matches, slatesByPeriod) {
+  const periods = Object.keys(slatesByPeriod || {});
+  if (!periods.length) return matches;
+  const allowByPeriod = new Map(periods
+    .filter((period) => slatesByPeriod[period]?.fixtureIds?.length)
+    .map((period) => [String(period), new Set(slatesByPeriod[period].fixtureIds.map(String))]));
+  if (!allowByPeriod.size) return matches;
   return matches.filter((match) => {
-    const allow = allowByWeek.get(Number(match.matchday));
+    const allow = allowByPeriod.get(periodOf(match));
     return !allow || allow.has(String(match.id));
   });
+}
+
+/** Groups fixtures by period. Defaults to matchweek, which is the single-
+ *  competition case; a mixed league passes a window-key function instead. */
+export function groupByPeriod(fixtures, keyOf = periodOf) {
+  const grouped = new Map();
+  for (const match of fixtures) {
+    const key = keyOf(match);
+    if (key == null) continue;
+    const list = grouped.get(key) || [];
+    list.push(match);
+    grouped.set(key, list);
+  }
+  return grouped;
 }
 
 export function fixturesByMatchweek(fixtures) {
@@ -237,14 +272,20 @@ export function fixturesByMatchweek(fixtures) {
 // One member's Trophy Cabinet: the summary shelf plus a week-by-week history of
 // played matchweeks. Derived entirely from picks, results and the slate records
 // that already exist — deliberately no new stored state.
-export function computeCabinet(uid, members, fixtures, picksByMatch, slatesByMatchweek = {}) {
+export function computeCabinet(uid, members, fixtures, picksByMatch, slatesByPeriod = {}, keyOf = periodOf) {
   const member = members.find((row) => row.uid === uid);
   if (!member) return null;
   const totals = { gold: 0, silver: 0, bronze: 0 };
   const weeks = [];
-  const ordered = [...fixturesByMatchweek(fixtures).entries()].sort((a, b) => b[0] - a[0]);
-  for (const [matchweek, all] of ordered) {
-    const slate = slatesByMatchweek[matchweek] || null;
+  // Most recent first. Window keys sort correctly as strings; matchweek numbers
+  // are compared numerically so 10 still comes after 9.
+  const ordered = [...groupByPeriod(fixtures, keyOf).entries()].sort((a, b) => {
+    const [x, y] = [a[0], b[0]];
+    const numeric = Number(x) - Number(y);
+    return Number.isNaN(numeric) ? String(y).localeCompare(String(x)) : -numeric;
+  });
+  for (const [period, all] of ordered) {
+    const slate = slatesByPeriod[period] || null;
     const roundFixtures = slateFixtures(slate, all);
     if (!roundComplete(roundFixtures)) continue;
     const completed = roundFixtures.map(matchToCompleted);
@@ -257,7 +298,8 @@ export function computeCabinet(uid, members, fixtures, picksByMatch, slatesByMat
     const award = podiumFromTable(table, members.length).find((entry) => entry.uid === uid) || null;
     if (award) totals[award.place] += 1;
     weeks.push({
-      matchweek,
+      period,
+      matchweek: Number.isNaN(Number(period)) ? null : Number(period),
       place: award?.place || null,
       rank: table.filter((other) => other.pts > row.pts).length + 1,
       pts: row.pts,
@@ -275,10 +317,10 @@ export function computeCabinet(uid, members, fixtures, picksByMatch, slatesByMat
 }
 
 // Per-uid tally of matchday wins across every complete round.
-export function computeRoundWins(members, fixtures, picksByMatch, slatesByMatchweek = {}) {
+export function computeRoundWins(members, fixtures, picksByMatch, slatesByPeriod = {}, keyOf = periodOf) {
   const wins = Object.fromEntries(members.map((member) => [member.uid, 0]));
-  for (const [matchweek, all] of fixturesByMatchweek(fixtures)) {
-    const roundFixtures = slateFixtures(slatesByMatchweek[matchweek] || null, all);
+  for (const [period, all] of groupByPeriod(fixtures, keyOf)) {
+    const roundFixtures = slateFixtures(slatesByPeriod[period] || null, all);
     for (const uid of roundWinners(members, roundFixtures, picksByMatch)) {
       if (uid in wins) wins[uid] += 1;
     }

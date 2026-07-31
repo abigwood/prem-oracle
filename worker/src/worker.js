@@ -6,6 +6,7 @@ import {
   computePodium,
   computeRoundTable,
   computeRoundWins,
+  computeTable,
   computeTableWithMovement,
   fixturesByMatchweek,
   fixturesNeedingNotification,
@@ -32,11 +33,21 @@ import {
   COMPETITIONS,
   COMPETITION_CODES,
   DEFAULT_COMPETITION,
+  FIXTURE_MODES,
+  MIN_FIXTURE_LIMIT,
   competitionOfFixture,
+  effectiveFixtureCount,
   isCompetition,
+  isMixedLeague,
   leagueCompetition,
+  leagueCompetitions,
+  leagueFixturePlan,
   normaliseCompetition,
+  periodKeyOf,
+  poolByPeriod,
   resultsKey,
+  windowKeyFor,
+  windowLabel,
 } from "./competitions.js";
 import { readMigration, readResults, resultsWriteKey, rollback, runStage } from "./migration.js";
 
@@ -114,10 +125,10 @@ const CUSTOM_MIX_INDEX = "index:custom_mix";
 // reads and keeps exactly today's behaviour.
 const slateAware = (league) => league?.customMix === true || league?.hadSlates === true;
 
-async function readSlates(env, code, matchweeks = null) {
-  if (matchweeks) {
-    const rows = await Promise.all(matchweeks.map(async (matchweek) =>
-      [matchweek, await kvGet(env, slateKey(code, matchweek))]));
+async function readSlates(env, code, periods = null) {
+  if (periods) {
+    const rows = await Promise.all(periods.map(async (period) =>
+      [String(period), await kvGet(env, slateKey(code, period))]));
     return Object.fromEntries(rows.filter(([, slate]) => slate));
   }
   if (!env.KV.list) return {};
@@ -127,9 +138,12 @@ async function readSlates(env, code, matchweeks = null) {
   for (;;) {
     const page = await env.KV.list({ prefix, cursor });
     const rows = await Promise.all(page.keys.map(async (key) =>
-      [Number(key.name.slice(prefix.length)), await kvGet(env, key.name)]));
-    for (const [matchweek, slate] of rows) {
-      if (Number.isInteger(matchweek) && slate) slates[matchweek] = slate;
+      // The suffix is the period: a matchweek number for a single-competition
+      // league, a window key like w2026-08-10 for a mixed one. Kept as a string
+      // either way, because parsing it as a number would silently drop windows.
+      [key.name.slice(prefix.length), await kvGet(env, key.name)]));
+    for (const [period, slate] of rows) {
+      if (period && slate) slates[period] = slate;
     }
     if (page.list_complete) break;
     cursor = page.cursor;
@@ -215,9 +229,32 @@ async function allFixtures(env, fresh = false) {
   return lists.flat();
 }
 
-/** The fixtures a league actually plays. */
-const leagueFixtures = (env, league, fresh = false) =>
-  fixtures(env, leagueCompetition(league), fresh);
+/**
+ * Every fixture a league can draw on, across all its competitions. A
+ * single-competition league gets exactly what it always got.
+ */
+async function leagueFixtures(env, league, fresh = false) {
+  const competitions = leagueCompetitions(league).filter((code) => competitionConfigured(env, code));
+  const lists = await Promise.all(competitions.map((code) => fixtures(env, code, fresh)));
+  return lists.flat();
+}
+
+/**
+ * Results for a league, unioned across its competitions. Each competition's
+ * results come from its own key; a fixture id names which one covers it, so
+ * there is never any ambiguity in the union.
+ */
+async function leagueResults(env, league) {
+  const competitions = leagueCompetitions(league);
+  const maps = await Promise.all(competitions.map((code) => currentResults(env, code)));
+  return Object.assign({}, ...maps);
+}
+
+/** The period a fixture falls in for this league: matchweek, or window key. */
+const leaguePeriodOf = (league) => {
+  const mixed = isMixedLeague(league);
+  return (fixture) => periodKeyOf(fixture, mixed);
+};
 
 /**
  * Locates one fixture by id. The id names its own competition, so this is a
@@ -368,28 +405,66 @@ async function createLeague(env, body) {
   let code;
   do code = makeCode(randomBytes); while (await kvGet(env, `league:${code}`));
   const name = String(body.name || "Saturday Super 6").trim().slice(0, 40);
-  const customMix = body.customMix === true;
-  if (body.competition && !isCompetition(body.competition)) {
-    return json({ error: "unknown competition" }, 400, env);
-  }
-  const competition = normaliseCompetition(body.competition);
-  // The Premier League is always available; a second competition can only be
-  // chosen once its feed is actually configured.
-  if (competition !== DEFAULT_COMPETITION && !competitionConfigured(env, competition)) {
-    return json({ error: `${COMPETITIONS[competition].name} is not available yet` }, 400, env);
-  }
+  const setup = readLeagueSetup(env, body);
+  if (setup.error) return json({ error: setup.error }, 400, env);
   const now = Date.now();
   await kvPut(env, `league:${code}`, {
     code, name, owner: uid,
-    competition,
-    customMix,
+    ...setup.record,
     createdAt: now,
   });
-  if (customMix) await updateCustomMixIndex(env, code, true);
+  if (setup.record.fixtureMode === "limited") await updateCustomMixIndex(env, code, true);
   await kvPut(env, leagueMemberKey(code, uid), { nick: user.nickname || "Anon", since: now });
   user.leagues = [...new Set([...(user.leagues || []), code])];
   await kvPut(env, `user:${uid}`, user);
-  return json({ ok: true, code, name, competition, customMix, recovery: user.recovery }, 200, env);
+  return json({
+    ok: true, code, name,
+    ...setup.record,
+    // Kept for older clients that still read a single competition string.
+    competition: setup.record.competitions[0],
+    customMix: setup.record.fixtureMode === "limited",
+    recovery: user.recovery,
+  }, 200, env);
+}
+
+/**
+ * Validates the competition set and fixture plan a host submitted.
+ *
+ * At least one competition is required and both are allowed. `fixtureMode` is
+ * an explicit stored intent: "all" plays the whole pool, "limited" plays a
+ * fixed number the host chose. Neither is ever inferred from absence.
+ */
+function readLeagueSetup(env, body) {
+  const requested = Array.isArray(body.competitions)
+    ? body.competitions
+    : body.competition != null ? [body.competition] : [DEFAULT_COMPETITION];
+  const unknown = requested.find((code) => !isCompetition(code));
+  if (unknown != null) return { error: "unknown competition" };
+  const competitions = [...new Set(requested.map(String))];
+  if (!competitions.length) return { error: "choose at least one competition" };
+  const unavailable = competitions.find((code) =>
+    code !== DEFAULT_COMPETITION && !competitionConfigured(env, code));
+  if (unavailable) return { error: `${COMPETITIONS[unavailable].name} is not available yet` };
+
+  // Legacy clients send customMix instead of a fixture mode.
+  const requestedMode = body.fixtureMode != null
+    ? String(body.fixtureMode)
+    : body.customMix === true ? "limited" : "all";
+  if (!FIXTURE_MODES.includes(requestedMode)) {
+    return { error: `fixtureMode must be ${FIXTURE_MODES.join(" or ")}` };
+  }
+  let fixtureLimit = null;
+  if (requestedMode === "limited" && body.fixtureLimit != null) {
+    const limit = Number(body.fixtureLimit);
+    if (!Number.isInteger(limit) || limit < MIN_FIXTURE_LIMIT) {
+      return { error: `fixtureLimit must be a whole number of at least ${MIN_FIXTURE_LIMIT}` };
+    }
+    fixtureLimit = limit;
+  }
+  // COMPETITION_CODES order keeps the stored array stable regardless of the
+  // order the client happened to tick the boxes in.
+  const ordered = COMPETITION_CODES.filter((code) => competitions.includes(code));
+  return { record: { competitions: ordered, fixtureMode: requestedMode, fixtureLimit } };
 }
 
 // Hosts can turn Custom Mix on (or back off) after the league exists. Existing
@@ -404,9 +479,11 @@ async function setCustomMix(env, body) {
   if (!league) return json({ error: "league not found" }, 404, env);
   if (uid !== league.owner) return json({ error: "only the league host can change custom matchweek picks" }, 403, env);
   league.customMix = body.enabled;
+  league.fixtureMode = body.enabled ? "limited" : "all";
+  if (!body.enabled) league.fixtureLimit = null;
   await kvPut(env, `league:${code}`, league);
   await updateCustomMixIndex(env, code, body.enabled);
-  return json({ ok: true, code, customMix: league.customMix }, 200, env);
+  return json({ ok: true, code, customMix: body.enabled, fixtureMode: league.fixtureMode }, 200, env);
 }
 
 // POST /league/slate — the host curates Matchweek N.
@@ -417,20 +494,29 @@ async function setCustomMix(env, body) {
 async function setSlate(env, body) {
   const uid = String(body.uid || "").trim();
   const code = String(body.code || "").trim().toUpperCase();
-  const matchweek = Number(body.matchweek);
   if (!uid || !code) return json({ error: "uid and code required" }, 400, env);
-  if (!Number.isInteger(matchweek) || matchweek < 1) return json({ error: "matchweek required" }, 400, env);
   const league = await kvGet(env, `league:${code}`);
   if (!league) return json({ error: "league not found" }, 404, env);
   if (uid !== league.owner) return json({ error: "only the league host can set the fixtures" }, 403, env);
-  if (!league.customMix) return json({ error: "custom matchweek picks are not enabled for this league" }, 400, env);
-  const existing = await kvGet(env, slateKey(code, matchweek));
+  if (leagueFixturePlan(league).mode !== "limited") {
+    return json({ error: "this league plays every fixture, so there is nothing to pick" }, 400, env);
+  }
+  // A mixed league keys on its own week window; a single-competition league
+  // still keys on the official matchweek number, so existing slates are intact.
+  const period = String(body.period ?? body.matchweek ?? "").trim();
+  if (!period) return json({ error: "period required" }, 400, env);
+  if (!isMixedLeague(league)) {
+    const matchweek = Number(period);
+    if (!Number.isInteger(matchweek) || matchweek < 1) return json({ error: "matchweek required" }, 400, env);
+  }
+  const existing = await kvGet(env, slateKey(code, period));
   if (existing) return json({ error: "this matchweek's fixtures are already set", slate: existing }, 409, env);
 
   const matchList = await leagueFixtures(env, league);
-  const roundFixtures = matchList.filter((match) => match.matchday === matchweek);
+  const pool = poolByPeriod(matchList, league).get(period) || [];
+  const bounds = effectiveFixtureCount(league, pool.length);
   const mode = String(body.mode || "custom");
-  const validated = validateSlate(mode, body.fixtureIds, roundFixtures);
+  const validated = validateSlate(mode, body.fixtureIds, pool, bounds);
   if (validated.error) return json({ error: validated.error }, 400, env);
 
   const slate = {
@@ -439,19 +525,20 @@ async function setSlate(env, body) {
     lockedAt: new Date().toISOString(),
     setBy: uid,
   };
-  await kvPut(env, slateKey(code, matchweek), slate);
+  await kvPut(env, slateKey(code, period), slate);
   if (!league.hadSlates) {
     league.hadSlates = true;
     await kvPut(env, `league:${code}`, league);
   }
 
   const memberList = await members(env, league);
+  const label = isMixedLeague(league) ? `your week of ${windowLabel(period)}` : `Matchweek ${period}`;
   await pushToUids(
     env,
     memberList.filter((member) => member.uid !== uid).map((member) => member.uid),
-    `${hostNick(memberList, league)} has set ${slate.fixtureIds.length} fixtures for Matchweek ${matchweek}. Make your picks!`
+    `${hostNick(memberList, league)} has set ${slate.fixtureIds.length} fixtures for ${label}. Make your picks!`
   );
-  return json({ ok: true, code, matchweek, slate }, 200, env);
+  return json({ ok: true, code, period, matchweek: Number(period) || null, slate }, 200, env);
 }
 
 // Account deletion, and with it host succession: a league never ends up ownerless.
@@ -695,8 +782,9 @@ async function migrationAdmin(env, body) {
   }
 }
 
-const publicSlate = (slate, matchweek) => (slate ? {
-  matchweek,
+const publicSlate = (slate, period) => (slate ? {
+  period,
+  matchweek: Number(period) || null,
   mode: slate.mode,
   fixtureIds: slate.fixtureIds,
   count: slate.fixtureIds.length,
@@ -708,7 +796,12 @@ async function state(env, url) {
   const code = String(url.searchParams.get("code") || "").toUpperCase();
   const league = await kvGet(env, `league:${code}`);
   if (!league) return json({ error: "league not found" }, 404, env);
-  const competition = leagueCompetition(league);
+  const competitions = leagueCompetitions(league);
+  const mixed = isMixedLeague(league);
+  const plan = leagueFixturePlan(league);
+  const keyOf = leaguePeriodOf(league);
+  // Each competition's fixtures already carry their own results, so the union
+  // below is a union of results:PL and results:ELC by construction.
   const matchList = await leagueFixtures(env, league);
   const memberList = await members(env, league);
   const picks = await allPicks(env, matchList.map((match) => match.id));
@@ -719,26 +812,42 @@ async function state(env, url) {
       result: normaliseResult(match),
       voided: isVoided(match),
       matchday: match.matchday,
+      period: keyOf(match),
     }))
     .filter((match) => match.result || match.voided);
 
-  const mdParam = url.searchParams.get("md");
-  const md = mdParam == null ? null : Number(mdParam);
-  if (md != null && Number.isInteger(md) && md > 0) {
-    // Round view: one slate read, and only for a league that runs Custom Mix.
-    const slate = slateAware(league) ? await kvGet(env, slateKey(code, md)) : null;
-    const roundFixtures = slateFixtures(slate, matchList.filter((match) => match.matchday === md));
-    const scoped = slate ? applySlates(completed, { [md]: slate }) : completed;
-    const table = computeRoundTable(memberList, scoped, picks, md).map((row, index) => ({ ...row, rank: index + 1 }));
+  const identity = {
+    competitions,
+    competitionNames: competitions.map((entry) => COMPETITIONS[entry].name),
+    mixed,
+    fixtureMode: plan.mode,
+    fixtureLimit: plan.limit,
+    // Retained for clients that predate the competitions array.
+    competition: competitions[0],
+    competitionName: COMPETITIONS[competitions[0]].name,
+    customMix: plan.mode === "limited",
+  };
+
+  const byPeriod = poolByPeriod(matchList, league);
+  const periodParam = url.searchParams.get("period") ?? url.searchParams.get("md");
+  if (periodParam != null && String(periodParam).trim()) {
+    const period = String(periodParam).trim();
+    const slate = slateAware(league) ? await kvGet(env, slateKey(code, period)) : null;
+    const pool = byPeriod.get(period) || [];
+    const roundFixtures = slateFixtures(slate, pool);
+    const scoped = applySlates(completed.filter((match) => match.period === period),
+      slate ? { [period]: slate } : {});
+    const table = computeTable(memberList, scoped, picks).map((row, index) => ({ ...row, rank: index + 1 }));
     return json({
       code,
       name: league.name,
       owner: league.owner,
-      competition,
-      competitionName: COMPETITIONS[competition].name,
-      customMix: league.customMix === true,
-      matchday: md,
-      slate: publicSlate(slate, md),
+      ...identity,
+      period,
+      matchday: Number(period) || null,
+      windowLabel: mixed ? windowLabel(period) : null,
+      poolSize: pool.length,
+      slate: publicSlate(slate, period),
       table,
       status: roundStatus(roundFixtures),
       complete: roundComplete(roundFixtures),
@@ -747,33 +856,39 @@ async function state(env, url) {
     }, 200, env);
   }
 
-  // Season view. Every week is scored on whatever slate it was played on, so a
-  // season total accumulates across full cards and curated weeks alike.
   const slates = slateAware(league) ? await readSlates(env, code) : {};
-  const scopedFixtures = applySlates(matchList, slates);
+  const scopedFixtures = applySlates(matchList.map((match) => ({ ...match, period: keyOf(match) })), slates);
   const scopedCompleted = applySlates(completed, slates);
-  const wins = computeRoundWins(memberList, matchList, picks, slates);
-  const unplayed = scopedFixtures.filter((match) => match.matchday != null && !normaliseResult(match) && !isVoided(match));
-  const currentMatchday = unplayed.length ? Math.min(...unplayed.map((match) => match.matchday)) : null;
-  const currentMatchdayFixtures = currentMatchday == null
-    ? []
-    : scopedFixtures.filter((match) => match.matchday === currentMatchday);
-  const currentMatchdayHasResults = currentMatchdayFixtures.some((match) => !!normaliseResult(match));
+  const wins = computeRoundWins(memberList, matchList, picks, slates, keyOf);
+  const unplayed = scopedFixtures.filter((match) => match.period != null && !normaliseResult(match) && !isVoided(match));
+  // "Current" is the earliest period still to be played. Window keys sort
+  // chronologically as strings; matchweek numbers need numeric comparison.
+  const periodOrder = (a, b) => {
+    const numeric = Number(a) - Number(b);
+    return Number.isNaN(numeric) ? String(a).localeCompare(String(b)) : numeric;
+  };
+  const currentPeriod = unplayed.length
+    ? [...new Set(unplayed.map((match) => match.period))].sort(periodOrder)[0]
+    : null;
+  const currentFixtures = currentPeriod == null ? [] : scopedFixtures.filter((match) => match.period === currentPeriod);
+  const currentPool = currentPeriod == null ? [] : (byPeriod.get(currentPeriod) || []);
   const viewer = url.searchParams.get("uid") || "";
   return json({
     code,
     name: league.name,
     owner: league.owner,
-    competition,
-    competitionName: COMPETITIONS[competition].name,
-    customMix: league.customMix === true,
-    currentMatchday,
-    currentMatchdayStatus: currentMatchday == null ? "complete" : roundStatus(currentMatchdayFixtures),
-    currentMatchdayHasResults,
-    currentSlate: currentMatchday == null ? null : publicSlate(slates[currentMatchday] || null, currentMatchday),
+    ...identity,
+    currentPeriod,
+    currentMatchday: currentPeriod == null ? null : (Number(currentPeriod) || null),
+    currentWindowLabel: mixed && currentPeriod ? windowLabel(currentPeriod) : null,
+    currentPoolSize: currentPool.length,
+    currentFixtureCount: effectiveFixtureCount(league, currentPool.length),
+    currentMatchdayStatus: currentPeriod == null ? "complete" : roundStatus(currentFixtures),
+    currentMatchdayHasResults: currentFixtures.some((match) => !!normaliseResult(match)),
+    currentSlate: currentPeriod == null ? null : publicSlate(slates[currentPeriod] || null, currentPeriod),
     table: computeTableWithMovement(memberList, scopedCompleted, picks).map((row) => ({ ...row, wins: wins[row.uid] || 0 })),
     reveals: buildReveals(memberList, scopedFixtures, picks, Date.now()).slice(0, 20),
-    cabinet: viewer ? computeCabinet(viewer, memberList, matchList, picks, slates) : null,
+    cabinet: viewer ? computeCabinet(viewer, memberList, matchList, picks, slates, keyOf) : null,
   }, 200, env);
 }
 
@@ -923,13 +1038,13 @@ const fixtureLabel = (match) => (match ? `${match.player1} v ${match.player2}` :
 // `open` is the next matchweek to kick off — reminder and fallback territory.
 // `live` is anything already under way but not yet settled, where a fixture can
 // still be postponed out of a slate members are actively picking.
-function relevantMatchweeks(byMatchweek, nowMs) {
+function relevantPeriods(byPeriod, nowMs) {
   let open = null;
   const live = [];
-  for (const [matchweek, list] of byMatchweek) {
+  for (const [period, list] of byPeriod) {
     const first = Math.min(...list.map(kickoffMs));
     if (!Number.isFinite(first)) continue;
-    const entry = { matchweek, firstKickoff: first, fixtures: list };
+    const entry = { period, matchweek: Number(period) || null, firstKickoff: first, fixtures: list };
     if (first > nowMs) {
       if (!open || first < open.firstKickoff) open = entry;
       continue;
@@ -943,21 +1058,22 @@ function relevantMatchweeks(byMatchweek, nowMs) {
   return { open, live };
 }
 
-async function remindHost(env, league, matchweek) {
-  const key = `notified:slate-open:${league.code}:${matchweek}`;
+async function remindHost(env, league, period) {
+  const key = `notified:slate-open:${league.code}:${period}`;
   if (await env.KV.get(key)) return;
-  await pushToUids(env, [league.owner], `Matchweek ${matchweek} is open — pick your fixtures for ${league.name}.`);
+  const label = isMixedLeague(league) ? `Your week of ${windowLabel(period)}` : `Matchweek ${period}`;
+  await pushToUids(env, [league.owner], `${label} is open — pick your fixtures for ${league.name}.`);
   await env.KV.put(key, "1", { expirationTtl: SLATE_NOTICE_TTL_S });
 }
 
-async function applyFallback(env, league, matchweek, roundFixtures) {
+async function applyFallback(env, league, period, roundFixtures) {
   const slate = {
     mode: "fallback",
     fixtureIds: [...roundFixtures].sort(byKickoff).map((match) => String(match.id)),
     lockedAt: new Date().toISOString(),
     setBy: null,
   };
-  await kvPut(env, slateKey(league.code, matchweek), slate);
+  await kvPut(env, slateKey(league.code, period), slate);
   if (!league.hadSlates) {
     league.hadSlates = true;
     await kvPut(env, `league:${league.code}`, league);
@@ -966,14 +1082,14 @@ async function applyFallback(env, league, matchweek, roundFixtures) {
   await pushToUids(
     env,
     memberList.map((member) => member.uid),
-    `Matchweek ${matchweek} in ${league.name} is a full card — all ${slate.fixtureIds.length} fixtures are open. Get your picks in!`
+    `${isMixedLeague(league) ? `Your week of ${windowLabel(period)}` : `Matchweek ${period}`} in ${league.name} is a full card — all ${slate.fixtureIds.length} fixtures are open. Get your picks in!`
   );
 }
 
-async function reconcilePostponements(env, league, slate, matchweek, roundFixtures, nowMs) {
+async function reconcilePostponements(env, league, slate, period, roundFixtures, nowMs) {
   const change = reconcileSlate(slate, roundFixtures, nowMs);
   if (!change) return;
-  await kvPut(env, slateKey(league.code, matchweek), {
+  await kvPut(env, slateKey(league.code, period), {
     ...slate,
     fixtureIds: change.fixtureIds,
     revisedAt: new Date().toISOString(),
@@ -981,8 +1097,8 @@ async function reconcilePostponements(env, league, slate, matchweek, roundFixtur
   const byId = new Map(roundFixtures.map((match) => [String(match.id), match]));
   const gone = change.dropped.map((id) => fixtureLabel(byId.get(id))).join(", ");
   const body = change.added.length
-    ? `${gone} was postponed in ${league.name} — ${change.added.map((id) => fixtureLabel(byId.get(id))).join(", ")} takes its place in Matchweek ${matchweek}.`
-    : `${gone} was postponed and no longer counts in ${league.name}. Matchweek ${matchweek} now scores ${change.fixtureIds.length} fixtures.`;
+    ? `${gone} was postponed in ${league.name} — ${change.added.map((id) => fixtureLabel(byId.get(id))).join(", ")} takes its place in ${isMixedLeague(league) ? `your week of ${windowLabel(period)}` : `Matchweek ${period}`}.`
+    : `${gone} was postponed and no longer counts in ${league.name}. ${isMixedLeague(league) ? `Your week of ${windowLabel(period)}` : `Matchweek ${period}`} now scores ${change.fixtureIds.length} fixtures.`;
   const memberList = await members(env, league);
   await pushToUids(env, memberList.map((member) => member.uid), body);
 }
@@ -994,30 +1110,30 @@ async function customMixMaintenance(env) {
   const codes = (await kvGet(env, CUSTOM_MIX_INDEX)) || [];
   if (!codes.length) return;
   const now = Date.now();
-  // One fixture list per competition, shared by every league playing it.
-  const weeksByCompetition = new Map();
+  // Keyed by the league's competition set, so leagues sharing a set share work.
+  const periodsBySet = new Map();
   for (const code of codes) {
     const league = await kvGet(env, `league:${code}`);
-    if (!league?.customMix || !league.owner) continue;
-    const competition = leagueCompetition(league);
-    if (!weeksByCompetition.has(competition)) {
-      const list = await fixtures(env, competition);
-      weeksByCompetition.set(competition, relevantMatchweeks(fixturesByMatchweek(list), now));
+    if (!league?.owner || leagueFixturePlan(league).mode !== "limited") continue;
+    const setKey = leagueCompetitions(league).join("+");
+    if (!periodsBySet.has(setKey)) {
+      const list = await leagueFixtures(env, league);
+      periodsBySet.set(setKey, relevantPeriods(poolByPeriod(list, league), now));
     }
-    const { open, live } = weeksByCompetition.get(competition);
+    const { open, live } = periodsBySet.get(setKey);
     if (!open && !live.length) continue;
     for (const week of live) {
-      const slate = await kvGet(env, slateKey(code, week.matchweek));
-      if (slate) await reconcilePostponements(env, league, slate, week.matchweek, week.fixtures, now);
+      const slate = await kvGet(env, slateKey(code, week.period));
+      if (slate) await reconcilePostponements(env, league, slate, week.period, week.fixtures, now);
     }
     if (!open) continue;
-    const slate = await kvGet(env, slateKey(code, open.matchweek));
+    const slate = await kvGet(env, slateKey(code, open.period));
     if (slate) {
-      await reconcilePostponements(env, league, slate, open.matchweek, open.fixtures, now);
+      await reconcilePostponements(env, league, slate, open.period, open.fixtures, now);
     } else if (now >= open.firstKickoff - FALLBACK_LEAD_MS) {
-      await applyFallback(env, league, open.matchweek, open.fixtures);
+      await applyFallback(env, league, open.period, open.fixtures);
     } else {
-      await remindHost(env, league, open.matchweek);
+      await remindHost(env, league, open.period);
     }
   }
 }

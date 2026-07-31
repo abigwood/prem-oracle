@@ -30,7 +30,7 @@ function memoryKV(store = new Map()) {
 // Ten Matchweek-1 fixtures, kicking off an hour apart from `firstKickoff`.
 function roundOf(count = 10, firstKickoff = Date.parse("2026-08-21T12:00:00Z"), matchday = 1) {
   return Array.from({ length: count }, (_, index) => ({
-    id: `md${matchday}-${String(index + 1).padStart(3, "0")}`,
+    id: `pl-2026-27-md${matchday}-${String(index + 1).padStart(3, "0")}`,
     matchday,
     player1: `Home ${index + 1}`,
     player2: `Away ${index + 1}`,
@@ -54,12 +54,13 @@ test("custom slates validate size, membership and uniqueness", () => {
   const round = roundOf();
   const ids = round.map((match) => match.id);
 
-  assert.equal(validateSlate("custom", ids.slice(0, 5), round).error, "select between 6 and 10 fixtures");
-  assert.equal(validateSlate("custom", [...ids, "md1-011"], round).error, "fixture not in this matchweek: md1-011");
+  assert.equal(validateSlate("custom", ids.slice(0, 5), round).error, "select between 6 and 10 fixtures",
+    "the bare default bounds still apply when no league bounds are supplied");
+  assert.equal(validateSlate("custom", [...ids, "pl-2026-27-md1-011"], round).error, "fixture not available this week: pl-2026-27-md1-011");
   assert.equal(validateSlate("custom", [ids[0], ids[0], ids[1], ids[2], ids[3], ids[4]], round).error, "fixtureIds must be unique");
-  assert.equal(validateSlate("custom", ["md2-001", ...ids.slice(0, 5)], round).error, "fixture not in this matchweek: md2-001");
+  assert.equal(validateSlate("custom", ["pl-2026-27-md2-001", ...ids.slice(0, 5)], round).error, "fixture not available this week: pl-2026-27-md2-001");
   assert.equal(validateSlate("sideways", ids.slice(0, 6), round).error, "mode must be custom or full");
-  assert.equal(validateSlate("custom", ids.slice(0, 6), []).error, "matchweek has no fixtures");
+  assert.equal(validateSlate("custom", ids.slice(0, 6), []).error, "no fixtures available this week");
 
   // Both bounds inclusive, and the stored order is always kickoff order.
   assert.deepEqual(validateSlate("custom", ids.slice(0, 6), round).fixtureIds, ids.slice(0, 6));
@@ -124,11 +125,11 @@ test("a postponed slate fixture is replaced while nothing has locked", () => {
 
   const change = reconcileSlate(slate, round, now);
   assert.equal(change.reason, "replaced");
-  assert.deepEqual(change.dropped, ["md1-003"]);
+  assert.deepEqual(change.dropped, ["pl-2026-27-md1-003"]);
   // The next fixture by kickoff order that wasn't already on the slate.
-  assert.deepEqual(change.added, ["md1-007"]);
+  assert.deepEqual(change.added, ["pl-2026-27-md1-007"]);
   assert.equal(change.fixtureIds.length, 6);
-  assert.deepEqual(change.fixtureIds, ["md1-001", "md1-002", "md1-004", "md1-005", "md1-006", "md1-007"]);
+  assert.deepEqual(change.fixtureIds, ["pl-2026-27-md1-001", "pl-2026-27-md1-002", "pl-2026-27-md1-004", "pl-2026-27-md1-005", "pl-2026-27-md1-006", "pl-2026-27-md1-007"]);
 });
 
 test("after any slate fixture locks a postponement is removed, never replaced", () => {
@@ -140,7 +141,7 @@ test("after any slate fixture locks a postponement is removed, never replaced", 
 
   const change = reconcileSlate(slate, round, now);
   assert.equal(change.reason, "locked");
-  assert.deepEqual(change.dropped, ["md1-005"]);
+  assert.deepEqual(change.dropped, ["pl-2026-27-md1-005"]);
   assert.deepEqual(change.added, []);
   // Fairness beats slate size: five fixtures is the right answer, not six.
   assert.equal(change.fixtureIds.length, 5);
@@ -155,7 +156,7 @@ test("a locked slate drops below the minimum rather than silently adding", () =>
 
   const change = reconcileSlate(slate, postponed, now);
   assert.deepEqual(change.added, []);
-  assert.deepEqual(change.fixtureIds, ["md1-001", "md1-005", "md1-006"]);
+  assert.deepEqual(change.fixtureIds, ["pl-2026-27-md1-001", "pl-2026-27-md1-005", "pl-2026-27-md1-006"]);
 });
 
 test("a healthy slate is left alone, and full-card slates are never reconciled", () => {
@@ -243,11 +244,11 @@ test("the cabinet is derived from picks, results and each week's slate", () => {
   // Week 3 has no results, so it isn't a played week.
   assert.deepEqual(cabinet.weeks.map((week) => week.matchweek), [2, 1]);
   assert.deepEqual(cabinet.weeks.find((week) => week.matchweek === 1), {
-    matchweek: 1, place: "gold", rank: 1, pts: 35, slateType: "custom", fixtures: 7,
+    period: "1", matchweek: 1, place: "gold", rank: 1, pts: 35, slateType: "custom", fixtures: 7,
   });
   // A scoreless week is a played week, but never a podium finish.
   assert.deepEqual(cabinet.weeks.find((week) => week.matchweek === 2), {
-    matchweek: 2, place: null, rank: 3, pts: 0, slateType: "full", fixtures: 10,
+    period: "2", matchweek: 2, place: null, rank: 3, pts: 0, slateType: "full", fixtures: 10,
   });
   assert.equal(cabinet.gold, 1);
   assert.equal(cabinet.silver, 0);
@@ -334,10 +335,12 @@ test("POST /league/slate is host-only, validated, and immutable once set", async
     assert.equal(notHost.status, 403);
     assert.equal((await notHost.json()).error, "only the league host can set the fixtures");
     assert.equal((await send("/league/slate", { uid: "host", code, fixtureIds: ids.slice(0, 6) })).status, 400);
-    const tooFew = await slate({ uid: "host", fixtureIds: ids.slice(0, 5) });
+    // The configured count is a weekly default, not a cap: five of ten is fine.
+    // Only the floor of three and the size of the pool are hard edges.
+    const tooFew = await slate({ uid: "host", fixtureIds: ids.slice(0, 2) });
     assert.equal(tooFew.status, 400);
-    assert.equal((await tooFew.json()).error, "select between 6 and 10 fixtures");
-    assert.equal((await slate({ uid: "host", fixtureIds: [...ids, "md1-011"] })).status, 400);
+    assert.equal((await tooFew.json()).error, "select between 3 and 10 fixtures");
+    assert.equal((await slate({ uid: "host", fixtureIds: [...ids, "pl-2026-27-md1-011"] })).status, 400);
 
     // Nothing above wrote anything.
     assert.equal(await env.KV.get(`custom_slate:${code}:1`), null);
@@ -370,7 +373,7 @@ test("a league without Custom Mix cannot be given a slate until it is enabled", 
 
     const refused = await send("/league/slate", { uid: "host", code, matchweek: 1, fixtureIds: ids });
     assert.equal(refused.status, 400);
-    assert.equal((await refused.json()).error, "custom matchweek picks are not enabled for this league");
+    assert.equal((await refused.json()).error, "this league plays every fixture, so there is nothing to pick");
 
     assert.equal((await send("/league/custom-mix", { uid: "m2", code, enabled: true })).status, 403);
     assert.equal((await send("/league/custom-mix", { uid: "host", code, enabled: "yes" })).status, 400);
@@ -425,7 +428,7 @@ test("/state scores, ranks and reveals only the slate fixtures", async () => {
     assert.equal(withoutSlate.table[1].pts, 15);
 
     // Curate the three settled fixtures Two also called, plus three it missed.
-    const ids = ["md1-001", "md1-002", "md1-003", "md1-006", "md1-007", "md1-008"];
+    const ids = ["pl-2026-27-md1-001", "pl-2026-27-md1-002", "pl-2026-27-md1-003", "pl-2026-27-md1-006", "pl-2026-27-md1-007", "pl-2026-27-md1-008"];
     assert.equal((await send("/league/slate", { uid: "host", code, matchweek: 1, fixtureIds: ids })).status, 200);
 
     const round1 = await (await get(env)(`/state?code=${code}&md=1`)).json();
@@ -445,7 +448,7 @@ test("/state scores, ranks and reveals only the slate fixtures", async () => {
     assert.deepEqual(season.reveals.map((reveal) => reveal.matchId).sort(), ids);
     assert.equal(season.cabinet.gold, 1);
     assert.deepEqual(season.cabinet.weeks, [
-      { matchweek: 1, place: "gold", rank: 1, pts: 30, slateType: "custom", fixtures: 6 },
+      { period: "1", matchweek: 1, place: "gold", rank: 1, pts: 30, slateType: "custom", fixtures: 6 },
     ]);
     // No uid, no cabinet — the payload only carries what the caller asked for.
     assert.equal((await (await get(env)(`/state?code=${code}`)).json()).cabinet, null);
@@ -545,7 +548,7 @@ test("the scheduled sweep replaces a postponement before kick-off and trims one 
     await primeFixtures(env);
     await runScheduled(env);
     const slate = await env.KV.get(`custom_slate:${code}:1`);
-    assert.deepEqual(slate.fixtureIds, ["md1-001", "md1-003", "md1-004", "md1-005", "md1-006", "md1-007"]);
+    assert.deepEqual(slate.fixtureIds, ["pl-2026-27-md1-001", "pl-2026-27-md1-003", "pl-2026-27-md1-004", "pl-2026-27-md1-005", "pl-2026-27-md1-006", "pl-2026-27-md1-007"]);
     assert.ok(slate.revisedAt);
   });
 
@@ -556,7 +559,7 @@ test("the scheduled sweep replaces a postponement before kick-off and trims one 
     await primeFixtures(env);
     await runScheduled(env);
     const slate = await env.KV.get(`custom_slate:${code}:1`);
-    assert.deepEqual(slate.fixtureIds, ["md1-001", "md1-003", "md1-005", "md1-006", "md1-007"]);
+    assert.deepEqual(slate.fixtureIds, ["pl-2026-27-md1-001", "pl-2026-27-md1-003", "pl-2026-27-md1-005", "pl-2026-27-md1-006", "pl-2026-27-md1-007"]);
   });
 });
 

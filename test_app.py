@@ -593,28 +593,40 @@ class CompetitionAppTests(unittest.TestCase):
         self.assertIn('code === "ELC" && FEATURES.elc', self.app)
         self.assertIn("function availableCompetitions()", self.app.replace("const availableCompetitions = ()", "function availableCompetitions()"))
 
-    def test_competition_choice_only_appears_when_there_is_a_choice(self):
+    def test_competitions_are_checkboxes_not_an_either_or(self):
         self.assertIn("availableCompetitions().length > 1", self.app)
-        self.assertIn('name="competition"', self.app)
-        self.assertIn('role="radiogroup"', self.app)
+        self.assertIn('name="competitions"', self.app)
+        self.assertIn('role="group"', self.app)
+        self.assertNotIn('role="radiogroup"', self.app)
+        self.assertNotIn('type="radio" name="competition"', self.app)
         self.assertIn(".competition-choice", self.css)
-        # Premier League is the default and is listed first.
+        # Premier League is still the default, and at least one is required.
         self.assertIn('const DEFAULT_COMPETITION = "PL";', self.app)
-        self.assertIn('const competition = String(form.get("competition") || DEFAULT_COMPETITION);', self.app)
+        self.assertIn('form.getAll("competitions")', self.app)
+        self.assertIn('setFlash("Choose at least one competition", "error")', self.app)
 
     def test_season_length_is_never_hardcoded(self):
-        self.assertIn("const seasonRounds = () => competitionMeta(activeCompetition()).rounds;", self.app)
+        # A mixed league has no single season length — it runs on calendar weeks.
+        self.assertIn("const seasonRounds = () => (isMixedActive() ? null : competitionMeta(activeCompetition()).rounds);", self.app)
         self.assertIn("rounds: 38", self.app)
         self.assertIn("rounds: 46", self.app)
-        # No stray "of 38" survives the change.
         self.assertNotIn("of 38", self.app)
 
-    def test_the_app_loads_the_active_competitions_fixtures(self):
-        self.assertIn("`${API}/fixtures?competition=${competition}&", self.app)
-        self.assertIn("competitionMeta(competition).data", self.app)
+    def test_the_app_loads_every_selected_competition(self):
+        self.assertIn("`${API}/fixtures?competition=${code}&", self.app)
+        self.assertIn("competitionMeta(code).data", self.app)
         self.assertIn('data: "data/fixtures-elc.json"', self.app)
-        # Switching league can switch competition, which means new fixtures.
-        self.assertIn("if (rememberCompetition(leagueState.competition)) await loadFixtures();", self.app)
+        # One request per selected competition, merged into one fixture list.
+        self.assertIn("competitions.map((code) => loadOneCompetition(code, refresh))", self.app)
+        self.assertIn("if (rememberCompetition(leagueState.competitions || leagueState.competition)) await loadFixtures();", self.app)
+
+    def test_mixed_leagues_run_on_their_own_week_window(self):
+        self.assertIn("function windowKeyFor(value)", self.app)
+        self.assertIn("const periodLabel = (period) =>", self.app)
+        self.assertIn("export function windowKeyFor(value)", (ROOT / "worker/src/competitions.js").read_text())
+        self.assertIn('const period = String(body.period ?? body.matchweek ?? "").trim();', self.worker)
+        # The app sends the period, not a matchweek number.
+        self.assertIn('await api("/league/slate", { uid: uid(), code: activeLeague, period, mode, fixtureIds })', self.app)
 
     def test_competition_identity_is_visible_in_header_and_shares(self):
         self.assertIn("competitionMeta(state.competition || DEFAULT_COMPETITION).name", self.app)
@@ -654,34 +666,70 @@ class CustomMixTests(unittest.TestCase):
         cls.worker = (ROOT / "worker/src/worker.js").read_text()
         cls.logic = (ROOT / "worker/src/logic.js").read_text()
 
-    def test_custom_mix_is_opt_in_at_league_creation(self):
-        self.assertIn('<strong>Custom matchweek picks</strong>', self.app)
-        self.assertIn('name="customMix"', self.app)
-        # Off by default: no `checked`, and the flag is only sent when ticked.
-        toggle = self.app[self.app.index('name="customMix"'):][:120]
+    def test_fixture_count_is_an_explicit_mode_and_number(self):
+        self.assertIn('<strong>Set a weekly fixture count</strong>', self.app)
+        self.assertIn('name="limitFixtures"', self.app)
+        self.assertIn('name="fixtureLimit"', self.app)
+        # Off by default: every fixture counts unless the host says otherwise.
+        toggle = self.app[self.app.index('name="limitFixtures"'):][:140]
         self.assertNotIn("checked", toggle)
-        self.assertIn('const customMix = form.get("customMix") != null;', self.app)
-        # Existing leagues are untouched — the worker defaults the flag to false.
-        self.assertIn("const customMix = body.customMix === true;", self.worker)
+        self.assertIn('fixtureMode: limited ? "limited" : "all"', self.app)
+        self.assertIn("const MIN_FIXTURE_LIMIT = 3;", self.app)
+        self.assertIn("data-count-step", self.app)
+        self.assertIn(".count-stepper", self.css)
+        # The panel is hidden until the toggle is on. A `display` rule outranks
+        # the hidden attribute, so it has to opt back out explicitly.
+        self.assertIn(".fixture-count[hidden] { display: none; }", self.css)
+        # "All" is a stored intent on the worker too, never inferred.
+        self.assertIn("FIXTURE_MODES.includes(requestedMode)", self.worker)
 
-    def test_picker_offers_six_to_ten_with_surprise_me_and_use_all(self):
-        self.assertIn("const SLATE_MIN = 6;", self.app)
-        self.assertIn("const SLATE_MAX = 10;", self.app)
-        self.assertIn("Select ${SLATE_MIN}–${SLATE_MAX} · ${count} selected", self.app)
+    def test_no_six_to_ten_framing_survives(self):
+        for source in (self.app, (ROOT / "index.html").read_text()):
+            self.assertNotIn("6–10", source)
+            self.assertNotIn("6-10 fixtures", source)
+        self.assertIn("Choose your competitions and fixture count", self.app)
+
+    def test_picker_opens_on_the_default_but_the_week_is_the_hosts(self):
+        # The configured count is a rule of thumb, not a cap.
+        self.assertIn("Select ${bounds.min}–${bounds.max} · ${count} selected", self.app)
+        self.assertIn("const ready = count >= bounds.min && count <= bounds.max;", self.app)
+        self.assertIn("take more or fewer this week if you like", self.app)
+        self.assertIn("~${limit} fixtures/week", self.app)
         self.assertIn("data-picker-surprise", self.app)
         self.assertIn("Surprise me", self.app)
         self.assertIn("Use all ${list.length} this week", self.app)
         self.assertIn("Set ${count} fixtures", self.app)
-        # The CTA only activates from six selections.
-        self.assertIn("count < SLATE_MIN || count > SLATE_MAX ? \"disabled\" : \"\"", self.app)
+        self.assertIn("function pickerBounds(poolSize)", self.app)
+        # A short week caps the default rather than blocking, and says so inline.
+        self.assertIn("Only ${countPhrase(list.length,", self.app)
+        self.assertIn(".picker-note", self.css)
 
-    def test_surprise_me_deals_an_editable_random_eight(self):
-        self.assertIn("const SURPRISE_COUNT = 8;", self.app)
-        self.assertIn("Math.min(SURPRISE_COUNT, pool.length)", self.app)
-        # Applied as an ordinary selection: same mode, so every card stays tappable.
-        surprise = self.app[self.app.index("[data-picker-surprise]"):][:260]
-        self.assertIn("pickerSelection = surpriseSelection(pickerFixtures())", surprise)
-        self.assertIn('pickerMode = "custom"', surprise)
+    def test_dice_uses_the_count_the_host_dialled_for_this_week(self):
+        handler = self.app[self.app.index("[data-picker-surprise]"):][:520]
+        self.assertIn("const dialled = pickerSelection.size || bounds.default;", handler)
+        self.assertIn("Math.max(bounds.min, Math.min(dialled, bounds.max))", handler)
+
+    def test_mixed_picker_groups_by_competition_and_chips_the_cards(self):
+        self.assertIn("picker-group", self.app)
+        self.assertIn(".picker-group", self.css)
+        self.assertIn("function competitionChip(match)", self.app)
+        self.assertIn(".comp-chip-pl", self.css)
+        self.assertIn(".comp-chip-elc", self.css)
+        # Chips only where the competition is genuinely ambiguous.
+        chip = self.app[self.app.index("function competitionChip(match)"):][:200]
+        self.assertIn('if (!isMixedActive()) return "";', chip)
+
+    def test_surprise_me_respects_the_pool_the_count_and_both_competitions(self):
+        source = self.app[self.app.index("function surpriseSelection(list, wanted)"):][:1500]
+        # One from each represented competition first, then fill at random.
+        self.assertIn("for (const [, group] of byCompetition)", source)
+        self.assertIn("if (chosen.length >= target) break;", source)
+        # Never an error and never a blocked dice when one competition is dark.
+        self.assertNotIn("throw", source)
+        # Applied as an ordinary selection, so every card stays tappable.
+        handler = self.app[self.app.index("[data-picker-surprise]"):][:600]
+        self.assertIn("surpriseSelection(pool,", handler)
+        self.assertIn('pickerMode = "custom"', handler)
 
     def test_setting_a_slate_needs_one_confirmation_that_says_it_is_final(self):
         self.assertIn("Your league cannot change them after this.", self.app)
@@ -698,14 +746,16 @@ class CustomMixTests(unittest.TestCase):
         self.assertIn("dayMatches = dayMatches.filter((fixture) => chosen.has(String(fixture.id)))", self.app)
         self.assertIn("You've picked ${pickedCount} of ${roundFixtures.length}", self.app)
 
-    def test_host_banner_names_the_matchweek(self):
-        self.assertIn("Pick fixtures for Matchweek ${matchweek}", self.app)
-        self.assertIn("Pick fixtures for Matchweek ${state.currentMatchday}", self.app)
+    def test_host_banner_names_the_period(self):
+        # A matchweek for a single competition, a week window for a mix.
+        self.assertIn("Pick fixtures for ${escapeHTML(periodLabel(period))}", self.app)
+        self.assertIn("Pick fixtures for ${escapeHTML(periodLabel(state.currentPeriod))}", self.app)
 
     def test_worker_routes_and_storage_key(self):
         for route in ("/league/slate", "/league/custom-mix", "/account/delete"):
             self.assertIn(f'path === "{route}"', self.worker)
-        self.assertIn("`custom_slate:${code}:${matchweek}`", self.logic)
+        # Slates key on a period: a matchweek number, or a window like w2026-08-10.
+        self.assertIn("`custom_slate:${code}:${period}`", self.logic)
         # Immutable once set.
         self.assertIn('return json({ error: "this matchweek\'s fixtures are already set", slate: existing }, 409, env);', self.worker)
 

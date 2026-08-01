@@ -32,10 +32,15 @@ function lift(startsWith) {
 const harness = new Function(`
   "use strict";
   let leagueState = null;
+  let roundState = null;
+  let pickerPeriod = null;
   const DEFAULT_COMPETITION = "PL";
-  const SURPRISE_COUNT = 8;
-  const MIN_FIXTURE_LIMIT = 3;
+  const MIN_FIXTURE_COUNT = 1;
+  const MAX_FIXTURE_COUNT = 20;
+  const DEFAULT_FIXTURE_COUNT = 6;
+  const SURPRISE_COUNT = DEFAULT_FIXTURE_COUNT;
   ${lift("const competitionOfFixture = (id) =>")}
+  ${lift("function pickerPreload()")}
   ${lift("function pickerBounds(poolSize)")}
   ${lift("const shuffled = (list) =>")}
   ${lift("function surpriseSelection(list, wanted)")}
@@ -56,38 +61,43 @@ const competitionsIn = (ids) => new Set([...ids].map(harness.competitionOfFixtur
 
 // --- bounds -----------------------------------------------------------------
 
-test("the league default opens the week but never caps it", () => {
-  harness.setLeague({ fixtureMode: "limited", fixtureLimit: 6 });
+test("the league count opens the week but never caps it", () => {
+  harness.setLeague({ weeklyRule: { method: "manual", competitionScope: "PL", count: 6 } });
   const bounds = harness.pickerBounds(17);
-  assert.equal(bounds.default, 6, "opens on the league default");
-  assert.equal(bounds.min, 3, "the host may go down to three");
-  assert.equal(bounds.max, 17, "or take the whole pool");
+  assert.equal(bounds.default, 6, "opens on the league's count");
+  assert.equal(bounds.min, 1, "v1.5 §9: the floor is one fixture");
+  assert.equal(bounds.max, 17, "and the ceiling is the pool");
   assert.equal(bounds.capped, false);
 });
 
 test("a short week caps the default and says it was capped", () => {
-  harness.setLeague({ fixtureMode: "limited", fixtureLimit: 8 });
+  harness.setLeague({ weeklyRule: { method: "manual", competitionScope: "PL", count: 8 } });
   const bounds = harness.pickerBounds(5);
-  assert.deepEqual([bounds.default, bounds.min, bounds.max, bounds.capped], [5, 3, 5, true]);
+  assert.deepEqual([bounds.default, bounds.min, bounds.max, bounds.capped], [5, 1, 5, true]);
 });
 
-test("a pool below the floor collapses the range onto it rather than erroring", () => {
-  harness.setLeague({ fixtureMode: "limited", fixtureLimit: 8 });
+test("a one-fixture week is a one-fixture week, not an error", () => {
+  harness.setLeague({ weeklyRule: { method: "manual", competitionScope: "PL", count: 8 } });
   assert.deepEqual(
-    (({ default: d, min, max }) => [d, min, max])(harness.pickerBounds(2)),
-    [2, 2, 2]
+    (({ default: d, min, max }) => [d, min, max])(harness.pickerBounds(1)),
+    [1, 1, 1]
   );
 });
 
-test("an all-fixtures league has no range at all", () => {
-  harness.setLeague({ fixtureMode: "all" });
+test("a set-and-forget league's host can still override the week", () => {
+  // The rule normally takes the whole card, but a host who opens the picker is
+  // overriding it deliberately — so the single validation path applies.
+  harness.setLeague({ weeklyRule: { method: "allEligible", competitionScope: "mixed", count: 6 } });
   const bounds = harness.pickerBounds(12);
-  assert.deepEqual([bounds.mode, bounds.default, bounds.min, bounds.max], ["all", 12, 12, 12]);
+  assert.deepEqual([bounds.mode, bounds.default, bounds.min, bounds.max], ["allEligible", 6, 1, 12]);
 });
 
-test("a league with no stored preference opens on the standard default", () => {
+test("a legacy league with no rule opens on the v1.5 default of six", () => {
   harness.setLeague({ fixtureMode: "limited", fixtureLimit: null });
-  assert.equal(harness.pickerBounds(17).default, 8);
+  assert.equal(harness.pickerBounds(17).default, 6);
+  // A legacy league that DID store a count keeps it.
+  harness.setLeague({ fixtureMode: "limited", fixtureLimit: 4 });
+  assert.equal(harness.pickerBounds(17).default, 4);
 });
 
 // --- the dice ---------------------------------------------------------------
@@ -128,7 +138,7 @@ test("the dice never exceeds the pool, and never returns nothing", () => {
   // league default before calling — so the guard falls back to the standard
   // default rather than dealing an empty slate.
   assert.equal(harness.surpriseSelection(tiny, 0).size, 2, "zero falls back, capped by the pool");
-  assert.equal(harness.surpriseSelection(pool(10, 7), 0).size, 8, "and that fallback is the standard default");
+  assert.equal(harness.surpriseSelection(pool(10, 7), 0).size, 6, "and that fallback is the v1.5 default of six");
 });
 
 test("one slot cannot cover two competitions, and does not try", () => {

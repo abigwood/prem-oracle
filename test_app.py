@@ -393,13 +393,12 @@ class MatchweekTerminologyTests(unittest.TestCase):
 
     def test_user_facing_strings_say_matchweek(self):
         for snippet in (
-            'countPhrase(seasonRounds(), "Matchweeks")',
+            'countPhrase(rounds, "Matchweeks")',
             'class="tour-badge">Matchweek ',
-            "Opening matchweek",
-            "Next matchweek",
             "MW ${value}",
-            "🏆 ${competition} Matchweek ",
-            "Matchweek ${md} \u25be",
+            "Matchweek ${escapeHTML(period)} is open",
+            "🏆 ${competition} ${week}",
+            "${escapeHTML(periodLabel(period))} \u25be",
             "Share Matchweek ",
             "Loading matchweek",
             'aria-label="Choose matchweek"',
@@ -594,16 +593,25 @@ class CompetitionAppTests(unittest.TestCase):
         self.assertIn("function availableCompetitions()", self.app.replace("const availableCompetitions = ()", "function availableCompetitions()"))
 
     def test_competitions_are_checkboxes_not_an_either_or(self):
-        self.assertIn("availableCompetitions().length > 1", self.app)
+        # v1.5: the checkboxes moved onto step 2 of the wizard, unchanged in kind.
+        self.assertIn("function wizardStepCompetitions()", self.app)
         self.assertIn('name="competitions"', self.app)
+        self.assertIn("data-wizard-competition", self.app)
         self.assertIn('role="group"', self.app)
-        self.assertNotIn('role="radiogroup"', self.app)
         self.assertNotIn('type="radio" name="competition"', self.app)
+        # Scoped to the competition step: the weekly rule IS a one-of-N choice
+        # and is legitimately a radiogroup, but competitions never are.
+        step = self.app[self.app.index("function wizardStepCompetitions()"):]
+        step = step[:step.index("function wizardStepRule()")]
+        self.assertNotIn('role="radiogroup"', step)
+        self.assertIn('type="checkbox"', step)
         self.assertIn(".competition-choice", self.css)
         # Premier League is still the default, and at least one is required.
         self.assertIn('const DEFAULT_COMPETITION = "PL";', self.app)
-        self.assertIn('form.getAll("competitions")', self.app)
-        self.assertIn('setFlash("Choose at least one competition", "error")', self.app)
+        # v1.5: the wizard holds the selection in state rather than in a FormData
+        # snapshot, so it survives stepping back and forth.
+        self.assertIn("wizard.competitions = competition.checked", self.app)
+        self.assertIn('return "Choose at least one competition";', self.app)
 
     def test_season_length_is_never_hardcoded(self):
         # A mixed league has no single season length — it runs on calendar weeks.
@@ -626,12 +634,15 @@ class CompetitionAppTests(unittest.TestCase):
         self.assertIn("export function windowKeyFor(value)", (ROOT / "worker/src/competitions.js").read_text())
         self.assertIn('const period = String(body.period ?? body.matchweek ?? "").trim();', self.worker)
         # The app sends the period, not a matchweek number.
-        self.assertIn('await api("/league/slate", { uid: uid(), code: activeLeague, period, mode, fixtureIds })', self.app)
+        self.assertIn('await api("/league/slate", { uid: uid(), code: activeLeague, period, mode, fixtureIds, action: "publish" })', self.app)
 
     def test_competition_identity_is_visible_in_header_and_shares(self):
-        self.assertIn("competitionMeta(state.competition || DEFAULT_COMPETITION).name", self.app)
-        self.assertIn("🏆 ${competition} Matchweek ", self.app)
-        self.assertIn("Prem Oracle ${competitionMeta(state.competition || DEFAULT_COMPETITION).name} table", self.app)
+        self.assertIn("function leagueCompetitionNames(state)", self.app)
+        self.assertIn("🏆 ${competition} ${week}", self.app)
+        # A mixed league has no matchweek number, so it shares its window instead.
+        self.assertIn("periodLabel(round.period)", self.app)
+        # A mixed league names both competitions, not just the first.
+        self.assertIn("Prem Oracle ${leagueCompetitionNames(state)} table", self.app)
 
     def test_matchweek_share_leads_with_the_podium(self):
         self.assertIn("function podiumShareLines(round)", self.app)
@@ -666,20 +677,24 @@ class CustomMixTests(unittest.TestCase):
         cls.worker = (ROOT / "worker/src/worker.js").read_text()
         cls.logic = (ROOT / "worker/src/logic.js").read_text()
 
-    def test_fixture_count_is_an_explicit_mode_and_number(self):
-        self.assertIn('<strong>Set a weekly fixture count</strong>', self.app)
-        self.assertIn('name="limitFixtures"', self.app)
+    def test_fixture_count_is_one_validation_path(self):
+        # v1.5 §9 supersedes the on/off toggle: the count is always on the
+        # wizard's third step, 1 to 20, default 6, floor 1.
+        self.assertIn("const MIN_FIXTURE_COUNT = 1;", self.app)
+        self.assertIn("const MAX_FIXTURE_COUNT = 20;", self.app)
+        self.assertIn("const DEFAULT_FIXTURE_COUNT = 6;", self.app)
         self.assertIn('name="fixtureLimit"', self.app)
-        # Off by default: every fixture counts unless the host says otherwise.
-        toggle = self.app[self.app.index('name="limitFixtures"'):][:140]
-        self.assertNotIn("checked", toggle)
-        self.assertIn('fixtureMode: limited ? "limited" : "all"', self.app)
-        self.assertIn("const MIN_FIXTURE_LIMIT = 3;", self.app)
         self.assertIn("data-count-step", self.app)
         self.assertIn(".count-stepper", self.css)
-        # The panel is hidden until the toggle is on. A `display` rule outranks
-        # the hidden attribute, so it has to opt back out explicitly.
-        self.assertIn(".fixture-count[hidden] { display: none; }", self.css)
+        # No stale floor of three, and no on/off toggle, survives anywhere.
+        self.assertNotIn("MIN_FIXTURE_LIMIT", self.app)
+        self.assertNotIn("data-limit-toggle", self.app)
+        self.assertNotIn("MIN_FIXTURE_LIMIT", (ROOT / "worker/src/competitions.js").read_text())
+        # The same one path on the worker.
+        worker_comp = (ROOT / "worker/src/competitions.js").read_text()
+        self.assertIn("export const MIN_FIXTURE_COUNT = 1;", worker_comp)
+        self.assertIn("export const MAX_FIXTURE_COUNT = 20;", worker_comp)
+        self.assertIn("export const DEFAULT_FIXTURE_COUNT = 6;", worker_comp)
         # "All" is a stored intent on the worker too, never inferred.
         self.assertIn("FIXTURE_MODES.includes(requestedMode)", self.worker)
 
@@ -687,18 +702,20 @@ class CustomMixTests(unittest.TestCase):
         for source in (self.app, (ROOT / "index.html").read_text()):
             self.assertNotIn("6–10", source)
             self.assertNotIn("6-10 fixtures", source)
-        self.assertIn("Choose your competitions and fixture count", self.app)
+        self.assertNotIn("6-10 fixture selection", (ROOT / "worker/src/worker.js").read_text())
+        self.assertIn("Name it, choose your competitions, set how the week works", self.app)
 
     def test_picker_opens_on_the_default_but_the_week_is_the_hosts(self):
         # The configured count is a rule of thumb, not a cap.
         self.assertIn("Select ${bounds.min}–${bounds.max} · ${count} selected", self.app)
         self.assertIn("const ready = count >= bounds.min && count <= bounds.max;", self.app)
         self.assertIn("take more or fewer this week if you like", self.app)
-        self.assertIn("~${limit} fixtures/week", self.app)
+        self.assertIn("~${rule.count} random fixtures/week", self.app)
         self.assertIn("data-picker-surprise", self.app)
         self.assertIn("Surprise me", self.app)
         self.assertIn("Use all ${list.length} this week", self.app)
-        self.assertIn("Set ${count} fixtures", self.app)
+        # v1.5: one button, and it publishes.
+        self.assertIn("Publish to league", self.app)
         self.assertIn("function pickerBounds(poolSize)", self.app)
         # A short week caps the default rather than blocking, and says so inline.
         self.assertIn("Only ${countPhrase(list.length,", self.app)
@@ -733,6 +750,7 @@ class CustomMixTests(unittest.TestCase):
 
     def test_setting_a_slate_needs_one_confirmation_that_says_it_is_final(self):
         self.assertIn("Your league cannot change them after this.", self.app)
+        self.assertIn("Publish these ${count} fixtures?", self.app)
         self.assertIn("data-picker-commit", self.app)
         self.assertIn("picker-confirm-scrim", self.css)
         # Use-all-10 is an explicit full-week record, not a silent absence.
@@ -742,8 +760,9 @@ class CustomMixTests(unittest.TestCase):
     def test_members_get_a_calm_waiting_state_then_fewer_cards(self):
         self.assertIn("Waiting for ${escapeHTML(hostNickname())} to set this week's fixtures", self.app)
         self.assertNotIn("spinner", self.app)
-        # Only the slate fixtures are rendered once it is set.
-        self.assertIn("dayMatches = dayMatches.filter((fixture) => chosen.has(String(fixture.id)))", self.app)
+        # v1.5: Next is purely the picks this viewer still owes on the published
+        # slate, so the filter is on the slate rather than on today's date.
+        self.assertIn("const due = roundFixtures.filter((fixture) => matchOpen(fixture) && !picks[fixture.id]);", self.app)
         self.assertIn("You've picked ${pickedCount} of ${roundFixtures.length}", self.app)
 
     def test_host_banner_names_the_period(self):
@@ -757,7 +776,7 @@ class CustomMixTests(unittest.TestCase):
         # Slates key on a period: a matchweek number, or a window like w2026-08-10.
         self.assertIn("`custom_slate:${code}:${period}`", self.logic)
         # Immutable once set.
-        self.assertIn('return json({ error: "this matchweek\'s fixtures are already set", slate: existing }, 409, env);', self.worker)
+        self.assertIn('json({ error: "this matchweek\'s fixtures are already set", slate: normaliseSlate(existing) }, 409, env)', self.worker)
 
     def test_fallback_lead_time_is_a_day_not_two_hours(self):
         self.assertIn("const FALLBACK_LEAD_MS = 24 * 60 * 60 * 1000;", self.worker)
@@ -802,7 +821,7 @@ class TrophyTests(unittest.TestCase):
 
     def test_winner_banner_extends_to_a_podium(self):
         self.assertIn("function podiumSteps(round)", self.app)
-        self.assertIn("Matchweek ${md} complete — won by", self.app)
+        self.assertIn("${escapeHTML(title)} complete — won by", self.app)
         # The banner header and the share button are unchanged by the restyle.
         self.assertIn("Share Matchweek ", self.app)
 
@@ -840,13 +859,331 @@ class TrophyTests(unittest.TestCase):
     def test_number_and_word_pairs_wrap_as_one_unit(self):
         self.assertIn(".nowrap { white-space: nowrap; }", self.css)
         self.assertIn('function countPhrase(count, word)', self.app)
-        for phrase in ('countPhrase(seasonRounds(), "Matchweeks")',
-                       '<span class="nowrap">Game ${homeMatchday} of ${seasonRounds()}</span>',
+        for phrase in ('countPhrase(rounds, "Matchweeks")',
                        '<span class="nowrap">Game ${md} of ${seasonRounds()} ·</span>'):
             self.assertIn(phrase, self.app, phrase)
         # The separator rides inside the wrapper, so a line never opens with "·".
         self.assertNotIn("of 38</span> ·", self.app)
         self.assertNotIn("of 38", self.app)
+
+
+class WeeklyLoopTests(unittest.TestCase):
+    """v1.5: the creation wizard, the weekly publish cycle and launch behaviour."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = (ROOT / "app.js").read_text()
+        cls.css = (ROOT / "styles.css").read_text()
+        cls.html = (ROOT / "index.html").read_text()
+        cls.worker = (ROOT / "worker/src/worker.js").read_text()
+        cls.logic = (ROOT / "worker/src/logic.js").read_text()
+        cls.competitions = (ROOT / "worker/src/competitions.js").read_text()
+
+    # --- 1. the wizard ----------------------------------------------------
+
+    def test_the_league_screen_offers_one_card_and_one_button(self):
+        self.assertIn("function createLeagueCard()", self.app)
+        self.assertIn(">Get started</button>", self.app)
+        self.assertIn("data-wizard-open", self.app)
+        self.assertIn("<h3>Join a league</h3>", self.app)
+        # "Start a competition" is retired everywhere.
+        for source in (self.app, self.html, self.css):
+            self.assertNotIn("Start a competition", source)
+
+    def test_the_wizard_is_four_named_steps(self):
+        self.assertIn('const WIZARD_STEPS = ["name", "competitions", "rule", "share"];', self.app)
+        for step in ("wizardStepName", "wizardStepCompetitions", "wizardStepRule", "wizardStepShare"):
+            self.assertIn(f"function {step}()", self.app, step)
+        self.assertIn("<h3>Name your league</h3>", self.app)
+        self.assertIn("<h3>Choose competitions</h3>", self.app)
+        self.assertIn("<h3>Your weekly rule</h3>", self.app)
+        self.assertIn("<h3>Share your code</h3>", self.app)
+        self.assertIn(".wizard-progress", self.css)
+
+    def test_the_competition_step_uses_the_green_selected_state(self):
+        # v1.4.1: pale purple -> pale green, the same family as the rule cards.
+        self.assertIn(
+            ".competition-option input:checked + span { border-color: var(--green); color: var(--green-2); background: #eaf7f1; }",
+            self.css)
+        self.assertNotIn(".competition-option input:checked + span { border-color: var(--purple)", self.css)
+        self.assertIn("competition-option${wizard.competitions.includes(code)", self.app)
+        # And the rule cards it now matches.
+        self.assertIn(".rule-option.is-selected { border-color: var(--green); background: #eaf7f1; }", self.css)
+
+    def test_the_green_selected_state_clears_wcag_aa(self):
+        def luminance(value):
+            channels = [int(value.lstrip("#")[i:i + 2], 16) / 255 for i in (0, 2, 4)]
+            channels = [c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4 for c in channels]
+            return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2]
+
+        def contrast(a, b):
+            first, second = sorted((luminance(a), luminance(b)), reverse=True)
+            return (first + 0.05) / (second + 0.05)
+
+        # Chip label on the selected fill, and the border against the card.
+        self.assertGreaterEqual(round(contrast("#064d41", "#eaf7f1"), 2), 4.5)
+        self.assertGreaterEqual(round(contrast("#0a7f58", "#ffffff"), 2), 3.0)
+
+    def test_every_weekly_rule_the_spec_names_is_offered(self):
+        options = self.app[self.app.index("function ruleOptions()"):]
+        options = options[:options.index("const wizardOptionSelected")]
+        self.assertIn("I'll pick each week", self.app)
+        self.assertIn("All fixtures", self.app)
+        self.assertIn("Random weekly", self.app)
+        self.assertIn("All ${competitionMeta(code).short}", options)
+        self.assertIn("App picks ${wizard.count} random", self.app)
+        for method in ("manual", "allEligible", "allCompetition", "random"):
+            self.assertIn(f'"{method}"', options, method)
+
+    def test_the_scope_is_explicit_and_never_inferred(self):
+        rule = self.app[self.app.index("function wizardRule()"):]
+        rule = rule[:rule.index("const WEEKLY_RULE_LABEL")]
+        self.assertIn("competitionScope", rule)
+        self.assertIn('mixed ? "mixed" : wizard.competitions[0]', rule)
+        # And the same shape is enforced server-side.
+        self.assertIn("export function validateWeeklyRule(input, competitions)", self.competitions)
+        self.assertIn('return { error: "allCompetition needs a single competition scope" };', self.competitions)
+        self.assertIn('"allEligible covers every competition the league plays"', self.competitions)
+
+    def test_a_one_fixture_week_soft_confirms(self):
+        self.assertIn("Short week — just one fixture to call!", self.app)
+        self.assertIn("data-wizard-confirm-single", self.app)
+        self.assertIn(".wizard-confirm", self.css)
+        # It is a confirmation, not a block: the count itself is legal.
+        self.assertIn("const MIN_FIXTURE_COUNT = 1;", self.app)
+
+    def test_legacy_leagues_normalise_to_manual_with_no_write_back(self):
+        rule = self.competitions[self.competitions.index("export function leagueWeeklyRule(league)"):]
+        rule = rule[:rule.index("/** True when the rule publishes")]
+        self.assertIn('method: "manual"', rule)
+        self.assertIn("plan.limit ?? DEFAULT_FIXTURE_COUNT", rule)
+        self.assertIn('source: "legacy"', rule)
+        # A read never writes: no kvPut, no assignment onto the record.
+        self.assertNotIn("kvPut", rule)
+        self.assertNotIn("league.weeklyRule =", rule)
+
+    # --- 2. periodKey ------------------------------------------------------
+
+    def test_one_period_key_definition_serves_everything(self):
+        self.assertIn("export function periodKeyOf(fixture, mixed)", self.competitions)
+        self.assertIn("export const periodKeyForLeague = (league)", self.competitions)
+        # The worker's own週 helpers all route through it rather than re-deriving.
+        self.assertIn("periodKeyForLeague", self.worker)
+        self.assertIn("comparePeriods", self.worker)
+        # And the app groups the Schedule on the same abstraction.
+        self.assertIn("function groupedPeriods(list, currentPeriod = null)", self.app)
+        self.assertIn("list.map(periodOfFixture)", self.app)
+
+    def test_the_window_runs_tuesday_to_monday(self):
+        self.assertIn("const WEEKDAY_INDEX = { Tue: 0, Wed: 1, Thu: 2, Fri: 3, Sat: 4, Sun: 5, Mon: 6 };", self.competitions)
+        self.assertIn("{ Tue: 0, Wed: 1, Thu: 2, Fri: 3, Sat: 4, Sun: 5, Mon: 6 }", self.app)
+        self.assertIn("export function periodOpensAt(period)", self.competitions)
+        self.assertIn("export function periodClosesAt(period)", self.competitions)
+        # No Monday-anchored language survives in either mirror.
+        self.assertNotIn("Monday-anchored", self.competitions)
+        self.assertNotIn("Monday-to-Sunday", self.competitions)
+        self.assertNotIn("Monday-to-Sunday", self.app)
+
+    # --- 3. draft -> publish ----------------------------------------------
+
+    def test_the_slate_lifecycle_is_one_way(self):
+        self.assertIn('export const SLATE_STATUSES = ["draft", "published", "locked", "settled"];', self.logic)
+        self.assertIn("export const canAdvanceSlate = (slate, next)", self.logic)
+        self.assertIn("STATUS_RANK[next] > STATUS_RANK[slateStatus(slate)]", self.logic)
+        self.assertIn('if (!["draft", "publish"].includes(action))', self.worker)
+
+    def test_a_legacy_slate_reads_as_published(self):
+        status = self.logic[self.logic.index("export const slateStatus = (slate)"):]
+        status = status[:status.index("export const isPublishedSlate")]
+        self.assertIn('return SLATE_STATUSES.includes(stored) ? stored : "published";', status)
+        # Read boundary only — normaliseSlate returns a copy, it does not mutate.
+        self.assertIn("export const normaliseSlate = (slate) => (slate ? { ...slate, status: slateStatus(slate) } : null);", self.logic)
+
+    def test_publish_snapshots_everything_the_spec_names(self):
+        snap = self.logic[self.logic.index("export function buildSlateSnapshot"):]
+        snap = snap[:snap.index("// Deliberately local")]
+        for field in ("periodKey", "ruleSource", "competition", "kickoffAt"):
+            self.assertIn(field, snap, field)
+
+    def test_a_reschedule_never_swaps_a_published_fixture(self):
+        reconcile = self.logic[self.logic.index("export function reconcileSlate"):]
+        reconcile = reconcile[:reconcile.index("export function buildReveals")]
+        self.assertIn("if (!isPublishedSlate(slate)", reconcile)
+        self.assertIn("added: []", reconcile)
+        # The replacement path is gone, not merely unreachable.
+        self.assertNotIn("candidates", reconcile)
+        self.assertNotIn('reason: "replaced"', reconcile)
+        self.assertIn("export function refreshSnapshot(snapshot, roundFixtures)", self.logic)
+
+    def test_the_picker_preload_names_what_it_could_not_carry(self):
+        self.assertIn("export function preloadSelection(previousIds, pool)", self.logic)
+        for reason in ("notInPool", "voided", "postponed"):
+            self.assertIn(f'"{reason}"', self.logic, reason)
+        self.assertIn("Dropped from your last selection:", self.app)
+        self.assertIn(".picker-note-warn", self.css)
+
+    # --- 4. the weekly loop ------------------------------------------------
+
+    def test_the_host_nudge_copy_splits_on_the_league_shape(self):
+        remind = self.worker[self.worker.index("async function remindHost"):]
+        remind = remind[:remind.index("/**\n * Resolves what a league")]
+        self.assertIn("`Set this week's fixtures for ${league.name}`", remind)
+        self.assertIn("`Matchweek ${period} is open — set your fixtures`", remind)
+        self.assertIn("isMixedLeague(league)", remind)
+        # The same split in the app's own host banner.
+        self.assertIn("Set this week's fixtures for ${escapeHTML(leagueState.name)}", self.app)
+        self.assertIn("Matchweek ${escapeHTML(period)} is open — set your fixtures", self.app)
+
+    def test_every_weekly_push_is_deduped_on_league_period_and_type(self):
+        self.assertIn("async function pushOnce(env, pushType, leagueId, periodKey, uids, body)", self.worker)
+        self.assertIn("const key = `notified:${pushType}:${leagueId}:${periodKey}`;", self.worker)
+        for push_type in ("slate-open", "slate-published", "auto-published"):
+            self.assertIn(f'"{push_type}"', self.worker, push_type)
+
+    def test_publishing_is_idempotent_by_construction(self):
+        publish = self.worker[self.worker.index("async function publishSlate"):]
+        publish = publish[:publish.index("// POST /league/slate")]
+        self.assertIn('if (isPublishedSlate(existing)) return { published: false, reason: "alreadyPublished"', publish)
+        self.assertIn('canAdvanceSlate(existing, "published")', publish)
+        # A random rule deals the same week twice, seeded on league and period.
+        self.assertIn("randomSelection(scoped, rule.count, `${league.code}:${period}`)", self.worker)
+        self.assertIn("export function randomSelection(pool, count, seed)", self.logic)
+        self.assertNotIn("Math.random", self.logic)
+
+    def test_the_fallback_prefers_a_valid_draft_over_any_rule(self):
+        fallback = self.worker[self.worker.index("async function applyFallback"):]
+        fallback = fallback[:fallback.index("/**\n * Folds a reschedule into a PUBLISHED slate")]
+        self.assertIn('if (isPublishedSlate(stored)) return { published: false, reason: "alreadyPublished" };', fallback)
+        self.assertIn("if (isDraftSlate(stored))", fallback)
+        self.assertIn("validated.fixtureIds.length", fallback)
+        self.assertIn('ruleSource: `auto-published:${selection.ruleSource}`', fallback)
+        self.assertIn("const FALLBACK_LEAD_MS = 24 * 60 * 60 * 1000;", self.worker)
+
+    def test_set_and_forget_publishes_with_no_admin_step(self):
+        self.assertIn("async function autoPublish(env, league, period, pool)", self.worker)
+        self.assertIn("if (isSetAndForget(rule))", self.worker)
+        self.assertIn('path === "/league/weekly-rule"', self.worker)
+        self.assertIn("async function setWeeklyRule(env, body)", self.worker)
+
+    # --- 5. tabs and launch ------------------------------------------------
+
+    def test_next_is_purely_the_picks_due_this_week(self):
+        self.assertIn("function picksDue()", self.app)
+        self.assertIn("Your picks due · ${escapeHTML(periodLabel(period))}", self.app)
+        # It no longer shows "today's card" regardless of the league's slate.
+        self.assertNotIn("Today's predictions", self.app)
+
+    def test_schedule_opens_on_now_and_collapses_the_future_without_hiding_it(self):
+        grouped = self.app[self.app.index("function groupedPeriods(list, currentPeriod = null)"):]
+        grouped = grouped[:grouped.index("// My Picks still groups by matchweek")]
+        self.assertIn('String(period) === String(current)', grouped)
+        self.assertIn("<details", grouped)
+        # Every period is rendered; only the open attribute varies.
+        self.assertNotIn("filter((period) =>", grouped)
+
+    def test_the_launch_decision_tree_has_all_four_branches(self):
+        branch = self.app[self.app.index("function launchBranch()"):]
+        branch = branch[:branch.index("// True once the viewer has chosen a tab")]
+        for name in ("onboarding", "picks", "preseason", "awaiting"):
+            self.assertIn(f'"{name}"', branch, name)
+        self.assertIn('currentView = launchBranch() === "awaiting" ? "schedule" : "today";', self.app)
+        # A cold install re-evaluates once the league and its period are known,
+        # and stops the moment the viewer picks a tab themselves.
+        self.assertIn("let launchRouted = false;", self.app)
+        self.assertIn("if (launchRouted) return;", self.app)
+        self.assertIn("launchRouted = true;   // the viewer is driving now", self.app)
+        hydrate = self.app[self.app.index("async function hydrateIdentity()"):]
+        hydrate = hydrate[:hydrate.index("async function syncUserPicks")]
+        self.assertIn("applyLaunchBranch();", hydrate)
+
+    def test_each_launch_branch_carries_the_copy_the_spec_wrote(self):
+        self.assertIn("No picks due yet — fixtures will appear here when your host publishes this week's slate.", self.app)
+        self.assertIn("Fixtures are loading for the new season. Picks open when your league's weekly slate is published.", self.app)
+        self.assertIn(">Create a league</button>", self.app)
+        self.assertIn(">Join a league</button>", self.app)
+        self.assertIn("function preseasonRow(match)", self.app)
+        self.assertIn(".proof-row", self.css)
+
+    # --- 6. v1.4.1 fixes folded into the release -------------------------
+
+    def test_switching_league_paints_from_cache_before_the_network(self):
+        switch = self.app[self.app.index("function setActiveLeague(code, refresh = true)"):]
+        switch = switch[:switch.index("function saveLeague(code)")]
+        # The cached state is applied and rendered on the same tick as the tap;
+        # the refresh is what happens afterwards, not what gates the paint.
+        self.assertIn("leagueState = activeLeague ? (leagueStates[activeLeague] || null) : null;", switch)
+        self.assertIn("render();", switch)
+        self.assertLess(switch.index("render();"), switch.index("loadLeagueState()"))
+
+    def test_the_league_cache_is_memory_plus_localstorage(self):
+        self.assertIn('leagueStates: "prem_oracle_league_states",', self.app)
+        self.assertIn("let leagueStates = readJSON(STORAGE.leagueStates, {});", self.app)
+        self.assertIn("function cacheLeagueState(state)", self.app)
+        self.assertIn("localStorage.setItem(STORAGE.leagueStates", self.app)
+        # A league that has gone must not linger in the cache.
+        self.assertIn("function forgetLeagueState(code)", self.app)
+        self.assertIn("leagueCodes.includes(code)", self.app)
+
+    def test_other_leagues_are_prefetched_when_the_league_screen_opens(self):
+        self.assertIn("async function prefetchLeagueStates()", self.app)
+        self.assertIn("leagueCodes.filter((code) => code !== activeLeague)", self.app)
+        opener = self.app[self.app.index("async function navigateToView(view)"):]
+        opener = opener[:opener.index("// Publishes the slate")]
+        self.assertIn("prefetchLeagueStates();", opener)
+
+    def test_the_round_request_does_not_gate_the_season_paint(self):
+        loader = self.app[self.app.index("async function loadLeagueState()"):]
+        loader = loader[:loader.index("async function loadRoundState()")]
+        self.assertIn("cacheLeagueState(leagueState);", loader)
+        # The season state is painted before the second /state call goes out.
+        self.assertIn("render();\n      await loadRoundState();", loader)
+
+    def test_the_bottom_nav_is_pinned_to_the_safe_area(self):
+        nav = self.css[self.css.index(".bottom-nav {"):]
+        nav = nav[:nav.index("}")]
+        self.assertIn("position: fixed;", nav)
+        self.assertNotIn("position: relative;", nav)
+        self.assertIn("bottom: 0;", nav)
+        self.assertIn("padding-bottom: max(var(--safe-bottom), 6px);", nav)
+        # The body cannot scroll, so the keyboard cannot drag the chrome — but it
+        # is NOT position:fixed, which would break Full Keyboard Access.
+        body = self.css[self.css.index("body {"):]
+        body = body[:body.index("}")]
+        self.assertIn("overflow: hidden;", body)
+        self.assertIn("max-height: 100vh;", body)
+        self.assertNotIn("position: fixed;", body)
+        # And the scroller reserves the nav's height itself.
+        self.assertIn("padding: 18px 0 calc(var(--nav-total-height) + 28px);", self.css)
+
+    def test_the_keyboard_is_dismissed_before_a_re_render(self):
+        self.assertIn("function dismissKeyboard()", self.app)
+        self.assertIn('if (event.target.matches("[data-join-league], [data-restore]")) dismissKeyboard();', self.app)
+        for handler in ("[data-wizard-next]", "[data-wizard-back]", "[data-wizard-cancel]"):
+            block = self.app[self.app.index(handler):][:200]
+            self.assertIn("dismissKeyboard();", block, handler)
+
+    def test_the_fixture_floor_of_one_is_superseded_everywhere(self):
+        # Picker copy, the dice, and the stepper all sit on the same floor.
+        self.assertIn("Select ${bounds.min}–${bounds.max}", self.app)
+        self.assertIn("const min = Math.min(MIN_FIXTURE_COUNT, poolSize);", self.app)
+        self.assertIn("Math.max(MIN_FIXTURE_COUNT, Math.min(MAX_FIXTURE_COUNT, wizard.count + delta))", self.app)
+        self.assertIn("const target = Math.max(1, Math.min(wanted || SURPRISE_COUNT, list.length));", self.app)
+        # No floor of three, and no 6-10 band, survives in any shipped source.
+        for path in ("app.js", "styles.css", "worker/src/worker.js"):
+            source = (ROOT / path).read_text()
+            self.assertNotIn("MIN_FIXTURE_LIMIT", source, path)
+            self.assertNotIn("SLATE_MIN = 6", source, path)
+        self.assertIn("export const SLATE_MIN = 1;", (ROOT / "worker/src/logic.js").read_text())
+        self.assertIn("export const SLATE_MAX = 20;", (ROOT / "worker/src/logic.js").read_text())
+
+    def test_next_is_never_empty(self):
+        today = self.app[self.app.index("function todayView()"):]
+        today = today[:today.index("/**\n * Schedule: opens on the current week")]
+        # Every path out of the Next tab returns content.
+        self.assertIn('if (branch === "onboarding") return', today)
+        self.assertIn('if (branch === "preseason") return', today)
+        self.assertIn("No picks due yet", today)
+        self.assertIn("All done for", today)
 
 
 if __name__ == "__main__":

@@ -54,8 +54,11 @@ test("custom slates validate size, membership and uniqueness", () => {
   const round = roundOf();
   const ids = round.map((match) => match.id);
 
-  assert.equal(validateSlate("custom", ids.slice(0, 5), round).error, "select between 6 and 10 fixtures",
-    "the bare default bounds still apply when no league bounds are supplied");
+  // v1.5 §9: one validation path — floor one, ceiling the pool. Five fixtures
+  // is a perfectly ordinary week; only an empty selection is out of bounds.
+  assert.equal(validateSlate("custom", ids.slice(0, 5), round).fixtureIds.length, 5);
+  assert.equal(validateSlate("custom", ids.slice(0, 1), round).fixtureIds.length, 1, "a one-fixture week is legal");
+  assert.equal(validateSlate("custom", [], round).error, "select between 1 and 10 fixtures");
   assert.equal(validateSlate("custom", [...ids, "pl-2026-27-md1-011"], round).error, "fixture not available this week: pl-2026-27-md1-011");
   assert.equal(validateSlate("custom", [ids[0], ids[0], ids[1], ids[2], ids[3], ids[4]], round).error, "fixtureIds must be unique");
   assert.equal(validateSlate("custom", ["pl-2026-27-md2-001", ...ids.slice(0, 5)], round).error, "fixture not available this week: pl-2026-27-md2-001");
@@ -117,19 +120,30 @@ test("season totals accumulate across whatever each week's slate was", () => {
 
 // --- postponements ----------------------------------------------------------
 
-test("a postponed slate fixture is replaced while nothing has locked", () => {
+test("a postponed slate fixture is dropped, never swapped, even before anything locks", () => {
+  // v1.5 §9: publishing snapshots the fixture list, and a published slate is
+  // never silently swapped afterwards. Before v1.5 a replacement was dealt in
+  // while the slate was still fully unlocked; that is the behaviour this
+  // removes — a league plays what it was shown, one fixture shorter.
   const now = Date.parse("2026-08-21T06:00:00Z");
   const round = roundOf();
   round[2] = { ...round[2], status: "postponed" };
-  const slate = { mode: "custom", fixtureIds: round.slice(0, 6).map((match) => match.id) };
+  const slate = { status: "published", mode: "custom", fixtureIds: round.slice(0, 6).map((match) => match.id) };
 
   const change = reconcileSlate(slate, round, now);
-  assert.equal(change.reason, "replaced");
+  assert.equal(change.reason, "dropped");
   assert.deepEqual(change.dropped, ["pl-2026-27-md1-003"]);
-  // The next fixture by kickoff order that wasn't already on the slate.
-  assert.deepEqual(change.added, ["pl-2026-27-md1-007"]);
-  assert.equal(change.fixtureIds.length, 6);
-  assert.deepEqual(change.fixtureIds, ["pl-2026-27-md1-001", "pl-2026-27-md1-002", "pl-2026-27-md1-004", "pl-2026-27-md1-005", "pl-2026-27-md1-006", "pl-2026-27-md1-007"]);
+  assert.deepEqual(change.added, [], "nothing the members never saw is dealt in behind them");
+  assert.equal(change.fixtureIds.length, 5);
+  assert.deepEqual(change.fixtureIds, ["pl-2026-27-md1-001", "pl-2026-27-md1-002", "pl-2026-27-md1-004", "pl-2026-27-md1-005", "pl-2026-27-md1-006"]);
+});
+
+test("a draft is never reconciled — only a published slate is a contract", () => {
+  const now = Date.parse("2026-08-21T06:00:00Z");
+  const round = roundOf();
+  round[2] = { ...round[2], status: "postponed" };
+  const draft = { status: "draft", mode: "custom", fixtureIds: round.slice(0, 6).map((match) => match.id) };
+  assert.equal(reconcileSlate(draft, round, now), null);
 });
 
 test("after any slate fixture locks a postponement is removed, never replaced", () => {
@@ -335,11 +349,11 @@ test("POST /league/slate is host-only, validated, and immutable once set", async
     assert.equal(notHost.status, 403);
     assert.equal((await notHost.json()).error, "only the league host can set the fixtures");
     assert.equal((await send("/league/slate", { uid: "host", code, fixtureIds: ids.slice(0, 6) })).status, 400);
-    // The configured count is a weekly default, not a cap: five of ten is fine.
-    // Only the floor of three and the size of the pool are hard edges.
-    const tooFew = await slate({ uid: "host", fixtureIds: ids.slice(0, 2) });
-    assert.equal(tooFew.status, 400);
-    assert.equal((await tooFew.json()).error, "select between 3 and 10 fixtures");
+    // v1.5 §9: the count is a weekly default, not a cap. The floor is one, so
+    // the only ways to be out of bounds are an empty pick and a foreign id.
+    const empty = await slate({ uid: "host", fixtureIds: [] });
+    assert.equal(empty.status, 400);
+    assert.equal((await empty.json()).error, "select between 1 and 10 fixtures");
     assert.equal((await slate({ uid: "host", fixtureIds: [...ids, "pl-2026-27-md1-011"] })).status, 400);
 
     // Nothing above wrote anything.
@@ -362,7 +376,7 @@ test("POST /league/slate is host-only, validated, and immutable once set", async
   });
 });
 
-test("a league without Custom Mix cannot be given a slate until it is enabled", async () => {
+test("any host may publish a week, whatever rule their league runs on", async () => {
   const round = roundOf();
   const { env } = endpointEnv(round);
   await withFixtures(round, async () => {
@@ -371,9 +385,12 @@ test("a league without Custom Mix cannot be given a slate until it is enabled", 
     const { code } = await (await send("/league", { uid: "host", nickname: "Host" })).json();
     const ids = round.slice(0, 6).map((match) => match.id);
 
-    const refused = await send("/league/slate", { uid: "host", code, matchweek: 1, fixtureIds: ids });
-    assert.equal(refused.status, 400);
-    assert.equal((await refused.json()).error, "this league plays every fixture, so there is nothing to pick");
+    // v1.5 §9: publishing is the one weekly act, and it belongs to the host of
+    // every league. A rule league that hasn't auto-published yet is not a
+    // league whose host is locked out of their own picker.
+    const published = await send("/league/slate", { uid: "host", code, matchweek: 1, fixtureIds: ids });
+    assert.equal(published.status, 200);
+    assert.equal((await published.json()).slate.status, "published");
 
     assert.equal((await send("/league/custom-mix", { uid: "m2", code, enabled: true })).status, 403);
     assert.equal((await send("/league/custom-mix", { uid: "host", code, enabled: "yes" })).status, 400);
@@ -381,7 +398,9 @@ test("a league without Custom Mix cannot be given a slate until it is enabled", 
     assert.equal(toggled.status, 200);
     assert.deepEqual(await env.KV.get("index:custom_mix"), [code]);
 
-    assert.equal((await send("/league/slate", { uid: "host", code, matchweek: 1, fixtureIds: ids })).status, 200);
+    // Matchweek 1 is already published above, so this is the 409 path — and
+    // turning Custom Mix on does not reopen a week that has gone out.
+    assert.equal((await send("/league/slate", { uid: "host", code, matchweek: 1, fixtureIds: ids })).status, 409);
 
     // Turning it off leaves played weeks scored on the slate they were played on.
     await send("/league/custom-mix", { uid: "host", code, enabled: false });
@@ -531,7 +550,7 @@ test("a host who has set a slate is never overridden by the fallback", async () 
   });
 });
 
-test("the scheduled sweep replaces a postponement before kick-off and trims one after", async () => {
+test("the scheduled sweep trims a postponement and never swaps one in", async () => {
   const round = roundOf(10, Date.now() + 20 * HOUR);
   const { env } = endpointEnv(round);
   const ids = round.slice(0, 6).map((match) => match.id);
@@ -542,24 +561,29 @@ test("the scheduled sweep replaces a postponement before kick-off and trims one 
     await post(env)("/league/slate", { uid: "host", code, matchweek: 1, fixtureIds: ids });
   });
 
-  // Still 20 hours out: a postponed slate fixture is swapped for the next one.
+  // Still 20 hours out and nothing locked — but the slate is PUBLISHED, so the
+  // postponed fixture is dropped rather than replaced. Snapshot integrity: the
+  // league plays the six it was shown, minus the one that went.
   const postponed = round.map((match, index) => (index === 1 ? { ...match, status: "postponed" } : match));
   await withFixtures(postponed, async () => {
     await primeFixtures(env);
     await runScheduled(env);
     const slate = await env.KV.get(`custom_slate:${code}:1`);
-    assert.deepEqual(slate.fixtureIds, ["pl-2026-27-md1-001", "pl-2026-27-md1-003", "pl-2026-27-md1-004", "pl-2026-27-md1-005", "pl-2026-27-md1-006", "pl-2026-27-md1-007"]);
+    assert.deepEqual(slate.fixtureIds, ["pl-2026-27-md1-001", "pl-2026-27-md1-003", "pl-2026-27-md1-004", "pl-2026-27-md1-005", "pl-2026-27-md1-006"]);
     assert.ok(slate.revisedAt);
+    // The snapshot still holds all six, with the casualty marked rather than erased.
+    assert.equal(slate.snapshot.fixtures.length, 6);
+    assert.equal(slate.snapshot.fixtures.find((f) => f.id === "pl-2026-27-md1-002").unavailable, true);
   });
 
-  // Now the week is under way, so a second postponement is only ever removed.
+  // Once the week is under way a further postponement is likewise removed.
   const started = roundOf(10, Date.now() - 2 * HOUR)
     .map((match, index) => (index === 3 ? { ...match, status: "postponed" } : match));
   await withFixtures(started, async () => {
     await primeFixtures(env);
     await runScheduled(env);
     const slate = await env.KV.get(`custom_slate:${code}:1`);
-    assert.deepEqual(slate.fixtureIds, ["pl-2026-27-md1-001", "pl-2026-27-md1-003", "pl-2026-27-md1-005", "pl-2026-27-md1-006", "pl-2026-27-md1-007"]);
+    assert.deepEqual(slate.fixtureIds, ["pl-2026-27-md1-001", "pl-2026-27-md1-003", "pl-2026-27-md1-005", "pl-2026-27-md1-006"]);
   });
 });
 

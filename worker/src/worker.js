@@ -1090,6 +1090,15 @@ async function state(env, url) {
   const currentStored = currentPeriod != null && slateAware(league)
     ? await kvGet(env, slateKey(code, currentPeriod))
     : null;
+  // The CURRENT period's slate is read directly rather than taken from the
+  // listing above. KV.list is eventually consistent — it can lag a write by up
+  // to a minute — and a host who has just published must not be told their
+  // league is still waiting on them, nor be offered the picker again. The
+  // listing is still right for every settled week, which is all the scoring
+  // paths below use it for.
+  const currentPublished = isPublishedSlate(currentStored)
+    ? currentStored
+    : (currentPeriod == null ? null : slates[currentPeriod] || null);
   const viewer = url.searchParams.get("uid") || "";
   return json({
     code,
@@ -1103,11 +1112,11 @@ async function state(env, url) {
     currentFixtureCount: effectiveFixtureCount(league, currentPool.length),
     currentMatchdayStatus: currentPeriod == null ? "complete" : roundStatus(currentFixtures),
     currentMatchdayHasResults: currentFixtures.some((match) => !!normaliseResult(match)),
-    currentSlate: currentPeriod == null ? null : publicSlate(slates[currentPeriod] || null, currentPeriod),
+    currentSlate: currentPeriod == null ? null : publicSlate(currentPublished, currentPeriod),
     currentDraft: currentPeriod == null ? null : publicDraft(currentStored, currentPeriod),
     // The launch decision tree turns on exactly this: is there a published
     // slate for the current period, or is the league still waiting on one?
-    awaitingPublish: currentPeriod != null && !slates[currentPeriod],
+    awaitingPublish: currentPeriod != null && !currentPublished,
     table: computeTableWithMovement(memberList, scopedCompleted, picks).map((row) => ({ ...row, wins: wins[row.uid] || 0 })),
     reveals: buildReveals(memberList, scopedFixtures, picks, Date.now()).slice(0, 20),
     cabinet: viewer ? computeCabinet(viewer, memberList, matchList, picks, slates, keyOf) : null,

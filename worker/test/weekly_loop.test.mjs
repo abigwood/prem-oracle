@@ -560,6 +560,49 @@ test("a draft pre-load names the fixtures that have gone since it was saved", as
   });
 });
 
+test("a just-published week is visible before KV.list catches up", async () => {
+  // Regression: /state derived currentSlate from a KV.list, which is eventually
+  // consistent. A host who had just published was told their league was still
+  // waiting on them, and was offered the picker again. The current period's
+  // slate is read directly now, so a list that has not caught up cannot lie.
+  const list = round();
+  const store = new Map();
+  const lagging = memoryKV(store);
+  // A KV whose listing is a minute behind its writes.
+  const seen = new Set();
+  const env = {
+    FIXTURES_URL: "https://example.com/fixtures.json",
+    KV: {
+      ...lagging,
+      get: lagging.get,
+      put: async (key, value) => { await lagging.put(key, value); },
+      delete: lagging.delete,
+      async list(opts) {
+        const page = await lagging.list(opts);
+        // Anything written since the last listing is invisible this time round.
+        const fresh = page.keys.filter((k) => !seen.has(k.name));
+        fresh.forEach((k) => seen.add(k.name));
+        return { ...page, keys: page.keys.filter((k) => !fresh.includes(k)) };
+      },
+    },
+  };
+  await withFixtures(list, async () => {
+    await prime(env);
+    const send = post(env);
+    const { code } = await (await send("/league", {
+      uid: "host", competitions: ["PL"], fixtureMode: "limited",
+      weeklyRule: { method: "manual", competitionScope: "PL", count: 6 },
+    })).json();
+    const ids = list.slice(0, 6).map((match) => match.id);
+    assert.equal((await send("/league/slate", { uid: "host", code, period: "1", fixtureIds: ids })).status, 200);
+
+    const state = await (await get(env)(`/state?code=${code}`)).json();
+    assert.equal(state.currentSlate?.count, 6, "the freshly published slate is reported");
+    assert.equal(state.currentSlate?.status, "published");
+    assert.equal(state.awaitingPublish, false, "and the league is not still 'waiting on the host'");
+  });
+});
+
 // --- the weekly loop --------------------------------------------------------
 
 test("a manual host is nudged once, with copy that matches their league", async () => {

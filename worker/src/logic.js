@@ -166,8 +166,10 @@ export function computePodium(members, roundFixtures, picksByMatch) {
 // isn't running Custom Mix, which keeps every existing league untouched.
 // ---------------------------------------------------------------------------
 
-export const SLATE_MIN = 6;
-export const SLATE_MAX = 10;
+// v1.5 §9: one validation path for the weekly count — floor 1, ceiling 20,
+// default 6. The 6–10 band this replaces is gone; no other floor exists.
+export const SLATE_MIN = 1;
+export const SLATE_MAX = 20;
 export const SLATE_MODES = ["custom", "full", "fallback"];
 
 /**
@@ -176,6 +178,136 @@ export const SLATE_MODES = ["custom", "full", "fallback"];
  * windows existed keeps exactly the key it already has.
  */
 export const slateKey = (code, period) => `custom_slate:${code}:${period}`;
+
+// ---------------------------------------------------------------------------
+// The draft → published lifecycle
+//
+// One way, once per period: draft → published → locked → settled. Nothing ever
+// travels back up. A draft is the host's working copy and may be rewritten as
+// often as they like; publishing freezes it, tells the league, and any later
+// write to that period is a 409.
+//
+// A slate written before v1.5 has no `status` field at all. It reads as
+// PUBLISHED — those weeks were played, members hold picks against them, and an
+// existing league must never wake up with its history editable. The record on
+// disk is not rewritten to say so; this is a read-boundary reading, like every
+// other legacy normalisation in the codebase.
+// ---------------------------------------------------------------------------
+
+export const SLATE_STATUSES = ["draft", "published", "locked", "settled"];
+const STATUS_RANK = Object.fromEntries(SLATE_STATUSES.map((status, index) => [status, index]));
+
+/** The lifecycle status of a stored slate. Absent means published. */
+export const slateStatus = (slate) => {
+  if (!slate) return null;
+  const stored = String(slate.status || "");
+  return SLATE_STATUSES.includes(stored) ? stored : "published";
+};
+
+export const isPublishedSlate = (slate) => {
+  const status = slateStatus(slate);
+  return status != null && status !== "draft";
+};
+
+export const isDraftSlate = (slate) => slateStatus(slate) === "draft";
+
+/** Reads a stored slate with its lifecycle status resolved, never rewriting it. */
+export const normaliseSlate = (slate) => (slate ? { ...slate, status: slateStatus(slate) } : null);
+
+/** True when `next` is a forward move. Publishing a published slate is not. */
+export const canAdvanceSlate = (slate, next) => {
+  if (!SLATE_STATUSES.includes(next)) return false;
+  if (!slate) return next === "draft" || next === "published";
+  return STATUS_RANK[next] > STATUS_RANK[slateStatus(slate)];
+};
+
+/**
+ * What publishing freezes: the fixture ids, which competition each came from,
+ * the kickoff times as they stood, the period key, and where the selection came
+ * from. A later reschedule updates the times held here for display, but the id
+ * list is the league's contract and is never quietly swapped.
+ */
+export function buildSlateSnapshot(fixtureIds, pool, periodKey, ruleSource) {
+  const byId = new Map((pool || []).map((match) => [String(match.id), match]));
+  return {
+    periodKey: String(periodKey),
+    ruleSource,
+    takenAt: new Date().toISOString(),
+    fixtures: (fixtureIds || []).map((id) => {
+      const match = byId.get(String(id));
+      return {
+        id: String(id),
+        competition: competitionOfSnapshotId(String(id)),
+        kickoffAt: match?.startAt || match?.lockAt || null,
+        label: match ? `${match.player1} v ${match.player2}` : null,
+      };
+    }),
+  };
+}
+
+// Deliberately local rather than an import from competitions.js: logic.js is the
+// pure-scoring module and has no competition registry dependency. Only the two
+// namespaces that can appear in a slate need naming.
+const competitionOfSnapshotId = (id) =>
+  (id.startsWith("elc-") ? "ELC" : id.startsWith("cl-") ? "CL" : id.startsWith("pl-") ? "PL" : null);
+
+/**
+ * Folds a reschedule into a published snapshot. Kickoff times and labels are
+ * refreshed and fixtures that have gone are marked unavailable, but the id list
+ * itself is returned untouched — post-publish the league plays what it was
+ * shown. Returns null when nothing moved.
+ */
+export function refreshSnapshot(snapshot, roundFixtures) {
+  if (!snapshot?.fixtures?.length) return null;
+  const byId = new Map((roundFixtures || []).map((match) => [String(match.id), match]));
+  let changed = false;
+  const fixtures = snapshot.fixtures.map((entry) => {
+    const match = byId.get(String(entry.id));
+    const kickoffAt = match?.startAt || match?.lockAt || entry.kickoffAt || null;
+    const unavailable = !match || isVoided(match) || String(match.status || "").toLowerCase() === "postponed";
+    const next = {
+      ...entry,
+      kickoffAt,
+      label: match ? `${match.player1} v ${match.player2}` : entry.label,
+      ...(unavailable ? { unavailable: true } : {}),
+    };
+    if (next.kickoffAt !== entry.kickoffAt || !!next.unavailable !== !!entry.unavailable) changed = true;
+    return next;
+  });
+  return changed ? { ...snapshot, fixtures, revisedAt: new Date().toISOString() } : null;
+}
+
+/**
+ * Validates last week's settings against this period's pool.
+ *
+ * The picker pre-loads what the host chose last time. A fixture that has been
+ * promoted out, postponed, or simply isn't on this week is reported as
+ * explicitly unavailable rather than quietly dropped — the host is told what
+ * moved, not handed a shorter list and left to notice.
+ */
+export function preloadSelection(previousIds, pool) {
+  const available = new Map((pool || []).map((match) => [String(match.id), match]));
+  const carried = [];
+  const unavailable = [];
+  for (const raw of previousIds || []) {
+    const id = String(raw);
+    const match = available.get(id);
+    if (!match) {
+      unavailable.push({ id, reason: "notInPool" });
+      continue;
+    }
+    if (isVoided(match)) {
+      unavailable.push({ id, reason: "voided", label: `${match.player1} v ${match.player2}` });
+      continue;
+    }
+    if (String(match.status || "").toLowerCase() === "postponed") {
+      unavailable.push({ id, reason: "postponed", label: `${match.player1} v ${match.player2}` });
+      continue;
+    }
+    carried.push(id);
+  }
+  return { fixtureIds: carried, unavailable };
+}
 
 // Slate types the member-facing UI distinguishes: an unanswered fallback reads
 // as a full card, because that is exactly what the league played.
@@ -190,7 +322,9 @@ export const byKickoffOrder = (a, b) =>
  *
  * `bounds` is `{ min, max }` for the week. The league's configured count is a
  * default the picker opens on, not a limit the host is held to, so the only
- * hard constraints are the floor and the size of the pool itself.
+ * hard constraints are the floor (one fixture) and the size of the pool itself.
+ * This is the single validation path: there is no separate rule for a random
+ * week, a full week, or a short one.
  */
 export function validateSlate(mode, fixtureIds, pool, bounds = null) {
   if (!pool.length) return { error: "no fixtures available this week" };
@@ -212,6 +346,57 @@ export function validateSlate(mode, fixtureIds, pool, bounds = null) {
   }
   const chosen = new Set(requested);
   return { fixtureIds: ordered.filter((match) => chosen.has(String(match.id))).map((match) => String(match.id)) };
+}
+
+/**
+ * The fixtures a `random` weekly rule deals for one period.
+ *
+ * Seeded on the league code and the period key, so a background job that runs
+ * twice produces byte-identical output rather than two different weeks. In a
+ * mixed pool it guarantees one fixture from each competition that actually has
+ * something on, then fills the rest, which is what stops a random Championship
+ * week from quietly excluding the Premier League.
+ */
+export function randomSelection(pool, count, seed) {
+  const ordered = [...pool].sort(byKickoffOrder);
+  const target = Math.max(1, Math.min(Number(count) || 1, ordered.length));
+  if (!ordered.length) return [];
+  // FNV-1a over the seed, then a xorshift walk. Deliberately not the runtime
+  // RNG: the same league and period must always deal the same slate.
+  let state = 0x811c9dc5;
+  for (const char of String(seed)) {
+    state ^= char.charCodeAt(0);
+    state = Math.imul(state, 0x01000193) >>> 0;
+  }
+  const next = () => {
+    state ^= state << 13; state >>>= 0;
+    state ^= state >>> 17;
+    state ^= state << 5; state >>>= 0;
+    return state / 0x100000000;
+  };
+  const shuffle = (list) => {
+    const copy = [...list];
+    for (let i = copy.length - 1; i > 0; i--) {
+      const j = Math.floor(next() * (i + 1));
+      [copy[i], copy[j]] = [copy[j], copy[i]];
+    }
+    return copy;
+  };
+  const byCompetition = new Map();
+  for (const match of ordered) {
+    const code = competitionOfSnapshotId(String(match.id)) || "PL";
+    byCompetition.set(code, [...(byCompetition.get(code) || []), match]);
+  }
+  const taken = new Set();
+  for (const [, group] of [...byCompetition.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+    if (taken.size >= target) break;
+    taken.add(String(shuffle(group)[0].id));
+  }
+  for (const match of shuffle(ordered)) {
+    if (taken.size >= target) break;
+    taken.add(String(match.id));
+  }
+  return ordered.filter((match) => taken.has(String(match.id))).map((match) => String(match.id));
 }
 
 // The fixtures a league actually scores for one matchweek. A league with no
@@ -328,14 +513,16 @@ export function computeRoundWins(members, fixtures, picksByMatch, slatesByPeriod
   return wins;
 }
 
-// Keeps a live Custom Mix slate honest when a curated fixture is postponed.
+// Keeps a published slate honest when one of its fixtures is postponed.
 //
-// Fairness beats slate size: a fixture may only be swapped in while NOTHING on
-// the slate has locked, because after that members already hold picks and would
-// be ambushed by a fixture they never saw. Once any slate fixture has locked the
-// postponed one is simply dropped, even if that leaves fewer than six.
+// v1.5 §9: a published slate is a contract. Its fixture list is snapshotted at
+// publish and is NEVER silently swapped afterwards — a fixture that goes is
+// dropped and the league is told, but nothing the members never saw is dealt in
+// behind them, whether or not anything has locked yet. (Before v1.5 a
+// replacement was substituted while the slate was still fully unlocked; that is
+// the behaviour this removes.)
 export function reconcileSlate(slate, roundFixtures, nowMs) {
-  if (slate?.mode !== "custom" || !slate.fixtureIds?.length) return null;
+  if (!isPublishedSlate(slate) || slate?.mode !== "custom" || !slate.fixtureIds?.length) return null;
   const byId = new Map(roundFixtures.map((match) => [String(match.id), match]));
   const current = slate.fixtureIds.map(String);
   const dropped = current.filter((id) => {
@@ -348,26 +535,7 @@ export function reconcileSlate(slate, roundFixtures, nowMs) {
     const match = byId.get(id);
     return match && matchLocked(match, nowMs);
   });
-  if (anyLocked) {
-    return { fixtureIds: kept, dropped, added: [], reason: "locked" };
-  }
-  const candidates = [...roundFixtures]
-    .filter((match) => !current.includes(String(match.id)) && !isVoided(match) &&
-      String(match.status || "").toLowerCase() !== "postponed" && !matchLocked(match, nowMs))
-    .sort((a, b) =>
-      (Date.parse(a.startAt || a.lockAt) || 0) - (Date.parse(b.startAt || b.lockAt) || 0) ||
-      String(a.id).localeCompare(String(b.id))
-    );
-  const added = candidates.slice(0, dropped.length).map((match) => String(match.id));
-  const nextIds = [...kept, ...added];
-  const ordered = [...roundFixtures]
-    .filter((match) => nextIds.includes(String(match.id)))
-    .sort((a, b) =>
-      (Date.parse(a.startAt || a.lockAt) || 0) - (Date.parse(b.startAt || b.lockAt) || 0) ||
-      String(a.id).localeCompare(String(b.id))
-    )
-    .map((match) => String(match.id));
-  return { fixtureIds: ordered, dropped, added, reason: "replaced" };
+  return { fixtureIds: kept, dropped, added: [], reason: anyLocked ? "locked" : "dropped" };
 }
 
 export function buildReveals(members, matches, picksByMatch, nowMs) {

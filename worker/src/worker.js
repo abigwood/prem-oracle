@@ -2,6 +2,8 @@ import {
   applySlates,
   buildFixtureIcs,
   buildReveals,
+  buildSlateSnapshot,
+  canAdvanceSlate,
   computeCabinet,
   computePodium,
   computeRoundTable,
@@ -10,6 +12,8 @@ import {
   computeTableWithMovement,
   fixturesByMatchweek,
   fixturesNeedingNotification,
+  isDraftSlate,
+  isPublishedSlate,
   isVoided,
   matchLocked,
   makeCode,
@@ -17,13 +21,18 @@ import {
   normNick,
   normRecovery,
   normaliseResult,
+  normaliseSlate,
   parsePickParam,
+  preloadSelection,
+  randomSelection,
   reconcileSlate,
+  refreshSnapshot,
   roundComplete,
   roundStatus,
   roundWinners,
   slateFixtures,
   slateKey,
+  slateStatus,
   validFootballScore,
   validateSlate,
 } from "./logic.js";
@@ -34,18 +43,27 @@ import {
   COMPETITION_CODES,
   DEFAULT_COMPETITION,
   FIXTURE_MODES,
-  MIN_FIXTURE_LIMIT,
+  MAX_FIXTURE_COUNT,
+  MIN_FIXTURE_COUNT,
+  comparePeriods,
   competitionOfFixture,
+  defaultScopeFor,
   effectiveFixtureCount,
   isCompetition,
   isMixedLeague,
+  isSetAndForget,
   leagueCompetition,
   leagueCompetitions,
   leagueFixturePlan,
+  leagueWeeklyRule,
   normaliseCompetition,
+  periodKeyForLeague,
   periodKeyOf,
+  periodOpensAt,
   poolByPeriod,
   resultsKey,
+  scopeCompetitions,
+  validateWeeklyRule,
   windowKeyFor,
   windowLabel,
 } from "./competitions.js";
@@ -119,17 +137,24 @@ const leagueMemberPrefix = (code) => `member:${code}:`;
 const leagueMemberKey = (code, uid) => `${leagueMemberPrefix(code)}${uid}`;
 const CUSTOM_MIX_INDEX = "index:custom_mix";
 
-// A league reads its slates when it is running Custom Mix, or ever has: turning
-// the toggle off must never silently rewrite the history of weeks that were
-// genuinely played on a curated slate. Every other league does zero extra KV
-// reads and keeps exactly today's behaviour.
-const slateAware = (league) => league?.customMix === true || league?.hadSlates === true;
+// A league reads its slates when it publishes one every week (v1.5: any league
+// with a stored weekly rule), when it is running Custom Mix, or when it ever
+// has — turning the toggle off must never silently rewrite the history of weeks
+// that were genuinely played on a curated slate.
+//
+// A legacy record has none of the three until its first slate is published, so
+// it keeps exactly the v1.4 read profile until the weekly loop gives it one.
+const slateAware = (league) =>
+  !!league?.weeklyRule || league?.customMix === true || league?.hadSlates === true;
 
+// Every PUBLISHED slate for a league. Drafts share the key space but are the
+// host's working copy and must never reach a scoring path — this is the one
+// choke point that keeps them out, so no caller has to remember.
 async function readSlates(env, code, periods = null) {
   if (periods) {
     const rows = await Promise.all(periods.map(async (period) =>
       [String(period), await kvGet(env, slateKey(code, period))]));
-    return Object.fromEntries(rows.filter(([, slate]) => slate));
+    return Object.fromEntries(rows.filter(([, slate]) => isPublishedSlate(slate)));
   }
   if (!env.KV.list) return {};
   const prefix = `custom_slate:${code}:`;
@@ -139,16 +164,22 @@ async function readSlates(env, code, periods = null) {
     const page = await env.KV.list({ prefix, cursor });
     const rows = await Promise.all(page.keys.map(async (key) =>
       // The suffix is the period: a matchweek number for a single-competition
-      // league, a window key like w2026-08-10 for a mixed one. Kept as a string
+      // league, a window key like w2026-08-11 for a mixed one. Kept as a string
       // either way, because parsing it as a number would silently drop windows.
       [key.name.slice(prefix.length), await kvGet(env, key.name)]));
     for (const [period, slate] of rows) {
-      if (period && slate) slates[period] = slate;
+      if (period && isPublishedSlate(slate)) slates[period] = slate;
     }
     if (page.list_complete) break;
     cursor = page.cursor;
   }
   return slates;
+}
+
+/** The published slate for one period, or null — drafts never qualify. */
+async function readPublishedSlate(env, code, period) {
+  const slate = await kvGet(env, slateKey(code, period));
+  return isPublishedSlate(slate) ? slate : null;
 }
 
 async function updateCustomMixIndex(env, code, member) {
@@ -428,6 +459,33 @@ async function createLeague(env, body) {
 }
 
 /**
+ * POST /league/weekly-rule — the host switches between picking each week and a
+ * set-and-forget rule, at any time. Only the rule changes: periods already
+ * published keep the slate they were published with, because members hold picks
+ * against them.
+ */
+async function setWeeklyRule(env, body) {
+  const uid = String(body.uid || "").trim();
+  const code = String(body.code || "").trim().toUpperCase();
+  if (!uid || !code) return json({ error: "uid and code required" }, 400, env);
+  const league = await kvGet(env, `league:${code}`);
+  if (!league) return json({ error: "league not found" }, 404, env);
+  if (uid !== league.owner) return json({ error: "only the league host can change the weekly rule" }, 403, env);
+  const validated = validateWeeklyRule(body.weeklyRule, leagueCompetitions(league));
+  if (validated.error) return json({ error: validated.error }, 400, env);
+  league.weeklyRule = validated.rule;
+  // The legacy fields are kept in step so an older client reading this record
+  // still sees a coherent league, but the rule is now the authority.
+  league.fixtureMode = validated.rule.method === "allEligible" || validated.rule.method === "allCompetition"
+    ? "all"
+    : "limited";
+  league.fixtureLimit = league.fixtureMode === "limited" ? validated.rule.count : null;
+  await kvPut(env, `league:${code}`, league);
+  await updateCustomMixIndex(env, code, league.fixtureMode === "limited");
+  return json({ ok: true, code, weeklyRule: validated.rule }, 200, env);
+}
+
+/**
  * Validates the competition set and fixture plan a host submitted.
  *
  * At least one competition is required and both are allowed. `fixtureMode` is
@@ -456,15 +514,33 @@ function readLeagueSetup(env, body) {
   let fixtureLimit = null;
   if (requestedMode === "limited" && body.fixtureLimit != null) {
     const limit = Number(body.fixtureLimit);
-    if (!Number.isInteger(limit) || limit < MIN_FIXTURE_LIMIT) {
-      return { error: `fixtureLimit must be a whole number of at least ${MIN_FIXTURE_LIMIT}` };
+    if (!Number.isInteger(limit) || limit < MIN_FIXTURE_COUNT || limit > MAX_FIXTURE_COUNT) {
+      return { error: `fixtureLimit must be a whole number between ${MIN_FIXTURE_COUNT} and ${MAX_FIXTURE_COUNT}` };
     }
     fixtureLimit = limit;
   }
   // COMPETITION_CODES order keeps the stored array stable regardless of the
   // order the client happened to tick the boxes in.
   const ordered = COMPETITION_CODES.filter((code) => competitions.includes(code));
-  return { record: { competitions: ordered, fixtureMode: requestedMode, fixtureLimit } };
+
+  // The wizard's third step. A client that doesn't send one (an older build) is
+  // a host who picks each week, with whatever count they set — which is exactly
+  // what the legacy read boundary would have inferred anyway.
+  const submitted = body.weeklyRule ?? {
+    method: requestedMode === "limited" ? "manual" : "allEligible",
+    competitionScope: defaultScopeFor(ordered),
+    count: fixtureLimit ?? undefined,
+  };
+  const rule = validateWeeklyRule(submitted, ordered);
+  if (rule.error) return { error: rule.error };
+  return {
+    record: {
+      competitions: ordered,
+      fixtureMode: requestedMode,
+      fixtureLimit,
+      weeklyRule: rule.rule,
+    },
+  };
 }
 
 // Hosts can turn Custom Mix on (or back off) after the league exists. Existing
@@ -486,11 +562,76 @@ async function setCustomMix(env, body) {
   return json({ ok: true, code, customMix: body.enabled, fixtureMode: league.fixtureMode }, 200, env);
 }
 
-// POST /league/slate — the host curates Matchweek N.
+/** "Matchweek 7" / "your week of Tue 11 – Mon 17 Aug" — the member-facing period. */
+const periodLabelFor = (league, period) =>
+  (isMixedLeague(league) ? `your week of ${windowLabel(period)}` : `Matchweek ${period}`);
+
+const periodTitleFor = (league, period) =>
+  (isMixedLeague(league) ? `Your week of ${windowLabel(period)}` : `Matchweek ${period}`);
+
+/** Rejects a period that isn't shaped like one for this league. */
+function readPeriod(league, body) {
+  const period = String(body.period ?? body.matchweek ?? "").trim();
+  if (!period) return { error: "period required" };
+  if (!isMixedLeague(league)) {
+    const matchweek = Number(period);
+    if (!Number.isInteger(matchweek) || matchweek < 1) return { error: "matchweek required" };
+  }
+  return { period };
+}
+
+/**
+ * Writes a published slate and tells the league. The one place a slate becomes
+ * final, so publishing from the picker, from a set-and-forget rule and from the
+ * fallback all snapshot the same things and all announce the same way.
+ *
+ * Idempotent by construction: it refuses to write over a slate that is already
+ * published, so a background job that runs twice publishes once. `expected`
+ * carries the record the caller read, and a mismatch means somebody else got
+ * there first.
+ */
+async function publishSlate(env, league, period, { fixtureIds, mode, ruleSource, setBy, pool, announce = true }) {
+  const code = league.code;
+  const existing = await kvGet(env, slateKey(code, period));
+  if (isPublishedSlate(existing)) return { published: false, reason: "alreadyPublished", slate: normaliseSlate(existing) };
+  if (!canAdvanceSlate(existing, "published")) {
+    return { published: false, reason: "notAdvanceable", slate: normaliseSlate(existing) };
+  }
+  const slate = {
+    status: "published",
+    mode,
+    fixtureIds,
+    periodKey: String(period),
+    ruleSource,
+    snapshot: buildSlateSnapshot(fixtureIds, pool, period, ruleSource),
+    lockedAt: new Date().toISOString(),
+    publishedAt: new Date().toISOString(),
+    setBy: setBy || null,
+  };
+  await kvPut(env, slateKey(code, period), slate);
+  if (!league.hadSlates) {
+    league.hadSlates = true;
+    await kvPut(env, `league:${code}`, league);
+  }
+  if (!announce) return { published: true, slate };
+  const memberList = await members(env, league);
+  const audience = memberList.filter((member) => member.uid !== setBy).map((member) => member.uid);
+  const label = periodLabelFor(league, period);
+  const who = setBy ? hostNick(memberList, league) : league.name;
+  const body = setBy
+    ? `${who} has set ${fixtureIds.length} fixtures for ${label}. Make your picks!`
+    : `${fixtureIds.length} fixtures are live for ${label} in ${league.name}. Make your picks!`;
+  await pushToUids(env, audience, body);
+  return { published: true, slate };
+}
+
+// POST /league/slate — the host's working copy, and the moment it goes live.
 //
-// `mode` is always stored explicitly: "custom" is a 6-10 fixture selection,
-// "full" is a host who deliberately chose the whole card. A slate is immutable
-// once set (409), because members may already hold picks against it.
+// `action` is the lifecycle step: "draft" saves the host's selection so the
+// picker can be reopened, and may be rewritten as often as they like; "publish"
+// (the default, and what every older client sends) freezes it, snapshots it and
+// tells the league. Publishing is one-way — a later write to that period is a
+// 409, because members already hold picks against it.
 async function setSlate(env, body) {
   const uid = String(body.uid || "").trim();
   const code = String(body.code || "").trim().toUpperCase();
@@ -498,47 +639,59 @@ async function setSlate(env, body) {
   const league = await kvGet(env, `league:${code}`);
   if (!league) return json({ error: "league not found" }, 404, env);
   if (uid !== league.owner) return json({ error: "only the league host can set the fixtures" }, 403, env);
-  if (leagueFixturePlan(league).mode !== "limited") {
-    return json({ error: "this league plays every fixture, so there is nothing to pick" }, 400, env);
-  }
+  const action = String(body.action || "publish");
+  if (!["draft", "publish"].includes(action)) return json({ error: "action must be draft or publish" }, 400, env);
+
   // A mixed league keys on its own week window; a single-competition league
   // still keys on the official matchweek number, so existing slates are intact.
-  const period = String(body.period ?? body.matchweek ?? "").trim();
-  if (!period) return json({ error: "period required" }, 400, env);
-  if (!isMixedLeague(league)) {
-    const matchweek = Number(period);
-    if (!Number.isInteger(matchweek) || matchweek < 1) return json({ error: "matchweek required" }, 400, env);
-  }
+  const read = readPeriod(league, body);
+  if (read.error) return json({ error: read.error }, 400, env);
+  const { period } = read;
+
   const existing = await kvGet(env, slateKey(code, period));
-  if (existing) return json({ error: "this matchweek's fixtures are already set", slate: existing }, 409, env);
+  // A legacy slate has no status and reads as published — an existing league
+  // must not become editable just because the lifecycle arrived.
+  if (isPublishedSlate(existing)) {
+    return json({ error: "this matchweek's fixtures are already set", slate: normaliseSlate(existing) }, 409, env);
+  }
 
   const matchList = await leagueFixtures(env, league);
   const pool = poolByPeriod(matchList, league).get(period) || [];
-  const bounds = effectiveFixtureCount(league, pool.length);
+  // The single validation path: floor one, ceiling the pool. The league's own
+  // count is what the picker OPENS on — it is never a cap on the week the host
+  // actually publishes, whatever rule the league normally runs on. A host who
+  // opens the picker and takes six from a full-card league has overridden the
+  // rule for that week, deliberately, and that is allowed.
+  const bounds = { min: Math.min(MIN_FIXTURE_COUNT, pool.length), max: pool.length };
   const mode = String(body.mode || "custom");
   const validated = validateSlate(mode, body.fixtureIds, pool, bounds);
   if (validated.error) return json({ error: validated.error }, 400, env);
 
-  const slate = {
-    mode,
-    fixtureIds: validated.fixtureIds,
-    lockedAt: new Date().toISOString(),
-    setBy: uid,
-  };
-  await kvPut(env, slateKey(code, period), slate);
-  if (!league.hadSlates) {
-    league.hadSlates = true;
-    await kvPut(env, `league:${code}`, league);
+  if (action === "draft") {
+    const draft = {
+      status: "draft",
+      mode,
+      fixtureIds: validated.fixtureIds,
+      periodKey: String(period),
+      ruleSource: "host-draft",
+      savedAt: new Date().toISOString(),
+      setBy: uid,
+    };
+    await kvPut(env, slateKey(code, period), draft);
+    return json({ ok: true, code, period, matchweek: Number(period) || null, slate: draft }, 200, env);
   }
 
-  const memberList = await members(env, league);
-  const label = isMixedLeague(league) ? `your week of ${windowLabel(period)}` : `Matchweek ${period}`;
-  await pushToUids(
-    env,
-    memberList.filter((member) => member.uid !== uid).map((member) => member.uid),
-    `${hostNick(memberList, league)} has set ${slate.fixtureIds.length} fixtures for ${label}. Make your picks!`
-  );
-  return json({ ok: true, code, period, matchweek: Number(period) || null, slate }, 200, env);
+  const result = await publishSlate(env, league, period, {
+    fixtureIds: validated.fixtureIds,
+    mode,
+    ruleSource: "host",
+    setBy: uid,
+    pool,
+  });
+  if (!result.published) {
+    return json({ error: "this matchweek's fixtures are already set", slate: result.slate }, 409, env);
+  }
+  return json({ ok: true, code, period, matchweek: Number(period) || null, slate: result.slate }, 200, env);
 }
 
 // Account deletion, and with it host succession: a league never ends up ownerless.
@@ -782,15 +935,73 @@ async function migrationAdmin(env, body) {
   }
 }
 
-const publicSlate = (slate, period) => (slate ? {
+// A draft is the host's private working copy: it is reported so their own
+// picker can reopen on it, but it is never presented as this week's slate.
+const publicSlate = (slate, period) => (slate && isPublishedSlate(slate) ? {
   period,
   matchweek: Number(period) || null,
+  status: slateStatus(slate),
   mode: slate.mode,
   fixtureIds: slate.fixtureIds,
   count: slate.fixtureIds.length,
+  ruleSource: slate.ruleSource || null,
   setBy: slate.setBy || null,
   lockedAt: slate.lockedAt || null,
+  publishedAt: slate.publishedAt || null,
+  snapshot: slate.snapshot || null,
 } : null);
+
+const publicDraft = (slate, period) => (isDraftSlate(slate) ? {
+  period,
+  status: "draft",
+  mode: slate.mode,
+  fixtureIds: slate.fixtureIds,
+  count: slate.fixtureIds.length,
+  savedAt: slate.savedAt || null,
+} : null);
+
+/**
+ * What the picker opens on for a period.
+ *
+ * Two different kinds of carry-over, and they are not the same thing:
+ *
+ * - Within the period, the host's own DRAFT carries actual fixtures. Those are
+ *   re-validated against the pool as it stands now, because a fixture can be
+ *   postponed — or, in a mixed league, rescheduled clean out of the window —
+ *   between saving a draft and coming back to it. Anything that has gone is
+ *   returned as explicitly `unavailable` with a reason rather than silently
+ *   dropped from the selection.
+ * - Across periods, last week's SETTINGS carry: the count the host actually
+ *   played, not its fixtures, which by definition belong to a week that is over.
+ */
+async function pickerPreload(env, league, period, pool, stored) {
+  const bounds = effectiveFixtureCount(league, pool.length);
+  const base = { min: bounds.min, max: bounds.max, poolSize: pool.length };
+  const withCount = (count) => Math.max(bounds.min, Math.min(count, bounds.max));
+  if (isPublishedSlate(stored)) {
+    return { ...base, count: withCount(stored.fixtureIds.length), source: "published", fixtureIds: stored.fixtureIds, unavailable: [] };
+  }
+  if (isDraftSlate(stored)) {
+    const carried = preloadSelection(stored.fixtureIds, pool);
+    return { ...base, count: bounds.default, source: "draft", ...carried };
+  }
+  const empty = { ...base, count: bounds.default, source: "none", fixtureIds: [], unavailable: [] };
+  if (!slateAware(league)) return empty;
+  const slates = await readSlates(env, league.code);
+  const earlier = Object.keys(slates)
+    .filter((key) => comparePeriods(key, period) < 0)
+    .sort(comparePeriods)
+    .pop();
+  if (!earlier) return empty;
+  return {
+    ...base,
+    count: withCount(slates[earlier].fixtureIds.length),
+    source: "lastWeek",
+    from: earlier,
+    fixtureIds: [],
+    unavailable: [],
+  };
+}
 
 async function state(env, url) {
   const code = String(url.searchParams.get("code") || "").toUpperCase();
@@ -816,10 +1027,14 @@ async function state(env, url) {
     }))
     .filter((match) => match.result || match.voided);
 
+  const rule = leagueWeeklyRule(league);
   const identity = {
     competitions,
     competitionNames: competitions.map((entry) => COMPETITIONS[entry].name),
     mixed,
+    weeklyRule: { method: rule.method, competitionScope: rule.competitionScope, count: rule.count },
+    weeklyRuleSource: rule.source,
+    setAndForget: isSetAndForget(rule),
     fixtureMode: plan.mode,
     fixtureLimit: plan.limit,
     // Retained for clients that predate the competitions array.
@@ -832,7 +1047,8 @@ async function state(env, url) {
   const periodParam = url.searchParams.get("period") ?? url.searchParams.get("md");
   if (periodParam != null && String(periodParam).trim()) {
     const period = String(periodParam).trim();
-    const slate = slateAware(league) ? await kvGet(env, slateKey(code, period)) : null;
+    const stored = slateAware(league) ? await kvGet(env, slateKey(code, period)) : null;
+    const slate = isPublishedSlate(stored) ? stored : null;
     const pool = byPeriod.get(period) || [];
     const roundFixtures = slateFixtures(slate, pool);
     const scoped = applySlates(completed.filter((match) => match.period === period),
@@ -848,6 +1064,8 @@ async function state(env, url) {
       windowLabel: mixed ? windowLabel(period) : null,
       poolSize: pool.length,
       slate: publicSlate(slate, period),
+      draft: publicDraft(stored, period),
+      preload: await pickerPreload(env, league, period, pool, stored),
       table,
       status: roundStatus(roundFixtures),
       complete: roundComplete(roundFixtures),
@@ -862,16 +1080,16 @@ async function state(env, url) {
   const wins = computeRoundWins(memberList, matchList, picks, slates, keyOf);
   const unplayed = scopedFixtures.filter((match) => match.period != null && !normaliseResult(match) && !isVoided(match));
   // "Current" is the earliest period still to be played. Window keys sort
-  // chronologically as strings; matchweek numbers need numeric comparison.
-  const periodOrder = (a, b) => {
-    const numeric = Number(a) - Number(b);
-    return Number.isNaN(numeric) ? String(a).localeCompare(String(b)) : numeric;
-  };
+  // chronologically as strings; matchweek numbers need numeric comparison —
+  // comparePeriods is the shared ordering the period abstraction exposes.
   const currentPeriod = unplayed.length
-    ? [...new Set(unplayed.map((match) => match.period))].sort(periodOrder)[0]
+    ? [...new Set(unplayed.map((match) => match.period))].sort(comparePeriods)[0]
     : null;
   const currentFixtures = currentPeriod == null ? [] : scopedFixtures.filter((match) => match.period === currentPeriod);
   const currentPool = currentPeriod == null ? [] : (byPeriod.get(currentPeriod) || []);
+  const currentStored = currentPeriod != null && slateAware(league)
+    ? await kvGet(env, slateKey(code, currentPeriod))
+    : null;
   const viewer = url.searchParams.get("uid") || "";
   return json({
     code,
@@ -886,6 +1104,10 @@ async function state(env, url) {
     currentMatchdayStatus: currentPeriod == null ? "complete" : roundStatus(currentFixtures),
     currentMatchdayHasResults: currentFixtures.some((match) => !!normaliseResult(match)),
     currentSlate: currentPeriod == null ? null : publicSlate(slates[currentPeriod] || null, currentPeriod),
+    currentDraft: currentPeriod == null ? null : publicDraft(currentStored, currentPeriod),
+    // The launch decision tree turns on exactly this: is there a published
+    // slate for the current period, or is the league still waiting on one?
+    awaitingPublish: currentPeriod != null && !slates[currentPeriod],
     table: computeTableWithMovement(memberList, scopedCompleted, picks).map((row) => ({ ...row, wins: wins[row.uid] || 0 })),
     reveals: buildReveals(memberList, scopedFixtures, picks, Date.now()).slice(0, 20),
     cabinet: viewer ? computeCabinet(viewer, memberList, matchList, picks, slates, keyOf) : null,
@@ -1058,84 +1280,225 @@ function relevantPeriods(byPeriod, nowMs) {
   return { open, live };
 }
 
-async function remindHost(env, league, period) {
-  const key = `notified:slate-open:${league.code}:${period}`;
-  if (await env.KV.get(key)) return;
-  const label = isMixedLeague(league) ? `Your week of ${windowLabel(period)}` : `Matchweek ${period}`;
-  await pushToUids(env, [league.owner], `${label} is open — pick your fixtures for ${league.name}.`);
+/**
+ * One push per league, per period, per kind. Every weekly-loop notification
+ * goes through here, so "we already told them" is one rule rather than one per
+ * call site — which is what makes a cron tick that runs twice harmless.
+ */
+async function pushOnce(env, pushType, leagueId, periodKey, uids, body) {
+  const key = `notified:${pushType}:${leagueId}:${periodKey}`;
+  if (await env.KV.get(key)) return false;
   await env.KV.put(key, "1", { expirationTtl: SLATE_NOTICE_TTL_S });
+  await pushToUids(env, uids, body);
+  return true;
 }
 
-async function applyFallback(env, league, period, roundFixtures) {
-  const slate = {
-    mode: "fallback",
-    fixtureIds: [...roundFixtures].sort(byKickoff).map((match) => String(match.id)),
-    lockedAt: new Date().toISOString(),
-    setBy: null,
-  };
-  await kvPut(env, slateKey(league.code, period), slate);
-  if (!league.hadSlates) {
-    league.hadSlates = true;
-    await kvPut(env, `league:${league.code}`, league);
+/**
+ * The host nudge when a period's pool opens.
+ *
+ * The copy splits on what the league actually runs on. A single-competition
+ * league has a real matchweek number and is told it; a mixed league runs on a
+ * window and has no number to give, so naming one would be a lie.
+ */
+async function remindHost(env, league, period) {
+  const body = isMixedLeague(league)
+    ? `Set this week's fixtures for ${league.name}`
+    : `Matchweek ${period} is open — set your fixtures`;
+  await pushOnce(env, "slate-open", league.code, period, [league.owner], body);
+}
+
+/**
+ * Resolves what a league's weekly rule publishes for one period.
+ *
+ * `manual` has no rule of its own — it is the host, and the only reason this is
+ * ever asked for a manual league is the fallback, where "what would they most
+ * likely have done" is last week's count, and failing that the whole card.
+ */
+function resolveRuleSelection(rule, league, period, pool, lastCount) {
+  const scope = new Set(scopeCompetitions(rule, league));
+  const scoped = pool.filter((match) => scope.has(competitionOfFixture(match.id)));
+  const ordered = [...scoped].sort(byKickoff).map((match) => String(match.id));
+  if (!ordered.length) return null;
+  if (rule.method === "allEligible" || rule.method === "allCompetition") {
+    return { fixtureIds: ordered, mode: "full", ruleSource: rule.method };
   }
-  const memberList = await members(env, league);
-  await pushToUids(
-    env,
-    memberList.map((member) => member.uid),
-    `${isMixedLeague(league) ? `Your week of ${windowLabel(period)}` : `Matchweek ${period}`} in ${league.name} is a full card — all ${slate.fixtureIds.length} fixtures are open. Get your picks in!`
-  );
+  if (rule.method === "random") {
+    return {
+      // Seeded on league + period, so a job that runs twice deals the same week.
+      fixtureIds: randomSelection(scoped, rule.count, `${league.code}:${period}`),
+      mode: "custom",
+      ruleSource: "random",
+    };
+  }
+  // Manual, reached only through the fallback.
+  if (lastCount == null) return { fixtureIds: ordered, mode: "fallback", ruleSource: "fallback-full" };
+  return {
+    fixtureIds: randomSelection(scoped, Math.min(lastCount, ordered.length), `${league.code}:${period}`),
+    mode: "custom",
+    ruleSource: "fallback-lastUsed",
+  };
 }
 
+/** The count the league last actually played, or null if it never has. */
+async function lastPlayedCount(env, league, period) {
+  if (!slateAware(league)) return null;
+  const slates = await readSlates(env, league.code);
+  const earlier = Object.keys(slates)
+    .filter((key) => comparePeriods(key, period) < 0)
+    .sort(comparePeriods)
+    .pop();
+  return earlier ? slates[earlier].fixtureIds.length : null;
+}
+
+/** A set-and-forget league publishes itself the moment its pool opens. */
+async function autoPublish(env, league, period, pool) {
+  const rule = leagueWeeklyRule(league);
+  const selection = resolveRuleSelection(rule, league, period, pool, null);
+  if (!selection?.fixtureIds.length) return null;
+  const result = await publishSlate(env, league, period, {
+    fixtureIds: selection.fixtureIds,
+    mode: selection.mode,
+    ruleSource: selection.ruleSource,
+    setBy: null,
+    pool,
+    announce: false,
+  });
+  if (!result.published) return result;
+  await pushOnce(env, "slate-published", league.code, period, (await members(env, league)).map((member) => member.uid),
+    `${selection.fixtureIds.length} fixtures are live for ${periodLabelFor(league, period)} in ${league.name}. Make your picks!`);
+  return result;
+}
+
+/**
+ * The safety net, a clear day before the first ELIGIBLE kickoff of the period.
+ *
+ * Order of precedence, and it matters:
+ *   1. Already published — do nothing at all.
+ *   2. A valid, non-empty draft the host saved — publish exactly that. A draft
+ *      is never discarded in favour of a rule.
+ *   3. Anything else (no draft, or an empty/invalid one) — the weekly rule, or
+ *      for a manual league the count it last played, or failing both the whole
+ *      card. An empty draft is NEVER what gets published.
+ */
+async function applyFallback(env, league, period, roundFixtures) {
+  const stored = await kvGet(env, slateKey(league.code, period));
+  if (isPublishedSlate(stored)) return { published: false, reason: "alreadyPublished" };
+
+  let selection = null;
+  if (isDraftSlate(stored)) {
+    const bounds = effectiveFixtureCount(league, roundFixtures.length);
+    const validated = validateSlate(stored.mode === "full" ? "full" : "custom", stored.fixtureIds, roundFixtures, bounds);
+    if (!validated.error && validated.fixtureIds.length) {
+      selection = { fixtureIds: validated.fixtureIds, mode: stored.mode, ruleSource: "fallback-draft" };
+    }
+  }
+  if (!selection) {
+    const rule = leagueWeeklyRule(league);
+    const lastCount = rule.method === "manual" ? await lastPlayedCount(env, league, period) : null;
+    selection = resolveRuleSelection(rule, league, period, roundFixtures, lastCount);
+  }
+  if (!selection?.fixtureIds.length) return { published: false, reason: "emptyPool" };
+
+  const result = await publishSlate(env, league, period, {
+    fixtureIds: selection.fixtureIds,
+    mode: selection.mode,
+    // Provenance: a member looking at this week can always tell nobody chose it.
+    ruleSource: `auto-published:${selection.ruleSource}`,
+    setBy: null,
+    pool: roundFixtures,
+    announce: false,
+  });
+  if (!result.published) return result;
+  const memberList = await members(env, league);
+  await pushOnce(env, "auto-published", league.code, period, memberList.map((member) => member.uid),
+    `${periodTitleFor(league, period)} in ${league.name} is set — ${selection.fixtureIds.length} fixtures are open. Get your picks in!`);
+  return result;
+}
+
+/**
+ * Folds a reschedule into a PUBLISHED slate. Metadata and display only: kickoff
+ * times move, a fixture that has gone is marked unavailable and stops scoring,
+ * and nothing is ever swapped in behind the members.
+ */
 async function reconcilePostponements(env, league, slate, period, roundFixtures, nowMs) {
+  if (!isPublishedSlate(slate)) return;
   const change = reconcileSlate(slate, roundFixtures, nowMs);
-  if (!change) return;
+  const snapshot = refreshSnapshot(slate.snapshot, roundFixtures);
+  if (!change && !snapshot) return;
   await kvPut(env, slateKey(league.code, period), {
     ...slate,
-    fixtureIds: change.fixtureIds,
+    ...(change ? { fixtureIds: change.fixtureIds } : {}),
+    ...(snapshot ? { snapshot } : {}),
     revisedAt: new Date().toISOString(),
   });
+  if (!change) return;  // A time change alone is display; it is not news.
   const byId = new Map(roundFixtures.map((match) => [String(match.id), match]));
   const gone = change.dropped.map((id) => fixtureLabel(byId.get(id))).join(", ");
-  const body = change.added.length
-    ? `${gone} was postponed in ${league.name} — ${change.added.map((id) => fixtureLabel(byId.get(id))).join(", ")} takes its place in ${isMixedLeague(league) ? `your week of ${windowLabel(period)}` : `Matchweek ${period}`}.`
-    : `${gone} was postponed and no longer counts in ${league.name}. ${isMixedLeague(league) ? `Your week of ${windowLabel(period)}` : `Matchweek ${period}`} now scores ${change.fixtureIds.length} fixtures.`;
   const memberList = await members(env, league);
-  await pushToUids(env, memberList.map((member) => member.uid), body);
+  await pushToUids(env, memberList.map((member) => member.uid),
+    `${gone} was postponed and no longer counts in ${league.name}. ${periodTitleFor(league, period)} now scores ${change.fixtureIds.length} fixtures.`);
 }
 
-// Per-tick Custom Mix upkeep: remind an idle host, unlock the full card when the
-// deadline arrives, and keep a live slate honest through postponements. Reads
-// are proportional to the number of Custom Mix leagues, not to every league.
-async function customMixMaintenance(env) {
-  const codes = (await kvGet(env, CUSTOM_MIX_INDEX)) || [];
-  if (!codes.length) return;
+/**
+ * The weekly loop, once per cron tick.
+ *
+ * For every league: nudge a manual host when the pool opens, auto-publish a
+ * set-and-forget league, run the fallback a day before the first eligible
+ * kickoff, and keep already-published weeks honest through reschedules. Every
+ * step is idempotent — publishing refuses to overwrite a published slate and
+ * every push is deduped on leagueId + periodKey + pushType — because a cron
+ * tick may be delivered more than once.
+ */
+async function weeklyLoop(env) {
+  if (!env.KV.list) return;
   const now = Date.now();
+  const codes = (await listAllKeys(env, "league:")).map((key) => key.slice("league:".length));
+  if (!codes.length) return;
   // Keyed by the league's competition set, so leagues sharing a set share work.
   const periodsBySet = new Map();
   for (const code of codes) {
     const league = await kvGet(env, `league:${code}`);
-    if (!league?.owner || leagueFixturePlan(league).mode !== "limited") continue;
-    const setKey = leagueCompetitions(league).join("+");
+    if (!league?.owner || !league.code) continue;
+    const setKey = leagueCompetitions(league).join("+") + (isMixedLeague(league) ? ":w" : ":m");
     if (!periodsBySet.has(setKey)) {
       const list = await leagueFixtures(env, league);
       periodsBySet.set(setKey, relevantPeriods(poolByPeriod(list, league), now));
     }
     const { open, live } = periodsBySet.get(setKey);
-    if (!open && !live.length) continue;
     for (const week of live) {
-      const slate = await kvGet(env, slateKey(code, week.period));
+      const slate = await readPublishedSlate(env, code, week.period);
       if (slate) await reconcilePostponements(env, league, slate, week.period, week.fixtures, now);
     }
     if (!open) continue;
-    const slate = await kvGet(env, slateKey(code, open.period));
+    const slate = await readPublishedSlate(env, code, open.period);
     if (slate) {
       await reconcilePostponements(env, league, slate, open.period, open.fixtures, now);
-    } else if (now >= open.firstKickoff - FALLBACK_LEAD_MS) {
-      await applyFallback(env, league, open.period, open.fixtures);
-    } else {
-      await remindHost(env, league, open.period);
+      continue;
     }
+    const rule = leagueWeeklyRule(league);
+    // The fallback deadline is a clear day before the first ELIGIBLE kickoff of
+    // this league's period — the pool it can actually draw on, not the calendar.
+    if (now >= open.firstKickoff - FALLBACK_LEAD_MS) {
+      await applyFallback(env, league, open.period, open.fixtures);
+      continue;
+    }
+    if (isSetAndForget(rule)) {
+      // Rule leagues publish as soon as the pool is open, with no admin step.
+      if (periodIsOpen(open.period, now)) await autoPublish(env, league, open.period, open.fixtures);
+      continue;
+    }
+    if (periodIsOpen(open.period, now)) await remindHost(env, league, open.period);
   }
+}
+
+/**
+ * Has this period's pool opened? A window opens on its own Tuesday morning; a
+ * matchweek has no calendar opening of its own and is open as soon as it is the
+ * next round to kick off, which is the only way `relevantPeriods` reports it.
+ */
+function periodIsOpen(period, nowMs) {
+  const opens = periodOpensAt(period);
+  return opens == null || nowMs >= opens;
 }
 
 const podiumMessage = (league, matchweek, podium) =>
@@ -1228,7 +1591,7 @@ export default {
   async scheduled(_event, env, ctx) {
     ctx.waitUntil(notifyKickoffs(env));
     ctx.waitUntil(autoSettle(env));
-    ctx.waitUntil(customMixMaintenance(env));
+    ctx.waitUntil(weeklyLoop(env));
     ctx.waitUntil(podiumAnnouncements(env));
   },
   async fetch(request, env) {
@@ -1260,6 +1623,7 @@ async function route(request, env) {
       if (path === "/league/kick") return await kickMember(env, body);
       if (path === "/league/nick") return await updateLeagueNick(env, body);
       if (path === "/league/slate") return await setSlate(env, body);
+      if (path === "/league/weekly-rule") return await setWeeklyRule(env, body);
       if (path === "/league/custom-mix") return await setCustomMix(env, body);
       if (path === "/account/delete") return await deleteAccount(env, body);
       if (path === "/restore") return await restore(env, body);

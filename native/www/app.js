@@ -18,6 +18,7 @@ const STORAGE = {
   pushToken: "prem_oracle_push_token",
   competition: "prem_oracle_competition",
   mutedCompetitions: "prem_oracle_muted_competitions",
+  leagueStates: "prem_oracle_league_states",
 };
 
 function isNativeApp() {
@@ -39,7 +40,11 @@ const COMPETITIONS = {
   ELC: { code: "ELC", name: "EFL Championship", short: "Championship", chip: "EFLC", rounds: 46, data: "data/fixtures-elc.json" },
 };
 const DEFAULT_COMPETITION = "PL";
-const MIN_FIXTURE_LIMIT = 3;
+// v1.5 §9: ONE validation path for the weekly count — 1 to 20, default 6,
+// floor 1. Mirrors worker/src/competitions.js; nothing re-imposes another band.
+const MIN_FIXTURE_COUNT = 1;
+const MAX_FIXTURE_COUNT = 20;
+const DEFAULT_FIXTURE_COUNT = 6;
 
 // Single flag gating Championship visibility. Flipped on once the v1.3 parity
 // gates pass; until then the Championship is invisible to members even though
@@ -189,8 +194,19 @@ let leagueCodes = readJSON(STORAGE.leagues, []);
 let leagueNames = readJSON(STORAGE.leagueNames, {});
 let activeLeague = localStorage.getItem(STORAGE.activeLeague) || leagueCodes[0] || "";
 let leagueState = null;
+// Last known /state for every league this device plays, so switching leagues
+// paints from memory instead of waiting on the network. Seeded from
+// localStorage at boot, which is what makes the FIRST switch of a session fast
+// too. Never a source of truth: every read is followed by a background refresh.
+let leagueStates = readJSON(STORAGE.leagueStates, {});
 let leagueTab = "matchday";
-let selectedMatchday = null;
+// The period the round view is showing. A matchweek number for a single-
+// competition league, a window key for a mixed one — the same period abstraction
+// the picker, the nudges and the Schedule tab all inherit from.
+let selectedPeriod = null;
+// The numeric matchweek, where the league actually has one. Null for a mixed
+// league, which runs on windows and has no matchweek numbering to report.
+const selectedMatchday = () => (Number(selectedPeriod) || null);
 let roundState = null;
 let matchdayPickerOpen = false;
 let busyMatch = "";
@@ -300,6 +316,9 @@ async function hydrateIdentity() {
       if (!leagueCodes.includes(activeLeague)) setActiveLeague(leagueCodes[0] || "", false);
     }
     if (activeLeague) await loadLeagueState();
+    // Now that the league and its period are known, the launch tree can answer
+    // properly — a cold install had nothing to go on the first time round.
+    applyLaunchBranch();
     await loadKnownLeagueNames();
     await syncUserPicks();
   } catch {
@@ -341,7 +360,13 @@ const competitionOfFixture = (id) =>
 
 // --- Your Week --------------------------------------------------------------
 // Premier League matchweeks and Championship rounds never align, so a league
-// drawing on both runs on its own Monday-to-Sunday window instead.
+// drawing on both runs on its own calendar window instead.
+//
+// The window is TUESDAY to MONDAY (v1.5 §9), mirroring worker/src/competitions.js.
+// It opens on Tuesday morning once Monday night football has settled the round
+// before it, and closes at Monday midnight — which keeps a whole round on one
+// side of the boundary, and keeps a Champions League Tuesday and Wednesday in
+// ONE window rather than two.
 
 function windowKeyFor(value) {
   const date = new Date(value);
@@ -350,10 +375,11 @@ function windowKeyFor(value) {
     timeZone: "Europe/London", year: "numeric", month: "2-digit", day: "2-digit", weekday: "short",
   }).formatToParts(date);
   const byType = Object.fromEntries(parts.map((part) => [part.type, part.value]));
-  const offset = { Mon: 0, Tue: 1, Wed: 2, Thu: 3, Fri: 4, Sat: 5, Sun: 6 }[byType.weekday];
+  // Offsets back to the window's opening Tuesday; Monday is six days in.
+  const offset = { Tue: 0, Wed: 1, Thu: 2, Fri: 3, Sat: 4, Sun: 5, Mon: 6 }[byType.weekday];
   if (offset == null) return null;
-  const monday = new Date(Date.UTC(Number(byType.year), Number(byType.month) - 1, Number(byType.day) - offset));
-  return `w${monday.toISOString().slice(0, 10)}`;
+  const tuesday = new Date(Date.UTC(Number(byType.year), Number(byType.month) - 1, Number(byType.day) - offset));
+  return `w${tuesday.toISOString().slice(0, 10)}`;
 }
 
 const isWindowKey = (key) => /^w\d{4}-\d{2}-\d{2}$/.test(String(key || ""));
@@ -368,13 +394,35 @@ function windowLabel(key) {
   return `${fmt(start, start.getUTCMonth() !== end.getUTCMonth())} – ${fmt(end, true)}`;
 }
 
-/** The period a fixture belongs to for the active league. */
+/**
+ * THE period key, app-side. Everything with a weekly beat reads it from here —
+ * the Next tab, the Schedule tab's grouping and the host picker all inherit one
+ * definition rather than each deciding what a week is.
+ */
 const periodOfFixture = (fixture) =>
   (isMixedActive() ? windowKeyFor(fixture?.startAt) : fixture?.matchday == null ? null : String(fixture.matchday));
 
-/** Human label for a period: "Matchweek 7" or "Mon 10 – Sun 16 Aug". */
+/** Human label for a period: "Matchweek 7" or "Tue 11 – Mon 17 Aug". */
 const periodLabel = (period) =>
   (isWindowKey(period) ? windowLabel(period) : `Matchweek ${period}`);
+
+/** Chronological order for periods: window keys as strings, matchweeks as numbers. */
+const comparePeriods = (a, b) => {
+  const numeric = Number(a) - Number(b);
+  return Number.isNaN(numeric) ? String(a).localeCompare(String(b)) : numeric;
+};
+
+/** Every period in the loaded fixture list, in order. */
+function periodsInOrder() {
+  return [...new Set(fixtures.map(periodOfFixture).filter((key) => key != null))].sort(comparePeriods);
+}
+
+/** The earliest period that has not finished kicking off. */
+function currentPeriodKey() {
+  const now = Date.now();
+  const upcoming = fixtures.find((fixture) => Date.parse(fixture.startAt || "") > now);
+  return periodOfFixture(upcoming || fixtures[fixtures.length - 1]) ?? periodsInOrder()[0] ?? null;
+}
 
 // Which competition the fixtures currently in memory belong to. Compared
 // against the active league rather than against the last remembered value,
@@ -398,9 +446,11 @@ async function loadLeagueState() {
     leagueState = await api(`/state?code=${encodeURIComponent(activeLeague)}&uid=${encodeURIComponent(uid())}`);
     if (rememberCompetition(leagueState.competitions || leagueState.competition)) await loadFixtures();
     saveLeagueName(leagueState.code, leagueState.name);
+    cacheLeagueState(leagueState);
   } catch (error) {
     roundState = null;
     if (/league not found/i.test(error.message)) {
+      forgetLeagueState(activeLeague);
       removeStoredLeague(activeLeague);
       if (activeLeague) return loadLeagueState();
       leagueState = null;
@@ -410,17 +460,22 @@ async function loadLeagueState() {
     return;
   }
   if (leagueSupportsRounds(leagueState)) {
-    if (selectedMatchday == null) selectedMatchday = leagueState.currentMatchday || 38;
-    if (leagueTab === "matchday") await loadRoundState();
+    if (selectedPeriod == null) selectedPeriod = leagueState.currentPeriod ?? currentPeriodKey();
+    // The round table is a SECOND /state call. Paint the season state we already
+    // hold rather than holding the whole screen back for it.
+    if (leagueTab === "matchday") {
+      render();
+      await loadRoundState();
+    }
   } else {
     leagueTab = "season"; // Old worker cache: fall back to the season-only UI.
   }
 }
 
 async function loadRoundState() {
-  if (!activeLeague || !API || selectedMatchday == null) { roundState = null; return; }
+  if (!activeLeague || !API || selectedPeriod == null) { roundState = null; return; }
   try {
-    roundState = await api(`/state?code=${encodeURIComponent(activeLeague)}&md=${selectedMatchday}`);
+    roundState = await api(`/state?code=${encodeURIComponent(activeLeague)}&period=${encodeURIComponent(selectedPeriod)}`);
   } catch (error) {
     roundState = { error: error.message };
   }
@@ -430,10 +485,53 @@ async function loadKnownLeagueNames() {
   if (!API || !leagueCodes.length) return;
   const missingCodes = leagueCodes.filter((code) => !leagueNames[code] && code !== leagueState?.code);
   if (!missingCodes.length) return;
-  const states = await Promise.allSettled(missingCodes.map((code) => api(`/state?code=${encodeURIComponent(code)}`)));
+  const states = await Promise.allSettled(missingCodes.map((code) => api(`/state?code=${encodeURIComponent(code)}&uid=${encodeURIComponent(uid())}`)));
   states.forEach((result) => {
-    if (result.status === "fulfilled") saveLeagueName(result.value.code, result.value.name);
+    if (result.status !== "fulfilled") return;
+    saveLeagueName(result.value.code, result.value.name);
+    // These responses are full season states — cache them rather than throw
+    // away everything but the name.
+    cacheLeagueState(result.value);
   });
+}
+
+/**
+ * Caches one league's season state. Trimmed to the leagues this device is
+ * actually in, so a left or deleted league cannot linger in storage.
+ */
+function cacheLeagueState(state) {
+  if (!state?.code || state.error) return;
+  leagueStates = { ...leagueStates, [state.code]: state };
+  const kept = Object.fromEntries(Object.entries(leagueStates).filter(([code]) => leagueCodes.includes(code)));
+  leagueStates = kept;
+  try {
+    localStorage.setItem(STORAGE.leagueStates, JSON.stringify(kept));
+  } catch {
+    // A full quota must never break switching; the in-memory cache still works.
+  }
+}
+
+function forgetLeagueState(code) {
+  if (!code || !(code in leagueStates)) return;
+  const { [code]: _gone, ...rest } = leagueStates;
+  leagueStates = rest;
+  try { localStorage.setItem(STORAGE.leagueStates, JSON.stringify(rest)); } catch { /* see above */ }
+}
+
+/**
+ * Warms the cache for every league the viewer is NOT currently looking at, so
+ * the first tap on another pill is already a cache hit. Fire-and-forget: it
+ * renders nothing and its failures are silent.
+ */
+async function prefetchLeagueStates() {
+  if (!API) return;
+  const others = leagueCodes.filter((code) => code !== activeLeague);
+  if (!others.length) return;
+  await Promise.allSettled(others.map(async (code) => {
+    const state = await api(`/state?code=${encodeURIComponent(code)}&uid=${encodeURIComponent(uid())}`);
+    cacheLeagueState(state);
+    saveLeagueName(state.code, state.name);
+  }));
 }
 
 function saveLeagueName(code, name) {
@@ -460,12 +558,24 @@ function removeStoredLeague(code) {
   if (activeLeague === code) setActiveLeague(leagueCodes[0] || "", false);
 }
 
+/**
+ * Switches league. The pill activates and the table paints on the same tick as
+ * the tap: the cached season state is good enough to look at, and the network
+ * refresh happens behind it. Only a league we have never seen shows a loading
+ * state, and only for as long as its first /state takes.
+ */
 function setActiveLeague(code, refresh = true) {
   activeLeague = code || "";
-  selectedMatchday = null;
+  selectedPeriod = null;
   roundState = null;
   if (activeLeague) localStorage.setItem(STORAGE.activeLeague, activeLeague);
   else localStorage.removeItem(STORAGE.activeLeague);
+  // Paint from cache first — this is the whole point.
+  leagueState = activeLeague ? (leagueStates[activeLeague] || null) : null;
+  if (leagueState && leagueSupportsRounds(leagueState)) {
+    selectedPeriod = leagueState.currentPeriod ?? currentPeriodKey();
+  }
+  render();
   if (refresh) loadLeagueState().then(render);
 }
 
@@ -605,10 +715,20 @@ function countPhrase(count, word) {
 }
 
 function hero() {
+  // A mixed league has no season length and no single fixture total — it runs on
+  // calendar windows — so it is described by its competitions rather than given
+  // a count that would have to be invented.
+  const rounds = seasonRounds();
+  const eyebrow = rounds == null
+    ? `${escapeHTML(competitionName())} 2026/27`
+    : `${escapeHTML(competitionName())} 2026/27 · ${countPhrase(rounds, "Matchweeks")}`;
+  const scope = rounds == null
+    ? "Every fixture across your competitions."
+    : `All ${countPhrase(rounds * (activeCompetition() === "ELC" ? 12 : 10), "fixtures")}.`;
   return `<section class="hero">
-    <span class="eyebrow">${escapeHTML(competitionName())} 2026/27 · ${countPhrase(seasonRounds(), "Matchweeks")}</span>
+    <span class="eyebrow">${eyebrow}</span>
     <h1>Predict the scores.</h1>
-    <p>All ${countPhrase(seasonRounds() * (activeCompetition() === "ELC" ? 12 : 10), "fixtures")}. Private leagues. Picks lock at kick-off.</p>
+    <p>${scope} Private leagues. Picks lock at kick-off.</p>
     <div class="countdown">⚽ <span>${daysToStart()}</span></div>
   </section>`;
 }
@@ -891,6 +1011,36 @@ function matchCard(match) {
   </article>`;
 }
 
+/**
+ * The Schedule's grouping — keyed on the SAME period abstraction as everything
+ * else, so a mixed league sees its own Tuesday-to-Monday windows rather than a
+ * matchweek number that means nothing to it.
+ *
+ * The current period opens; every future period is collapsed but expandable.
+ * None of them is hidden.
+ */
+function groupedPeriods(list, currentPeriod = null) {
+  const current = currentPeriod ?? currentPeriodKey();
+  return [...new Set(list.map(periodOfFixture).filter((key) => key != null))]
+    .sort(comparePeriods)
+    .map((period) => {
+      const matches = list.filter((fixture) => periodOfFixture(fixture) === period);
+      const key = `md-${period}`;
+      const firstDate = matches[0]?.date;
+      // Once the viewer has opened or closed anything, their choice wins; until
+      // then the current week is the one that starts open.
+      const open = openScheduleDates.has(key) || (!openScheduleDates.size && String(period) === String(current));
+      return `<details class="day-card" data-day-card="${escapeHTML(key)}" ${open ? "open" : ""}>
+        <summary>
+          <div><strong>${escapeHTML(periodLabel(period))}</strong><span>${firstDate ? dateLabel(firstDate, true) : ""}</span></div>
+          <span>${countPhrase(matches.length, matches.length === 1 ? "fixture" : "fixtures")}</span>
+        </summary>
+        <div class="day-body">${matches.map(matchCard).join("")}</div>
+      </details>`;
+    }).join("");
+}
+
+// My Picks still groups by matchweek, which is what it has always done.
 function groupedMatchdays(list) {
   return [...new Set(list.map((fixture) => fixture.matchday))].map((matchday) => {
     const matches = list.filter((fixture) => fixture.matchday === matchday);
@@ -926,7 +1076,14 @@ function customMixActive() {
   return !!leagueState && !leagueState.error && leagueState.customMix === true;
 }
 
-// The slate governing a matchweek, or null while the host has yet to set one.
+/** True when the league publishes itself and needs no host step at all. */
+function setAndForgetActive() {
+  return !!leagueState && !leagueState.error &&
+    (leagueState.setAndForget === true || (leagueState.weeklyRule && leagueState.weeklyRule.method !== "manual"));
+}
+
+// The PUBLISHED slate governing a period, or null while the league is still
+// waiting on one. The worker never reports a draft here.
 function slateForPeriod(period) {
   const slate = leagueState?.currentSlate;
   return slate && String(slate.period ?? slate.matchweek) === String(period) ? slate : null;
@@ -936,18 +1093,30 @@ function hostNickname() {
   return (leagueState?.table || []).find((row) => row.uid === leagueState?.owner)?.nick || "your host";
 }
 
-// True while a Custom Mix league is waiting on its host for this matchweek.
+// True while a league is waiting on a published slate for this period. Under
+// v1.5 that is every league, not just the ones running Custom Mix.
 function awaitingSlate(period) {
-  return customMixActive() && String(leagueState?.currentPeriod) === String(period) && !slateForPeriod(period);
+  if (!leagueState || leagueState.error) return false;
+  return String(leagueState.currentPeriod) === String(period) && !slateForPeriod(period);
 }
 
 function slateNotice(period) {
   if (!awaitingSlate(period)) return "";
-  if (isLeagueHost()) {
+  if (isLeagueHost() && !setAndForgetActive()) {
+    // The copy splits on what the league runs on: a single-competition league
+    // has a real matchweek number to name, a windowed one does not.
+    const headline = isWindowKey(period)
+      ? `Set this week's fixtures for ${escapeHTML(leagueState.name)}`
+      : `Matchweek ${escapeHTML(period)} is open — set your fixtures`;
+    const draft = leagueState?.currentDraft;
     return `<div class="slate-notice slate-notice-host">
-      <p>You pick this week's fixtures for ${escapeHTML(leagueState.name)}.</p>
-      <button class="primary wide" type="button" data-open-picker="${escapeHTML(period)}">Pick fixtures for ${escapeHTML(periodLabel(period))}</button>
+      <p>${headline}</p>
+      ${draft ? `<p class="slate-draft-note">You have a draft of ${countPhrase(draft.count, draft.count === 1 ? "fixture" : "fixtures")} saved.</p>` : ""}
+      <button class="primary wide" type="button" data-open-picker="${escapeHTML(period)}">${draft ? "Finish your picks" : `Pick fixtures for ${escapeHTML(periodLabel(period))}`}</button>
     </div>`;
+  }
+  if (setAndForgetActive()) {
+    return `<div class="slate-notice"><p>This week's fixtures publish automatically — nothing for anyone to do.</p></div>`;
   }
   return `<div class="slate-notice"><p>Waiting for ${escapeHTML(hostNickname())} to set this week's fixtures</p></div>`;
 }
@@ -957,50 +1126,146 @@ function slateSummary(slate) {
   return `<p class="slate-summary">${escapeHTML(competitionName())} · ${countPhrase(slate.count, slate.count === 1 ? "fixture" : "fixtures")} this week</p>`;
 }
 
-function todayView() {
-  const today = londonDateKey();
-  let dayMatches = fixtures.filter((fixture) => fixture.date === today);
-  let title = "Today's predictions";
-  let subtitle = dateLabel(today, true);
-  if (!dayMatches.length) {
-    const md = nextMatchday();
-    dayMatches = fixtures.filter((fixture) => fixture.matchday === md);
-    title = md === 1 ? "Opening matchweek" : "Next matchweek";
-    subtitle = `Matchweek ${md}`;
-  }
-  const homeMatchday = dayMatches[0]?.matchday ?? nextMatchday();
-  const homePeriod = leagueState?.currentPeriod ?? String(homeMatchday);
-  const slate = slateForPeriod(homePeriod);
-  const waiting = awaitingSlate(homePeriod);
-  if (slate) {
-    const chosen = new Set(slate.fixtureIds.map(String));
-    dayMatches = dayMatches.filter((fixture) => chosen.has(String(fixture.id)));
-  }
-  const roundFixtures = slate
-    ? fixtures.filter((fixture) => slate.fixtureIds.map(String).includes(String(fixture.id)))
-    : fixtures.filter((fixture) => fixture.matchday === homeMatchday);
-  const pickedCount = roundFixtures.filter((fixture) => picks[fixture.id]).length;
-  const progress = roundFixtures.length && !waiting
-    ? `<p class="pick-progress">You've picked ${pickedCount} of ${roundFixtures.length}</p>`
-    : "";
-  return `${hero()}${installNotice()}${inviteCode && !leagueCodes.includes(inviteCode) ? `<div class="notice invite-notice"><span class="notice-icon">🏆</span><div><strong>League invitation: ${inviteCode}</strong><p>Open the League tab to join.</p></div></div>` : ""}${fixtureNotice()}
-    <div class="section-head">
-      <div><span class="eyebrow">Next up · <span class="nowrap">Game ${homeMatchday} of ${seasonRounds()}</span></span><h2>${title}</h2><p>${subtitle}</p>${slateSummary(slate)}${progress}</div>
-    </div>
-    ${slateNotice(homePeriod)}
-    ${waiting ? "" : dayMatches.map(matchCard).join("")}`;
+// --- The launch decision tree ----------------------------------------------
+// v1.5 §9(7). A blank Next tab is a design gap, not a state, so on every launch
+// the app asks four questions in order and always lands somewhere with content.
+
+/** The fixtures this viewer owes a pick on, in the active league's current period. */
+function picksDue() {
+  const period = leagueState?.currentPeriod ?? currentPeriodKey();
+  const slate = slateForPeriod(period);
+  if (!slate) return [];
+  const chosen = new Set(slate.fixtureIds.map(String));
+  return fixtures.filter((fixture) => chosen.has(String(fixture.id)) && matchOpen(fixture));
 }
 
+/**
+ * Which branch the launch lands on:
+ *   picks      (a) something to pick right now  -> Next
+ *   awaiting   (b) a league, but no published slate yet -> Schedule
+ *   onboarding (c) no league at all -> Next, with the two CTAs
+ *   preseason  (d) nothing is pickable yet -> Next, with proof of life
+ */
+function launchBranch() {
+  if (!leagueCodes.length) return "onboarding";
+  if (picksDue().length) return "picks";
+  const period = leagueState?.currentPeriod ?? currentPeriodKey();
+  if (slateForPeriod(period)) return "picks";           // published, all picked already
+  // Pre-season is "nothing is pickable yet", which is a question about the
+  // fixture pool rather than about the calendar: a league whose current period
+  // has no fixtures at all has nothing to await, only fixtures to show.
+  const poolThisPeriod = period == null
+    ? []
+    : fixtures.filter((fixture) => periodOfFixture(fixture) === String(period));
+  if (!fixtures.length || !poolThisPeriod.length) return "preseason";
+  return "awaiting";
+}
+
+// True once the viewer has chosen a tab themselves. The launch tree is only
+// ever allowed to move them before that.
+let launchRouted = false;
+
+/**
+ * Sets the opening tab from the branch.
+ *
+ * Called again as league state and fixtures arrive, because on a cold install
+ * the first evaluation has neither and can only answer "preseason". Re-running
+ * it is what stops a first run landing somewhere the second run wouldn't — and
+ * it stops the moment the viewer taps a tab of their own.
+ */
+function applyLaunchBranch() {
+  if (launchRouted) return;
+  currentView = launchBranch() === "awaiting" ? "schedule" : "today";
+}
+
+function onboardingState() {
+  return `<div class="section-head"><div><span class="eyebrow">Welcome to Prem Oracle</span><h2>Play against your mates</h2></div></div>
+    <div class="launch-card">
+      <p>Set up a private league, choose your competitions and how each week works, then share the code.</p>
+      <button class="primary wide" type="button" data-view="league" data-launch-create>Create a league</button>
+      <button class="secondary wide" type="button" data-view="league">Join a league</button>
+    </div>`;
+}
+
+/** Proof of life before anything is pickable: real fixtures, badges and dates. */
+function preseasonState() {
+  const upcoming = fixtures
+    .filter((fixture) => Date.parse(fixture.startAt || "") > Date.now())
+    .slice(0, 8);
+  return `<div class="section-head">
+      <div><span class="eyebrow">${escapeHTML(competitionName())} 2026/27</span><h2>Coming up</h2>
+      <p>Fixtures are loading for the new season. Picks open when your league's weekly slate is published.</p></div>
+    </div>
+    ${upcoming.length
+      ? `<div class="proof-of-life">${upcoming.map(preseasonRow).join("")}</div>`
+      : `<div class="empty"><strong>Fixtures on their way</strong><p>Pull down in a moment — the season list is still loading.</p></div>`}`;
+}
+
+function preseasonRow(match) {
+  const code = competitionOfFixture(match.id) || DEFAULT_COMPETITION;
+  return `<div class="proof-row">
+    <span class="proof-teams">${teamBadge(match.player1)}<em>v</em>${teamBadge(match.player2)}</span>
+    <span class="comp-chip comp-chip-${code.toLowerCase()}">${escapeHTML(competitionMeta(code).chip)}</span>
+    <span class="proof-date">${escapeHTML(matchTime(match))}</span>
+  </div>`;
+}
+
+/**
+ * Next: purely "your picks due this week". Not today's card, not the whole
+ * matchweek — the fixtures this viewer's league published and this viewer still
+ * owes a scoreline on.
+ */
+function todayView() {
+  const branch = launchBranch();
+  if (branch === "onboarding") return `${installNotice()}${onboardingState()}`;
+  if (branch === "preseason") return `${hero()}${installNotice()}${preseasonState()}`;
+
+  const period = leagueState?.currentPeriod ?? currentPeriodKey();
+  const slate = slateForPeriod(period);
+  const waiting = awaitingSlate(period);
+  const roundFixtures = slate
+    ? fixtures.filter((fixture) => slate.fixtureIds.map(String).includes(String(fixture.id)))
+    : [];
+  const due = roundFixtures.filter((fixture) => matchOpen(fixture) && !picks[fixture.id]);
+  const pickedCount = roundFixtures.filter((fixture) => picks[fixture.id]).length;
+  const invite = inviteCode && !leagueCodes.includes(inviteCode)
+    ? `<div class="notice invite-notice"><span class="notice-icon">🏆</span><div><strong>League invitation: ${inviteCode}</strong><p>Open the League tab to join.</p></div></div>`
+    : "";
+
+  const body = waiting || !slate
+    ? `<div class="launch-card"><p>No picks due yet — fixtures will appear here when your host publishes this week's slate.</p></div>`
+    : due.length
+      ? due.map(matchCard).join("")
+      : `<div class="launch-card"><p>All done for ${escapeHTML(periodLabel(period))} — every pick is in. Sit back.</p></div>`;
+
+  return `${installNotice()}${invite}
+    ${leagueSwitcher()}
+    <div class="section-head">
+      <div><span class="eyebrow">Your picks due · ${escapeHTML(periodLabel(period))}</span>
+      <h2>${escapeHTML(leagueState?.name || "This week")}</h2>
+      ${slate ? `<p class="pick-progress">You've picked ${pickedCount} of ${roundFixtures.length}</p>` : ""}${slateSummary(slate)}</div>
+    </div>
+    ${slateNotice(period)}
+    ${body}`;
+}
+
+/**
+ * Schedule: opens on the current week and keeps every future week COLLAPSED but
+ * expandable. Nothing is ever hidden — a week the host has not published yet is
+ * still a week the league can see coming.
+ */
 function scheduleView() {
-  const filtered = fixtures.filter((fixture) => matchdayFilter === "all" || String(fixture.matchday) === String(matchdayFilter));
-  const matchdays = [...new Set(fixtures.map((fixture) => fixture.matchday))];
-  return `${hero()}
-    <div class="section-head"><div><span class="eyebrow">Full season</span><h2>Prediction schedule</h2></div></div>
+  const current = leagueState?.currentPeriod ?? currentPeriodKey();
+  const filtered = fixtures.filter((fixture) => matchdayFilter === "all" || String(periodOfFixture(fixture)) === String(matchdayFilter));
+  const periods = periodsInOrder();
+  const awaiting = leagueCodes.length && current != null && !slateForPeriod(current);
+  return `<div class="section-head"><div><span class="eyebrow">Full season</span><h2>Prediction schedule</h2></div></div>
+    ${awaiting ? `<div class="launch-card"><p>No picks due yet — fixtures will appear here when your host publishes this week's slate.</p></div>` : ""}
     <div class="filters">
       <button class="filter${matchdayFilter === "all" ? " active" : ""}" data-filter="all">All rounds</button>
-      ${matchdays.map((value) => `<button class="filter${String(matchdayFilter) === String(value) ? " active" : ""}" data-filter="${value}">MW ${value}</button>`).join("")}
+      ${periods.map((value) => `<button class="filter${String(matchdayFilter) === String(value) ? " active" : ""}" data-filter="${escapeHTML(value)}">${isWindowKey(value) ? escapeHTML(windowLabel(value)) : `MW ${value}`}</button>`).join("")}
     </div>
-    ${groupedMatchdays(filtered)}`;
+    ${groupedPeriods(filtered, current)}`;
 }
 
 function picksView() {
@@ -1041,6 +1306,14 @@ function movementBadge(row) {
   return `<span class="movement movement-flat" aria-label="No position change">-</span>`;
 }
 
+/** Every competition a league plays, named. A mixed league is both, not the first. */
+function leagueCompetitionNames(state) {
+  const codes = Array.isArray(state?.competitions) && state.competitions.length
+    ? state.competitions
+    : [state?.competition || DEFAULT_COMPETITION];
+  return codes.map((code) => competitionMeta(code).name).join(" + ");
+}
+
 function leagueTableText(state) {
   const updated = new Intl.DateTimeFormat("en-GB", {
     day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", timeZone: "Europe/London",
@@ -1051,7 +1324,7 @@ function leagueTableText(state) {
     const marker = movement > 0 ? `▲${movement}` : movement < 0 ? `▼${Math.abs(movement)}` : "-";
     return `${rank}. ${row.nick} ${marker} - ${row.pts} pts (${row.exact} exact)${row.wins ? ` 🏆x${row.wins}` : ""}`;
   });
-  return `Prem Oracle ${competitionMeta(state.competition || DEFAULT_COMPETITION).name} table - ${state.name}\nUpdated ${updated}\n\n${rows.join("\n")}\n\nJoin on the web or in the app with code ${state.code}`;
+  return `Prem Oracle ${leagueCompetitionNames(state)} table - ${state.name}\nUpdated ${updated}\n\n${rows.join("\n")}\n\nJoin on the web or in the app with code ${state.code}`;
 }
 
 function winnerNames(round) {
@@ -1071,27 +1344,34 @@ function podiumShareLines(round) {
 }
 
 function roundShareText(state, round) {
-  const competition = competitionMeta(state.competition || DEFAULT_COMPETITION).name;
+  const competition = leagueCompetitionNames(state);
+  const week = round.matchday != null ? `Matchweek ${round.matchday}` : periodLabel(round.period);
   const head = round.complete
-    ? `🏆 ${competition} Matchweek ${round.matchday}: won by ${winnerNames(round) || "nobody"}`
-    : `🏆 ${competition} Matchweek ${round.matchday} · in progress`;
+    ? `🏆 ${competition} ${week}: won by ${winnerNames(round) || "nobody"}`
+    : `🏆 ${competition} ${week} · in progress`;
   const rows = (round.table || []).map((row, index) => `${row.rank || index + 1}. ${row.nick} - ${row.pts} pts (${row.exact} exact)`);
   return `${head}\n\n${podiumShareLines(round)}${rows.join("\n")}\n\nJoin on the web or in the app with code ${state.code}`;
 }
 
 function roundToggle() {
-  const md = selectedMatchday || leagueState?.currentMatchday || 1;
+  const period = selectedPeriod ?? leagueState?.currentPeriod ?? currentPeriodKey();
   return `<div class="round-toggle">
-    <button type="button" class="round-seg${leagueTab === "matchday" ? " active" : ""}" data-round-tab="matchday">Matchweek ${md} ▾</button>
+    <button type="button" class="round-seg${leagueTab === "matchday" ? " active" : ""}" data-round-tab="matchday">${escapeHTML(periodLabel(period))} ▾</button>
     <button type="button" class="round-seg${leagueTab === "season" ? " active" : ""}" data-round-tab="season">Season</button>
   </div>`;
 }
 
 function matchdayPicker() {
   if (!matchdayPickerOpen) return "";
-  const md = selectedMatchday || 1;
-  return `<div class="md-picker" role="group" aria-label="Choose matchweek">${Array.from({ length: seasonRounds() }, (_, i) => i + 1).map((n) =>
-    `<button type="button" class="md-cell${n === md ? " active" : ""}" data-round-md="${n}">${n}</button>`).join("")}</div>`;
+  const current = selectedPeriod ?? currentPeriodKey();
+  // A single-competition league picks a matchweek number; a mixed one picks one
+  // of its own windows. Same control, same abstraction, different labels.
+  const options = isMixedActive()
+    ? periodsInOrder()
+    : Array.from({ length: seasonRounds() || 0 }, (_, i) => String(i + 1));
+  return `<div class="md-picker${isMixedActive() ? " md-picker-wide" : ""}" role="group" aria-label="Choose matchweek">${options.map((value) =>
+    `<button type="button" class="md-cell${String(value) === String(current) ? " active" : ""}" data-round-md="${escapeHTML(value)}">${
+      isWindowKey(value) ? escapeHTML(windowLabel(value)) : value}</button>`).join("")}</div>`;
 }
 
 function fixtureHasResult(match) {
@@ -1101,6 +1381,15 @@ function fixtureHasResult(match) {
 }
 
 function seasonBanner(state) {
+  // A mixed league has no matchweek numbering and no season length, so it is
+  // told where it is in its own terms rather than being given "of null".
+  if (state.mixed || seasonRounds() == null) {
+    const period = state.currentPeriod;
+    const detail = period == null
+      ? "season complete"
+      : state.currentMatchdayHasResults ? `${periodLabel(period)} in progress` : `next up: ${periodLabel(period)}`;
+    return `<div class="round-banner"><strong>Season 2026/27</strong><span>${escapeHTML(detail)}</span></div>`;
+  }
   const played = state.currentMatchday == null ? seasonRounds() : Math.max(0, state.currentMatchday - 1);
   const currentMatchdayHasResults = state.currentMatchdayHasResults ||
     fixtures.some((fixture) => fixture.matchday === state.currentMatchday && fixtureHasResult(fixture));
@@ -1151,14 +1440,21 @@ function podiumSteps(round) {
 
 function roundBanner(round) {
   const md = round.matchday;
+  // A "game N of the season" placement only means something where the league
+  // has a season length at all.
+  // A mixed league runs on windows, so it is placed by its window instead.
+  const place = md != null && seasonRounds() != null
+    ? `<span class="nowrap">Game ${md} of ${seasonRounds()} ·</span>`
+    : `<span class="nowrap">${escapeHTML(periodLabel(round.period))} ·</span>`;
+  const title = md != null ? `Matchweek ${md}` : periodLabel(round.period);
   if (round.complete) {
     const names = winnerNames(round);
-    return `<div class="round-banner is-success"><strong>Matchweek ${md} complete — won by ${names ? escapeHTML(names) : "nobody"} 🏆</strong><span><span class="nowrap">Game ${md} of ${seasonRounds()} ·</span>all fixtures settled</span>${roundSlateLine(round)}${podiumSteps(round)}</div>`;
+    return `<div class="round-banner is-success"><strong>${escapeHTML(title)} complete — won by ${names ? escapeHTML(names) : "nobody"} 🏆</strong><span>${place}all fixtures settled</span>${roundSlateLine(round)}${podiumSteps(round)}</div>`;
   }
   if (!round.status || round.status === "in progress") {
-    return `<div class="round-banner"><strong><span class="nowrap">Game ${md} of ${seasonRounds()} ·</span>in progress</strong>${roundSlateLine(round)}</div>`;
+    return `<div class="round-banner"><strong>${place}in progress</strong>${roundSlateLine(round)}</div>`;
   }
-  return `<div class="round-banner is-pending"><strong><span class="nowrap">Game ${md} of ${seasonRounds()} ·</span>${escapeHTML(round.status)}</strong>${roundSlateLine(round)}</div>`;
+  return `<div class="round-banner is-pending"><strong>${place}${escapeHTML(round.status)}</strong>${roundSlateLine(round)}</div>`;
 }
 
 function roundTableHtml(round) {
@@ -1359,9 +1655,7 @@ async function shareLeagueTableGraphic(state) {
 
 // --- Host Fixture Picker ---------------------------------------------------
 
-const SLATE_MIN = 6;
-const SLATE_MAX = 10;
-const SURPRISE_COUNT = 8;
+const SURPRISE_COUNT = DEFAULT_FIXTURE_COUNT;
 
 /** The eligible pool: selected competitions, inside the current period. */
 function pickerFixtures() {
@@ -1371,18 +1665,27 @@ function pickerFixtures() {
       String(a.id).localeCompare(String(b.id)));
 }
 
+/** The worker's pre-load for the period the picker is open on, if it has one. */
+function pickerPreload() {
+  const preload = leagueState?.preload || roundState?.preload;
+  return preload && String(preload.period ?? pickerPeriod) === String(pickerPeriod) ? preload : null;
+}
+
 /**
- * The week's bounds. The league's configured count is a default the picker
- * opens on, not a cap — the host can take more or fewer any given week, down to
- * three and up to whatever the pool holds.
+ * The week's bounds. v1.5 §9: ONE validation path — the league's count is the
+ * default the picker opens on, the floor is one fixture and the ceiling is the
+ * pool. It is never a cap on the week the host actually publishes.
  */
 function pickerBounds(poolSize) {
-  const mode = leagueState?.fixtureMode || "all";
-  if (mode !== "limited") return { mode: "all", default: poolSize, min: poolSize, max: poolSize, capped: false };
-  const min = Math.min(MIN_FIXTURE_LIMIT, poolSize);
-  const preferred = leagueState?.fixtureLimit ?? SURPRISE_COUNT;
+  const preload = pickerPreload();
+  const rule = leagueState?.weeklyRule;
+  const preferred = preload?.count
+    ?? rule?.count
+    ?? leagueState?.fixtureLimit
+    ?? DEFAULT_FIXTURE_COUNT;
+  const min = Math.min(MIN_FIXTURE_COUNT, poolSize);
   return {
-    mode: "limited",
+    mode: rule?.method || (leagueState?.fixtureMode === "limited" ? "manual" : "allEligible"),
     default: Math.max(min, Math.min(preferred, poolSize)),
     min,
     max: poolSize,
@@ -1440,19 +1743,30 @@ function surpriseSelection(list, wanted) {
   return new Set(chosen.slice(0, target).map((fixture) => String(fixture.id)));
 }
 
+// What the picker carried over, and what it could not: a fixture the host had
+// drafted that has since been postponed or rescheduled out of the week is named
+// rather than silently missing.
+let pickerUnavailable = [];
+
 function openFixturePicker(period) {
   pickerOpen = true;
   pickerPeriod = String(period);
-  pickerSelection = new Set();
   pickerMode = "custom";
   pickerConfirmOpen = false;
   pickerBusy = false;
+  // The picker opens on the host's own draft where they have one, and on last
+  // week's settings where they don't.
+  const preload = pickerPreload();
+  const available = new Set(pickerFixtures().map((fixture) => String(fixture.id)));
+  pickerSelection = new Set((preload?.fixtureIds || []).map(String).filter((id) => available.has(id)));
+  pickerUnavailable = preload?.unavailable || [];
 }
 
 function closeFixturePicker() {
   pickerOpen = false;
   pickerConfirmOpen = false;
   pickerSelection = new Set();
+  pickerUnavailable = [];
   pickerPeriod = null;
   pickerBusy = false;
 }
@@ -1480,14 +1794,29 @@ function pickerConfirm(total) {
   const count = pickerSelection.size;
   return `<div class="picker-confirm-scrim">
     <div class="picker-confirm" role="dialog" aria-modal="true" aria-label="Confirm fixtures">
-      <strong>${pickerMode === "full" ? `Use all ${total} fixtures?` : `Set these ${count} fixtures?`}</strong>
+      <strong>${pickerMode === "full" ? `Publish all ${total} fixtures?` : `Publish these ${count} fixtures?`}</strong>
       <p>Your league cannot change them after this.</p>
       <div class="picker-confirm-actions">
         <button class="secondary" type="button" data-picker-cancel ${pickerBusy ? "disabled" : ""}>Back</button>
-        <button class="primary" type="button" data-picker-commit ${pickerBusy ? "disabled" : ""}>${pickerBusy ? "Setting…" : "Set fixtures"}</button>
+        <button class="primary" type="button" data-picker-commit ${pickerBusy ? "disabled" : ""}>${pickerBusy ? "Publishing…" : "Publish"}</button>
       </div>
     </div>
   </div>`;
+}
+
+const UNAVAILABLE_REASON = {
+  postponed: "postponed",
+  voided: "called off",
+  notInPool: "no longer in this week",
+};
+
+/** Names every fixture that could not carry over, and why. Never a silent loss. */
+function pickerUnavailableNote() {
+  if (!pickerUnavailable.length) return "";
+  const listed = pickerUnavailable
+    .map((entry) => `${escapeHTML(entry.label || entry.id)} (${UNAVAILABLE_REASON[entry.reason] || "unavailable"})`)
+    .join(", ");
+  return `<p class="picker-note picker-note-warn">Dropped from your last selection: ${listed}. Pick a replacement if you want one.</p>`;
 }
 
 // The picker is mounted on <body>, not inside #app. A position:fixed element
@@ -1528,9 +1857,9 @@ function fixturePickerView() {
 
   const notes = [];
   if (bounds.capped) {
-    notes.push(`Only ${countPhrase(list.length, list.length === 1 ? "fixture" : "fixtures")} on this week — fewer than your usual ${leagueState?.fixtureLimit ?? SURPRISE_COUNT}.`);
+    notes.push(`Only ${countPhrase(list.length, list.length === 1 ? "fixture" : "fixtures")} on this week — fewer than your usual ${bounds.default}.`);
   }
-  if (bounds.mode === "limited" && !bounds.capped) {
+  if (!bounds.capped && bounds.max > bounds.min) {
     notes.push(`Your league usually plays ${countPhrase(bounds.default, "fixtures")} — take more or fewer this week if you like.`);
   }
   if (mixed && present.length === 1) {
@@ -1547,11 +1876,12 @@ function fixturePickerView() {
       <strong>${counter}</strong>
       <button class="picker-dice" type="button" data-picker-surprise>🎲 <span>Surprise me</span></button>
     </div>
+    ${pickerUnavailableNote()}
     ${notes.map((note) => `<p class="picker-note">${note}</p>`).join("")}
     <div class="picker-list">${body}</div>
     <div class="picker-actions">
       <button class="picker-secondary" type="button" data-picker-all>Use all ${list.length} this week</button>
-      <button class="primary wide" type="button" data-picker-set ${ready ? "" : "disabled"}>Set ${count} fixtures</button>
+      <button class="primary wide" type="button" data-picker-set ${ready ? "" : "disabled"}>Publish to league</button>
     </div>
     ${pickerConfirm(list.length)}
   </div>`;
@@ -1603,13 +1933,234 @@ function trophyCabinet(state) {
   </section>`;
 }
 
-/** "Premier League · 8 fixtures/week" — what this league actually includes. */
+// --- Create a league wizard -------------------------------------------------
+// One card, one button. The League screen offers exactly one way in — "Get
+// started" — and the questions arrive one at a time instead of as a form the
+// host has to decode. The old two-form "start a competition" framing is retired.
+
+const WIZARD_STEPS = ["name", "competitions", "rule", "share"];
+
+let wizard = null;
+
+function openWizard() {
+  wizard = {
+    step: "name",
+    name: "",
+    competitions: [availableCompetitions()[0]],
+    method: "manual",
+    scope: null,          // only meaningful for allCompetition
+    count: DEFAULT_FIXTURE_COUNT,
+    confirmSingle: false, // the soft confirm a one-fixture week asks for
+    busy: false,
+    code: "",
+    error: "",
+  };
+}
+
+const closeWizard = () => { wizard = null; };
+
+/** The rule the wizard will send. The scope is always explicit, never inferred. */
+function wizardRule() {
+  const mixed = wizard.competitions.length > 1;
+  const scope = wizard.method === "allCompetition"
+    ? (wizard.scope || wizard.competitions[0])
+    : mixed ? "mixed" : wizard.competitions[0];
+  return { method: wizard.method, competitionScope: scope, count: wizard.count };
+}
+
+const WEEKLY_RULE_LABEL = {
+  manual: "I'll pick each week",
+  allEligible: "All fixtures",
+  random: "Random weekly",
+};
+
+/** The rule options this league can actually offer, given its competitions. */
+function ruleOptions() {
+  const options = [
+    { key: "manual", method: "manual", title: WEEKLY_RULE_LABEL.manual, sub: "You choose the fixtures every week" },
+    { key: "allEligible", method: "allEligible", title: WEEKLY_RULE_LABEL.allEligible, sub: "Every fixture in your competitions counts" },
+  ];
+  for (const code of wizard.competitions) {
+    options.push({
+      key: `all:${code}`,
+      method: "allCompetition",
+      scope: code,
+      title: `All ${competitionMeta(code).short}`,
+      sub: `Every ${competitionMeta(code).short} fixture that week`,
+    });
+  }
+  options.push({
+    key: "random", method: "random", title: WEEKLY_RULE_LABEL.random,
+    sub: `App picks ${wizard.count} random ${wizard.count === 1 ? "fixture" : "fixtures"} each week`,
+  });
+  // A single-competition league would offer "all fixtures" and "all <that
+  // competition>" as the same thing, so only the specific one is shown.
+  return wizard.competitions.length > 1 ? options : options.filter((option) => option.method !== "allEligible");
+}
+
+const wizardOptionSelected = (option) =>
+  option.method === wizard.method &&
+  (option.method !== "allCompetition" || (wizard.scope || wizard.competitions[0]) === option.scope);
+
+function wizardProgress() {
+  const index = WIZARD_STEPS.indexOf(wizard.step);
+  return `<div class="wizard-progress" role="presentation">${WIZARD_STEPS.map((step, position) =>
+    `<span class="wizard-dot${position <= index ? " is-done" : ""}${position === index ? " is-current" : ""}"></span>`
+  ).join("")}</div>`;
+}
+
+function wizardStepName() {
+  return `<span class="eyebrow">Step 1 of 4</span>
+    <h3>Name your league</h3>
+    <p class="wizard-hint">Your mates will see this at the top of the table.</p>
+    <input name="leagueName" maxlength="40" placeholder="Saturday Super 6" value="${escapeHTML(wizard.name)}" data-wizard-name autofocus>
+    <div class="wizard-actions">
+      <button class="primary wide" type="button" data-wizard-next>Next</button>
+    </div>`;
+}
+
+function wizardStepCompetitions() {
+  const codes = availableCompetitions();
+  return `<span class="eyebrow">Step 2 of 4</span>
+    <h3>Choose competitions</h3>
+    <p class="wizard-hint">Tick everything your league should draw fixtures from.</p>
+    <div class="competition-choice" role="group" aria-label="Competitions">
+      ${codes.map((code) => `<label class="competition-option${wizard.competitions.includes(code) ? " is-selected" : ""}">
+        <input type="checkbox" name="competitions" value="${code}" data-wizard-competition="${code}"${wizard.competitions.includes(code) ? " checked" : ""}>
+        <span>${escapeHTML(competitionMeta(code).short)}</span>
+      </label>`).join("")}
+    </div>
+    <div class="wizard-actions">
+      <button class="secondary" type="button" data-wizard-back>Back</button>
+      <button class="primary" type="button" data-wizard-next>Next</button>
+    </div>`;
+}
+
+function wizardStepRule() {
+  const single = wizard.count === 1;
+  return `<span class="eyebrow">Step 3 of 4</span>
+    <h3>Your weekly rule</h3>
+    <p class="wizard-hint">Pick the fixtures yourself each week, or set it and forget it.</p>
+    <div class="rule-choice" role="radiogroup" aria-label="Weekly rule">
+      ${ruleOptions().map((option) => `<button type="button" class="rule-option${wizardOptionSelected(option) ? " is-selected" : ""}"
+        role="radio" aria-checked="${wizardOptionSelected(option)}" data-wizard-rule="${escapeHTML(option.key)}">
+        <strong>${escapeHTML(option.title)}</strong><em>${escapeHTML(option.sub)}</em>
+      </button>`).join("")}
+    </div>
+    <div class="fixture-count" data-fixture-count>
+      <span>Fixtures each week</span>
+      <div class="count-stepper">
+        <button type="button" data-count-step="-1" aria-label="Fewer fixtures">−</button>
+        <b data-count-value>${wizard.count}</b>
+        <button type="button" data-count-step="1" aria-label="More fixtures">＋</button>
+      </div>
+      <input type="hidden" name="fixtureLimit" value="${wizard.count}">
+    </div>
+    ${single ? `<label class="wizard-confirm">
+      <input type="checkbox" data-wizard-confirm-single${wizard.confirmSingle ? " checked" : ""}>
+      <span>Short week — just one fixture to call!</span>
+    </label>` : ""}
+    <div class="wizard-actions">
+      <button class="secondary" type="button" data-wizard-back>Back</button>
+      <button class="primary" type="button" data-wizard-next ${wizard.busy ? "disabled" : ""}>${wizard.busy ? "Creating…" : "Create league"}</button>
+    </div>`;
+}
+
+function wizardStepShare() {
+  return `<span class="eyebrow">Step 4 of 4</span>
+    <h3>Share your code</h3>
+    <p class="wizard-hint">Anyone with this code can join ${escapeHTML(wizard.name || "your league")}.</p>
+    <div class="league-code wizard-code"><span>League code</span><strong>${escapeHTML(wizard.code)}</strong></div>
+    <div class="wizard-actions">
+      <button class="primary wide" type="button" data-share-league="${escapeHTML(wizard.code)}">Invite mates</button>
+    </div>
+    <button class="secondary wide" type="button" data-wizard-done>Done</button>`;
+}
+
+const WIZARD_VIEWS = {
+  name: wizardStepName,
+  competitions: wizardStepCompetitions,
+  rule: wizardStepRule,
+  share: wizardStepShare,
+};
+
+function createLeagueCard() {
+  if (!wizard) {
+    return `<section class="league-form create-card">
+      <h3>Create a league</h3>
+      <p class="create-hint">Name it, choose your competitions, set how the week works — then share the code.</p>
+      <button class="primary wide" type="button" data-wizard-open>Get started</button>
+    </section>`;
+  }
+  return `<section class="league-form wizard" aria-label="Create a league">
+    ${wizardProgress()}
+    ${wizard.error ? `<p class="wizard-error">${escapeHTML(wizard.error)}</p>` : ""}
+    ${WIZARD_VIEWS[wizard.step]()}
+    ${wizard.step === "share" ? "" : `<button class="wizard-cancel" type="button" data-wizard-cancel>Cancel</button>`}
+  </section>`;
+}
+
+/** Validates the step the host is on. Returns an error string, or "". */
+function wizardStepError() {
+  if (wizard.step === "name" && !wizard.name.trim()) return "Give your league a name";
+  if (wizard.step === "competitions" && !wizard.competitions.length) return "Choose at least one competition";
+  // A one-fixture week is legal, but it is unusual enough to be worth a nod.
+  if (wizard.step === "rule" && wizard.count === 1 && !wizard.confirmSingle) {
+    return "Short week — just one fixture to call! Tick to confirm.";
+  }
+  return "";
+}
+
+async function advanceWizard() {
+  const error = wizardStepError();
+  if (error) { wizard.error = error; render(); return; }
+  wizard.error = "";
+  const index = WIZARD_STEPS.indexOf(wizard.step);
+  if (wizard.step !== "rule") {
+    wizard.step = WIZARD_STEPS[index + 1];
+    render();
+    return;
+  }
+  wizard.busy = true;
+  render();
+  try {
+    const response = await api("/league", {
+      uid: uid(), nickname: playerName,
+      name: wizard.name.trim(),
+      competitions: wizard.competitions,
+      weeklyRule: wizardRule(),
+      // Kept in step for a worker that predates the rule.
+      fixtureMode: wizard.method === "manual" || wizard.method === "random" ? "limited" : "all",
+      fixtureLimit: wizard.count,
+    });
+    saveLeague(response.code);
+    saveLeagueName(response.code, response.name);
+    if (response.recovery) localStorage.setItem(STORAGE.recovery, response.recovery);
+    if (rememberCompetition(response.competitions || response.competition)) await loadFixtures();
+    wizard.code = response.code;
+    wizard.step = "share";
+    wizard.busy = false;
+    await loadLeagueState();
+  } catch (error) {
+    wizard.busy = false;
+    wizard.error = error.message;
+  }
+  render();
+}
+
+/** "Premier League · 6 fixtures/week" — what this league actually includes. */
 function leagueSummaryLine(state) {
   const names = (state?.competitions || [state?.competition || DEFAULT_COMPETITION])
     .map((code) => competitionMeta(code).name).join(" + ");
+  const rule = state?.weeklyRule;
+  if (rule?.method === "allEligible") return `${names} · every fixture`;
+  if (rule?.method === "allCompetition") return `${names} · every ${competitionMeta(rule.competitionScope).short} fixture`;
+  // "~" because the count is a rule of thumb: individual weeks can differ.
+  if (rule?.method === "random") return `${names} · ~${rule.count} random fixtures/week`;
+  if (rule?.method === "manual") return `${names} · host picks each week`;
+  // A worker that predates the rule still answers with the old fields.
   if (state?.fixtureMode !== "limited") return `${names} · every fixture`;
   const limit = state?.fixtureLimit;
-  // "~" because the default is a rule of thumb: individual weeks can differ.
   return limit == null ? `${names} · host picks each week` : `${names} · ~${limit} fixtures/week`;
 }
 
@@ -1617,33 +2168,7 @@ function leagueView() {
   const recovery = localStorage.getItem(STORAGE.recovery);
   const joinDefault = inviteCode && !leagueCodes.includes(inviteCode) ? inviteCode : "";
   const controls = `<div class="league-actions">
-    <form class="league-form" data-create-league>
-      <span class="eyebrow">Start a competition</span><h3>Create a league</h3>
-      <input name="leagueName" maxlength="40" placeholder="Saturday Super 6" required>
-      <p class="create-hint">Choose your competitions and fixture count, then pick manually or hit Surprise Me.</p>
-      ${availableCompetitions().length > 1 ? `<div class="competition-choice" role="group" aria-label="Competitions">
-        ${availableCompetitions().map((code, index) => `<label class="competition-option">
-          <input type="checkbox" name="competitions" value="${code}"${index === 0 ? " checked" : ""}>
-          <span>${escapeHTML(competitionMeta(code).short)}</span>
-        </label>`).join("")}
-      </div>` : ""}
-      <div class="fixture-plan">
-        <label class="league-toggle">
-          <input type="checkbox" name="limitFixtures" data-limit-toggle>
-          <span><strong>Set a weekly fixture count</strong><em>Off means every fixture that week counts</em></span>
-        </label>
-        <div class="fixture-count" data-fixture-count hidden>
-          <span>Fixtures each week</span>
-          <div class="count-stepper">
-            <button type="button" data-count-step="-1" aria-label="Fewer fixtures">−</button>
-            <b data-count-value>8</b>
-            <button type="button" data-count-step="1" aria-label="More fixtures">＋</button>
-          </div>
-          <input type="hidden" name="fixtureLimit" value="8">
-        </div>
-      </div>
-      <button class="primary wide" type="submit">Create league</button>
-    </form>
+    ${createLeagueCard()}
     <form class="league-form" data-join-league>
       <span class="eyebrow">Got an invitation?</span><h3>Join a league</h3>
       <input name="leagueCode" maxlength="6" value="${joinDefault}" placeholder="ABC234" required>
@@ -1662,8 +2187,8 @@ function leagueView() {
   const isOwner = state && !state.error && state.owner === uid();
   const supportsRounds = leagueSupportsRounds(state);
   const showMatchday = supportsRounds && leagueTab === "matchday";
-  const shareLabel = showMatchday && roundState && !roundState.error && roundState.matchday != null
-    ? `Share Matchweek ${roundState.matchday} result`
+  const shareLabel = showMatchday && roundState && !roundState.error && roundState.period != null
+    ? (roundState.matchday != null ? `Share Matchweek ${roundState.matchday} result` : `Share ${periodLabel(roundState.period)} result`)
     : "Share table to WhatsApp";
   let inner;
   if (showMatchday) {
@@ -1782,17 +2307,20 @@ function showUpdatePrompt(registration) {
 
 async function navigateToView(view) {
   if (!view) return;
+  launchRouted = true;   // the viewer is driving now
   currentView = view;
   clearFlash();
   render({ scrollTop: true });
   if (currentView === "league") {
     await loadLeagueState();
     render();
+    // Warm every other league now, so the first pill tap is a cache hit.
+    prefetchLeagueStates();
   }
 }
 
-// Commits the slate. Immutable server-side, so this runs once and then the
-// picker closes for good — every later matchweek gets its own picker.
+// Publishes the slate. One way server-side, so this runs once and then the
+// picker closes for good — every later period gets its own picker.
 async function commitSlate() {
   const period = pickerPeriod;
   const mode = pickerMode;
@@ -1800,9 +2328,9 @@ async function commitSlate() {
   pickerBusy = true;
   render();
   try {
-    await api("/league/slate", { uid: uid(), code: activeLeague, period, mode, fixtureIds });
+    await api("/league/slate", { uid: uid(), code: activeLeague, period, mode, fixtureIds, action: "publish" });
     closeFixturePicker();
-    setFlash(`${periodLabel(period)} is set — ${fixtureIds.length} fixtures.`);
+    setFlash(`${periodLabel(period)} is published — ${fixtureIds.length} fixtures.`);
     await loadLeagueState();
   } catch (error) {
     pickerBusy = false;
@@ -1810,6 +2338,86 @@ async function commitSlate() {
     setFlash(error.message, "error");
   }
   render();
+}
+
+// Closing the picker without publishing keeps the work: the selection is saved
+// as a draft, which the host can come back to and which the fallback will
+// publish as-is rather than discard if they never do.
+async function saveSlateDraft() {
+  const period = pickerPeriod;
+  const fixtureIds = [...pickerSelection];
+  if (!period || !fixtureIds.length || !API) return;
+  try {
+    await api("/league/slate", { uid: uid(), code: activeLeague, period, mode: "custom", fixtureIds, action: "draft" });
+  } catch {
+    // A draft is a convenience; failing to save one must never block closing.
+  }
+}
+
+// Wizard input is read on the way OUT of a step rather than on every keystroke,
+// so typing a league name never triggers a re-render mid-word.
+function readWizardInputs() {
+  const nameField = document.querySelector("[data-wizard-name]");
+  if (nameField) wizard.name = nameField.value;
+}
+
+/**
+ * Dismisses the software keyboard before a re-render.
+ *
+ * WKWebView keeps the keyboard up when the focused field is replaced, and the
+ * viewport it leaves behind is the one that used to strand the bottom nav
+ * mid-screen. Blurring on the way out of a step — and on every form submit —
+ * hands the space back before the new screen paints.
+ */
+function dismissKeyboard() {
+  const active = document.activeElement;
+  if (active && typeof active.blur === "function" && active !== document.body) active.blur();
+}
+
+async function handleWizardClick(event) {
+  if (event.target.closest("[data-wizard-open]")) {
+    openWizard();
+    render();
+    return true;
+  }
+  if (!wizard) return false;
+  if (event.target.closest("[data-wizard-cancel]")) {
+    dismissKeyboard();
+    closeWizard();
+    render();
+    return true;
+  }
+  if (event.target.closest("[data-wizard-done]")) {
+    closeWizard();
+    render();
+    return true;
+  }
+  if (event.target.closest("[data-wizard-back]")) {
+    readWizardInputs();
+    dismissKeyboard();
+    wizard.error = "";
+    wizard.step = WIZARD_STEPS[Math.max(0, WIZARD_STEPS.indexOf(wizard.step) - 1)];
+    render();
+    return true;
+  }
+  if (event.target.closest("[data-wizard-next]")) {
+    readWizardInputs();
+    dismissKeyboard();
+    if (!wizard.busy) await advanceWizard();
+    return true;
+  }
+  const rule = event.target.closest("[data-wizard-rule]");
+  if (rule) {
+    const option = ruleOptions().find((entry) => entry.key === rule.dataset.wizardRule);
+    if (option) {
+      wizard.method = option.method;
+      wizard.scope = option.scope || null;
+      wizard.error = "";
+      render();
+    }
+    return true;
+  }
+  return !!event.target.closest(".wizard");
 }
 
 async function handlePickerClick(event) {
@@ -1832,7 +2440,11 @@ async function handlePickerClick(event) {
   }
   if (pickerConfirmOpen) return true;
   if (event.target.closest("[data-picker-close]")) {
+    const pending = saveSlateDraft();
     closeFixturePicker();
+    render();
+    await pending;
+    await loadLeagueState();
     render();
     return true;
   }
@@ -1879,19 +2491,30 @@ async function handlePickerClick(event) {
 document.addEventListener("click", async (event) => {
   const countStep = event.target.closest("[data-count-step]");
   if (countStep) {
+    // v1.5 §9: one validation path — 1 to 20, default 6, floor 1. The worker
+    // caps again per week against the pool actually available.
+    const delta = Number(countStep.dataset.countStep);
+    if (wizard) {
+      wizard.count = Math.max(MIN_FIXTURE_COUNT, Math.min(MAX_FIXTURE_COUNT, wizard.count + delta));
+      if (wizard.count !== 1) wizard.confirmSingle = false;
+      wizard.error = "";
+      render();
+      return;
+    }
     const panel = countStep.closest("[data-fixture-count]");
     const value = panel.querySelector("[data-count-value]");
     const hidden = panel.querySelector('input[name="fixtureLimit"]');
-    // The ceiling is the largest week either competition can offer; the worker
-    // caps again per week against the pool actually available.
-    const next = Math.max(MIN_FIXTURE_LIMIT, Math.min(20, Number(value.textContent) + Number(countStep.dataset.countStep)));
+    const next = Math.max(MIN_FIXTURE_COUNT, Math.min(MAX_FIXTURE_COUNT, Number(value.textContent) + delta));
     value.textContent = next;
     hidden.value = next;
     return;
   }
+  if (await handleWizardClick(event)) return;
   if (await handlePickerClick(event)) return;
   const nav = event.target.closest("[data-view]");
   if (nav) {
+    // The onboarding CTA lands on the League tab with the wizard already open.
+    if (nav.hasAttribute("data-launch-create")) openWizard();
     await navigateToView(nav.dataset.view);
     return;
   }
@@ -1906,7 +2529,7 @@ document.addEventListener("click", async (event) => {
       leagueTab = "matchday";
       matchdayPickerOpen = false;
       render();
-      if (!roundState || roundState.error || roundState.matchday !== selectedMatchday) {
+      if (!roundState || roundState.error || String(roundState.period) !== String(selectedPeriod)) {
         await loadRoundState();
         render();
       }
@@ -1919,7 +2542,7 @@ document.addEventListener("click", async (event) => {
   }
   const roundMd = event.target.closest("[data-round-md]");
   if (roundMd) {
-    selectedMatchday = Number(roundMd.dataset.roundMd);
+    selectedPeriod = roundMd.dataset.roundMd;
     leagueTab = "matchday";
     matchdayPickerOpen = false;
     render();
@@ -1941,6 +2564,7 @@ document.addEventListener("click", async (event) => {
     if (!confirm(`Delete ${name}? This removes the league and its table for all members — picks aren't affected.`)) return;
     try {
       await api("/league/delete", { uid: uid(), code });
+      forgetLeagueState(code);
       removeStoredLeague(code);
       pruneStoredLeagueNames();
       setFlash(`Deleted ${name}`);
@@ -2106,38 +2730,8 @@ async function savePick(matchId, p1, p2) {
 }
 
 document.addEventListener("submit", async (event) => {
-  if (event.target.matches("[data-create-league]")) {
-    event.preventDefault();
-    const form = new FormData(event.target);
-    const name = form.get("leagueName");
-    const competitions = form.getAll("competitions").map(String);
-    if (availableCompetitions().length > 1 && !competitions.length) {
-      setFlash("Choose at least one competition", "error");
-      render();
-      return;
-    }
-    const chosen = competitions.length ? competitions : [DEFAULT_COMPETITION];
-    const limited = form.get("limitFixtures") != null;
-    const fixtureLimit = Number(form.get("fixtureLimit")) || 8;
-    try {
-      const response = await api("/league", {
-        uid: uid(), nickname: playerName, name,
-        competitions: chosen,
-        fixtureMode: limited ? "limited" : "all",
-        ...(limited ? { fixtureLimit } : {}),
-      });
-      saveLeague(response.code);
-      saveLeagueName(response.code, response.name);
-      if (response.recovery) localStorage.setItem(STORAGE.recovery, response.recovery);
-      if (rememberCompetition(response.competitions || response.competition)) await loadFixtures();
-      setFlash(`League created: ${response.code}`);
-      await loadLeagueState();
-    } catch (error) {
-      setFlash(error.message, "error");
-    }
-    render();
-    return;
-  }
+  // Every submit path dismisses the keyboard first; see dismissKeyboard().
+  if (event.target.matches("[data-join-league], [data-restore]")) dismissKeyboard();
   if (event.target.matches("[data-join-league]")) {
     event.preventDefault();
     const code = String(new FormData(event.target).get("leagueCode") || "").toUpperCase();
@@ -2217,10 +2811,25 @@ async function saveNotificationPrefs() {
 }
 
 document.addEventListener("change", (event) => {
-  const limitToggle = event.target.closest("[data-limit-toggle]");
-  if (limitToggle) {
-    const panel = document.querySelector("[data-fixture-count]");
-    if (panel) panel.hidden = !limitToggle.checked;
+  const competition = event.target.closest("[data-wizard-competition]");
+  if (competition && wizard) {
+    const code = competition.dataset.wizardCompetition;
+    wizard.competitions = competition.checked
+      ? availableCompetitions().filter((entry) => entry === code || wizard.competitions.includes(entry))
+      : wizard.competitions.filter((entry) => entry !== code);
+    // Dropping a competition can invalidate an "all <that competition>" rule.
+    if (wizard.scope && !wizard.competitions.includes(wizard.scope)) {
+      wizard.method = "manual";
+      wizard.scope = null;
+    }
+    wizard.error = "";
+    render();
+    return;
+  }
+  const confirmSingle = event.target.closest("[data-wizard-confirm-single]");
+  if (confirmSingle && wizard) {
+    wizard.confirmSingle = confirmSingle.checked;
+    if (confirmSingle.checked) wizard.error = "";
     return;
   }
   const toggle = event.target.closest("[data-notif-competition]");
@@ -2326,8 +2935,15 @@ async function setupNativeUniversalLinks() {
 // content area for the whole of it.
 render();
 
+// The last league this device looked at, straight from cache, so the first
+// paint already has a table in it rather than a loading state.
+if (activeLeague && leagueStates[activeLeague]) leagueState = leagueStates[activeLeague];
+
 Promise.all([loadFixtures(), hydrateIdentity()]).then(() => {
-  if (inviteCode && !leagueCodes.includes(inviteCode)) currentView = "league";
+  // The launch decision tree (§9.7). An invite in the URL always wins — the
+  // viewer arrived to join something — and otherwise the branch decides.
+  if (inviteCode && !leagueCodes.includes(inviteCode)) { launchRouted = true; currentView = "league"; }
+  else applyLaunchBranch();
   render();
   registerServiceWorker();
   setupNativePushNotifications();

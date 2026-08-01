@@ -26,6 +26,10 @@ body {
   display: flex;
   flex-direction: column;
   margin: 0;
+  /* Exactly one viewport tall with nothing to scroll, so WKWebView has no
+     document to drag when the software keyboard opens. Deliberately NOT
+     `position: fixed`: that also stops iOS Full Keyboard Access traversing
+     into the page, which is a worse bug than the one it would guard against. */
   height: 100vh;
   min-height: 100vh;
   max-height: 100vh;
@@ -103,7 +107,8 @@ main {
   max-width: 760px;
   min-height: 0;
   margin: 0 auto;
-  padding: 18px 0 28px;
+  /* The nav is fixed, so the scroller has to reserve its height itself. */
+  padding: 18px 0 calc(var(--nav-total-height) + 28px);
   overflow-y: auto;
   overflow-x: hidden;
   overscroll-behavior: contain;
@@ -849,10 +854,12 @@ th.wins-col { font-size: .92rem; }
 .app-footer a:hover { color: var(--purple); }
 .bottom-nav {
   flex: none;
-  position: relative;
+  /* Always pinned to the bottom safe-area, keyboard open or shut. */
+  position: fixed;
   right: 0;
   bottom: 0;
   left: 0;
+  padding-bottom: max(var(--safe-bottom), 6px);
   z-index: 30;
   display: grid;
   grid-template-columns: repeat(5, 1fr);
@@ -1292,8 +1299,11 @@ body.picker-open { overflow: hidden; }
   text-align: center;
   cursor: pointer;
 }
-.competition-option input:checked + span { border-color: var(--purple); color: var(--purple); background: var(--purple-soft); }
-.competition-option input:focus-visible + span { box-shadow: 0 0 0 3px var(--purple-soft); }
+/* Selected competitions read GREEN, the same family as the weekly-rule cards,
+   so "chosen" looks the same wherever the wizard asks. #064d41 on #eaf7f1 is
+   8.89:1 — comfortably past AA. */
+.competition-option input:checked + span { border-color: var(--green); color: var(--green-2); background: #eaf7f1; }
+.competition-option input:focus-visible + span { box-shadow: 0 0 0 3px #d7efe4; }
 
 .notif-prefs { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--line); }
 .notif-hint { margin: 4px 0 10px; color: var(--muted); font-size: .78rem; }
@@ -1374,3 +1384,109 @@ body.picker-open { overflow: hidden; }
   font-size: .74rem;
   font-weight: 800;
 }
+/* A carry-over that could not be honoured is called out, never left silent. */
+.picker-note-warn { background: #fdf0e6; color: #8a4b12; }
+
+/* --- Create a league wizard ---------------------------------------------- */
+
+.create-card h3 { margin: 0; }
+.create-card .primary { margin-top: 13px; }
+.wizard { position: relative; }
+.wizard h3 { margin: 4px 0 0; }
+.wizard input[type="text"], .wizard input:not([type]) { margin-top: 11px; }
+.wizard-hint { margin: 6px 0 0; color: var(--muted); font-size: .78rem; line-height: 1.45; }
+.wizard-progress { display: flex; gap: 6px; margin-bottom: 12px; }
+.wizard-dot {
+  flex: 1;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--line);
+  transition: background .18s ease;
+}
+.wizard-dot.is-done { background: var(--purple-soft); }
+.wizard-dot.is-current { background: var(--purple); }
+.wizard-error {
+  margin: 0 0 11px;
+  padding: 9px 12px;
+  border-radius: 11px;
+  background: #fdecec;
+  color: var(--danger);
+  font-size: .78rem;
+  font-weight: 800;
+}
+.wizard-actions { display: flex; gap: 9px; margin-top: 15px; }
+.wizard-actions button { flex: 1; }
+.wizard-actions .wide { flex: 1 1 100%; }
+.wizard-cancel {
+  width: 100%;
+  margin-top: 11px;
+  padding: 8px;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font-size: .78rem;
+  font-weight: 800;
+}
+.wizard-code { margin-top: 13px; }
+.wizard-confirm {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 11px;
+  padding: 10px 13px;
+  border: 1px solid var(--purple);
+  border-radius: 12px;
+  background: var(--purple-soft);
+  color: var(--purple);
+  font-size: .78rem;
+  font-weight: 800;
+}
+.wizard-confirm input { width: 20px; height: 20px; margin: 0; accent-color: var(--purple); }
+
+.rule-choice { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+.rule-option {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--white);
+  text-align: left;
+}
+.rule-option strong { color: var(--ink); font-size: .87rem; font-weight: 900; }
+.rule-option em { color: var(--muted); font-size: .74rem; font-style: normal; font-weight: 700; }
+/* Selected state matches the v1.4.1 competition checkboxes: green, not purple. */
+.rule-option.is-selected { border-color: var(--green); background: #eaf7f1; }
+.rule-option.is-selected strong { color: var(--green-2); }
+.rule-option.is-selected em { color: var(--green); }
+
+/* --- Launch states -------------------------------------------------------- */
+
+.launch-card {
+  margin-top: 13px;
+  padding: 17px 18px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--white);
+  box-shadow: var(--shadow);
+}
+.launch-card p { margin: 0; color: var(--muted); font-size: .85rem; line-height: 1.5; font-weight: 700; }
+.launch-card .primary { margin-top: 15px; }
+.launch-card .secondary { margin-top: 9px; }
+.slate-draft-note { margin-top: 6px !important; font-size: .76rem !important; }
+
+/* Pre-season proof of life: real fixtures, real badges, real dates. */
+.proof-of-life { display: flex; flex-direction: column; gap: 8px; margin-top: 13px; }
+.proof-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 13px;
+  background: var(--white);
+}
+.proof-teams { display: flex; align-items: center; gap: 7px; flex: 1; min-width: 0; }
+.proof-teams em { color: var(--muted); font-size: .7rem; font-style: normal; font-weight: 900; }
+.proof-date { color: var(--muted); font-size: .74rem; font-weight: 800; white-space: nowrap; }

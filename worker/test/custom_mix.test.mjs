@@ -524,12 +524,15 @@ test("the inactive-host fallback waits until 24h out, not two hours", async () =
     await primeFixtures(env);
     const code = (await env.KV.get("index:custom_mix"))[0];
 
-    // Inside 24 hours with still no slate: the full card unlocks for everyone.
+    // Inside 24 hours with still no slate, the week is dealt for the host.
+    // v1.5j: that is a random N on the league's own count — the same deal the
+    // picker's dice would have made — rather than the whole card.
     await runScheduled(env);
     const slate = await env.KV.get(`custom_slate:${code}:1`);
-    assert.equal(slate.mode, "fallback");
-    assert.equal(slate.setBy, null);
-    assert.equal(slate.fixtureIds.length, 10);
+    assert.equal(slate.status, "published");
+    assert.equal(slate.setBy, null, "nobody chose it");
+    assert.equal(slate.fixtureIds.length, 6, "the league's weekly count");
+    assert.match(slate.ruleSource, /fallback-random/);
     assert.equal((await env.KV.get(`league:${code}`)).hadSlates, true);
   });
 });

@@ -115,19 +115,21 @@ test("only manual needs a host; every other method is set-and-forget", () => {
 
 // --- legacy normalisation ---------------------------------------------------
 
-test("legacy leagues normalise to manual at the READ boundary", () => {
-  // Pre-v1.3: nothing but a name.
-  assert.deepEqual(leagueWeeklyRule({ code: "OLD123", name: "Legacy", owner: "old" }),
-    { method: "manual", competitionScope: "PL", count: 6, source: "legacy" });
-  // v1.3 Custom Mix, no stored count: the v1.5 default.
+test("legacy leagues normalise at the READ boundary without changing behaviour", () => {
+  // v1.3 Custom Mix, no stored count: manual on the v1.5 default.
   assert.deepEqual(leagueWeeklyRule({ competition: "ELC", customMix: true }),
     { method: "manual", competitionScope: "ELC", count: 6, source: "legacy" });
   // v1.4: the host's own count carries into the rule.
   assert.deepEqual(leagueWeeklyRule({ competitions: ["PL", "ELC"], fixtureMode: "limited", fixtureLimit: 4 }),
     { method: "manual", competitionScope: "mixed", count: 4, source: "legacy" });
-  // v1.4 "all": still manual, because that is the binding normalisation — the
-  // fallback is what keeps its full-card behaviour intact.
-  assert.equal(leagueWeeklyRule({ competitions: ["PL"], fixtureMode: "all" }).method, "manual");
+  // v1.4 "all": a league that has always played every fixture keeps doing so.
+  // Since the fallback deals a random N rather than the whole card, normalising
+  // these to manual would quietly shrink their week, so they read as
+  // allEligible — the intent they already stored.
+  const legacyAll = leagueWeeklyRule({ competitions: ["PL"], fixtureMode: "all" });
+  assert.equal(legacyAll.method, "allEligible");
+  assert.equal(legacyAll.source, "legacy");
+  assert.equal(leagueWeeklyRule({ code: "OLD", name: "Legacy", owner: "o" }).method, "allEligible");
   // v1.5: read as stored.
   assert.deepEqual(leagueWeeklyRule({
     competitions: ["PL", "ELC"],
@@ -659,10 +661,15 @@ test("a set-and-forget league publishes itself with no admin step", async () => 
 });
 
 test("an allCompetition rule publishes exactly the competition it names", async () => {
+  // Driven through the fallback horizon rather than the pool-open one: a mixed
+  // league's window opens on its own Tuesday, so "40 hours out" is open or shut
+  // depending on which weekday the suite runs. The fallback fires at <24h
+  // whatever the day, which keeps this deterministic.
+  const soon = Date.now() + 20 * HOUR;
   const mixed = [
-    { id: "pl-2026-27-001-a-b", matchday: 1, player1: "A", player2: "B", startAt: new Date(Date.now() + 40 * HOUR).toISOString() },
-    { id: "pl-2026-27-002-c-d", matchday: 1, player1: "C", player2: "D", startAt: new Date(Date.now() + 41 * HOUR).toISOString() },
-    { id: "elc-2026-27-001-e-f", matchday: 1, player1: "E", player2: "F", startAt: new Date(Date.now() + 42 * HOUR).toISOString() },
+    { id: "pl-2026-27-001-a-b", matchday: 1, player1: "A", player2: "B", startAt: new Date(soon).toISOString() },
+    { id: "pl-2026-27-002-c-d", matchday: 1, player1: "C", player2: "D", startAt: new Date(soon + HOUR).toISOString() },
+    { id: "elc-2026-27-001-e-f", matchday: 1, player1: "E", player2: "F", startAt: new Date(soon + 2 * HOUR).toISOString() },
   ];
   const store = new Map();
   const env = {
@@ -685,8 +692,7 @@ test("an allCompetition rule publishes exactly the competition it names", async 
     const period = windowKeyFor(mixed[0].startAt);
     const slate = JSON.parse(store.get(`custom_slate:${code}:${period}`));
     assert.deepEqual(slate.fixtureIds, ["elc-2026-27-001-e-f"], "the scope is explicit, not inferred");
-    assert.equal(slate.ruleSource, "allCompetition");
-    // The snapshot names the competition each fixture came from.
+    assert.match(slate.ruleSource, /allCompetition/);
     assert.deepEqual(slate.snapshot.fixtures.map((f) => f.competition), ["ELC"]);
   } finally {
     globalThis.fetch = originalFetch;
@@ -738,34 +744,9 @@ test("fallback: an EMPTY draft is never published; the rule applies instead", as
   });
 });
 
-test("fallback: a manual league with no draft falls back to last week's count", async () => {
-  const two = [
-    ...round(10, Date.now() - 5 * DAY, 1),
-    ...round(10, Date.now() + 20 * HOUR, 2),
-  ];
-  const { env, store } = endpointEnv();
-  await withFixtures(two, async () => {
-    await prime(env);
-    const send = post(env);
-    const { code } = await (await send("/league", {
-      uid: "host", competitions: ["PL"], fixtureMode: "limited",
-      weeklyRule: { method: "manual", competitionScope: "PL", count: 6 },
-    })).json();
-    // Last week they played four.
-    store.set(`custom_slate:${code}:1`, JSON.stringify({
-      status: "published", mode: "custom", fixtureIds: two.slice(0, 4).map((m) => m.id), setBy: "host",
-    }));
-
-    await runScheduled(env);
-    const slate = JSON.parse(store.get(`custom_slate:${code}:2`));
-    assert.equal(slate.fixtureIds.length, 4, "the count they last actually played");
-    assert.equal(slate.ruleSource, "auto-published:fallback-lastUsed");
-  });
-});
-
-test("fallback: a manual league that has never played gets the whole card", async () => {
-  // This is what keeps a legacy fixtureMode:"all" league behaving exactly as it
-  // always has — normalised to manual, never nudged into a shorter week.
+test("fallback: a missed week publishes a random N from the league's own count", async () => {
+  // v1.5j: no rule choice exists, so an unanswered week is dealt the same way
+  // the picker's dice would have dealt it — N random, N being the league's count.
   const list = round(10, Date.now() + 20 * HOUR);
   const { env, store } = endpointEnv();
   await withFixtures(list, async () => {
@@ -778,10 +759,84 @@ test("fallback: a manual league that has never played gets the whole card", asyn
 
     await runScheduled(env);
     const slate = JSON.parse(store.get(`custom_slate:${code}:1`));
-    assert.equal(slate.fixtureIds.length, 10, "the full card, not a guess at six");
-    assert.equal(slate.mode, "fallback");
-    assert.equal(slate.ruleSource, "auto-published:fallback-full");
+    assert.equal(slate.status, "published");
+    assert.equal(slate.fixtureIds.length, 6, "the league's own weekly count");
+    assert.equal(slate.ruleSource, "auto-published:fallback-random");
+    assert.equal(slate.setBy, null, "nobody chose it");
+    const pool = new Set(list.map((m) => m.id));
+    assert.ok(slate.fixtureIds.every((id) => pool.has(id)));
+    assert.equal(new Set(slate.fixtureIds).size, 6);
+    assert.deepEqual(slate.fixtureIds, [...slate.fixtureIds].sort(), "stored in kickoff order");
+    assert.ok(store.has(`notified:auto-published:${code}:1`));
   });
+});
+
+test("fallback: a count at or above the pool takes the whole card", async () => {
+  const list = round(10, Date.now() + 20 * HOUR);
+  const { env, store } = endpointEnv();
+  await withFixtures(list, async () => {
+    await prime(env);
+    const { code } = await (await post(env)("/league", {
+      uid: "host", competitions: ["PL"], fixtureMode: "limited",
+      weeklyRule: { method: "manual", competitionScope: "PL", count: 20 },
+    })).json();
+    await runScheduled(env);
+    const slate = JSON.parse(store.get(`custom_slate:${code}:1`));
+    assert.equal(slate.fixtureIds.length, 10, "capped by the pool, so: every fixture");
+  });
+});
+
+test("fallback: a legacy every-fixture league still gets every fixture", async () => {
+  // The live pre-competition leagues have no weeklyRule and fixtureMode "all".
+  const list = round(10, Date.now() + 20 * HOUR);
+  const store = new Map([
+    ["league:OLD123", JSON.stringify({ code: "OLD123", name: "Legacy", owner: "old", createdAt: 1 })],
+    ["member:OLD123:old", JSON.stringify({ nick: "Old", since: 0 })],
+  ]);
+  const { env } = endpointEnv(store);
+  await withFixtures(list, async () => {
+    await prime(env);
+    await runScheduled(env);
+    const slate = JSON.parse(store.get("custom_slate:OLD123:1"));
+    assert.equal(slate.fixtureIds.length, 10, "the whole card, exactly as before v1.5");
+    assert.equal(slate.ruleSource, "auto-published:allEligible");
+  });
+});
+
+test("fallback: a mixed week is competition-balanced, as the dice is", async () => {
+  const soon = Date.now() + 20 * HOUR;
+  const mixed = [
+    { id: "pl-2026-27-001-a-b", matchday: 1, player1: "A", player2: "B", startAt: new Date(soon).toISOString() },
+    { id: "pl-2026-27-002-c-d", matchday: 1, player1: "C", player2: "D", startAt: new Date(soon + HOUR).toISOString() },
+    { id: "pl-2026-27-003-e-f", matchday: 1, player1: "E", player2: "F", startAt: new Date(soon + 2 * HOUR).toISOString() },
+    { id: "elc-2026-27-001-g-h", matchday: 1, player1: "G", player2: "H", startAt: new Date(soon + 3 * HOUR).toISOString() },
+  ];
+  const store = new Map();
+  const env = {
+    FIXTURES_URL: "https://example.com/pl.json",
+    FIXTURES_URL_ELC: "https://example.com/elc.json",
+    KV: memoryKV(store),
+  };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => new Response(JSON.stringify({
+    fixtures: mixed.filter((f) => f.id.startsWith(String(url).includes("elc") ? "elc-" : "pl-")),
+  }), { status: 200 });
+  try {
+    await get(env)("/fixtures?competition=PL&refresh=1");
+    await get(env)("/fixtures?competition=ELC&refresh=1");
+    const { code } = await (await post(env)("/league", {
+      uid: "host", competitions: ["PL", "ELC"], fixtureMode: "limited",
+      weeklyRule: { method: "manual", competitionScope: "mixed", count: 2 },
+    })).json();
+    await runScheduled(env);
+    const period = windowKeyFor(mixed[0].startAt);
+    const slate = JSON.parse(store.get(`custom_slate:${code}:${period}`));
+    assert.equal(slate.fixtureIds.length, 2);
+    assert.ok(slate.fixtureIds.some((id) => id.startsWith("elc-")), "the Championship is represented");
+    assert.ok(slate.fixtureIds.some((id) => id.startsWith("pl-")), "so is the Premier League");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("fallback: an already-published week is left completely alone", async () => {

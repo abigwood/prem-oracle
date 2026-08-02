@@ -602,7 +602,7 @@ class CompetitionAppTests(unittest.TestCase):
         # Scoped to the competition step: the weekly rule IS a one-of-N choice
         # and is legitimately a radiogroup, but competitions never are.
         step = self.app[self.app.index("function wizardStepCompetitions()"):]
-        step = step[:step.index("function wizardStepRule()")]
+        step = step[:step.index("function wizardStepCount()")]
         self.assertNotIn('role="radiogroup"', step)
         self.assertIn('type="checkbox"', step)
         self.assertIn(".competition-choice", self.css)
@@ -891,12 +891,12 @@ class WeeklyLoopTests(unittest.TestCase):
             self.assertNotIn("Start a competition", source)
 
     def test_the_wizard_is_four_named_steps(self):
-        self.assertIn('const WIZARD_STEPS = ["name", "competitions", "rule", "share"];', self.app)
-        for step in ("wizardStepName", "wizardStepCompetitions", "wizardStepRule", "wizardStepShare"):
+        self.assertIn('const WIZARD_STEPS = ["name", "competitions", "count", "share"];', self.app)
+        for step in ("wizardStepName", "wizardStepCompetitions", "wizardStepCount", "wizardStepShare"):
             self.assertIn(f"function {step}()", self.app, step)
         self.assertIn("<h3>Name your league</h3>", self.app)
         self.assertIn("<h3>Choose competitions</h3>", self.app)
-        self.assertIn("<h3>Your weekly rule</h3>", self.app)
+        self.assertIn("<h3>Fixtures each week</h3>", self.app)
         self.assertIn("<h3>Share your code</h3>", self.app)
         self.assertIn(".wizard-progress", self.css)
 
@@ -907,8 +907,6 @@ class WeeklyLoopTests(unittest.TestCase):
             self.css)
         self.assertNotIn(".competition-option input:checked + span { border-color: var(--purple)", self.css)
         self.assertIn("competition-option${wizard.competitions.includes(code)", self.app)
-        # And the rule cards it now matches.
-        self.assertIn(".rule-option.is-selected { border-color: var(--green); background: #eaf7f1; }", self.css)
 
     def test_the_green_selected_state_clears_wcag_aa(self):
         def luminance(value):
@@ -924,26 +922,69 @@ class WeeklyLoopTests(unittest.TestCase):
         self.assertGreaterEqual(round(contrast("#064d41", "#eaf7f1"), 2), 4.5)
         self.assertGreaterEqual(round(contrast("#0a7f58", "#ffffff"), 2), 3.0)
 
-    def test_every_weekly_rule_the_spec_names_is_offered(self):
-        options = self.app[self.app.index("function ruleOptions()"):]
-        options = options[:options.index("const wizardOptionSelected")]
-        self.assertIn("I'll pick each week", self.app)
-        self.assertIn("All fixtures", self.app)
-        self.assertIn("Random weekly", self.app)
-        self.assertIn("All ${competitionMeta(code).short}", options)
-        self.assertIn("App picks ${wizard.count} random", self.app)
-        for method in ("manual", "allEligible", "allCompetition", "random"):
-            self.assertIn(f'"{method}"', options, method)
+    def test_step_three_offers_the_count_and_nothing_else(self):
+        # v1.5j: the rule list is gone from the product entirely.
+        step = self.app[self.app.index("function wizardStepCount()"):]
+        step = step[:step.index("function wizardStepShare()")]
+        self.assertIn("data-count-step", step)
+        self.assertIn("How many fixtures should your mates predict each week?", step)
+        self.assertIn("You can change this — and pick the fixtures yourself — every week.", step)
+        self.assertIn('"Create league"}</button>', step)
+        # The count control comes first, before anything else on the step.
+        self.assertLess(step.index("data-fixture-count"), step.index("wizard-actions"))
+        # No rule choice survives anywhere: no markup, no model, no styles.
+        for gone in ("data-wizard-rule", "ruleOptions", "wizardOptionSelected",
+                     "WEEKLY_RULE_LABEL", "wizard.method", "wizard.scope",
+                     "I'll pick each week", "Random weekly", "App picks"):
+            self.assertNotIn(gone, self.app, gone)
+        for gone in (".rule-option", ".rule-choice"):
+            self.assertNotIn(gone, self.css, gone)
+
+    def test_every_new_league_is_manual_first(self):
+        rule = self.app[self.app.index("function wizardRule()"):]
+        rule = rule[:rule.index("function wizardProgress()")]
+        self.assertIn('method: "manual"', rule)
+        self.assertIn('wizard.competitions.length > 1 ? "mixed" : wizard.competitions[0]', rule)
+        self.assertIn("count: wizard.count", rule)
+        # The legacy mirror is always the limited shape now.
+        self.assertIn('fixtureMode: "limited",', self.app)
+        # The other methods stay valid server-side for leagues that carry one.
+        self.assertIn('export const WEEKLY_METHODS = ["manual", "allEligible", "allCompetition", "random"];',
+                      self.competitions)
 
     def test_the_scope_is_explicit_and_never_inferred(self):
         rule = self.app[self.app.index("function wizardRule()"):]
-        rule = rule[:rule.index("const WEEKLY_RULE_LABEL")]
+        rule = rule[:rule.index("function wizardProgress()")]
         self.assertIn("competitionScope", rule)
-        self.assertIn('mixed ? "mixed" : wizard.competitions[0]', rule)
-        # And the same shape is enforced server-side.
+        # And the same shape is still enforced server-side.
         self.assertIn("export function validateWeeklyRule(input, competitions)", self.competitions)
         self.assertIn('return { error: "allCompetition needs a single competition scope" };', self.competitions)
         self.assertIn('"allEligible covers every competition the league plays"', self.competitions)
+
+    def test_the_host_can_edit_the_weekly_count_after_creation(self):
+        # The set-and-forget UI is reduced to this: the one setting that is left.
+        self.assertIn("function weeklyCountControl(state)", self.app)
+        self.assertIn("data-league-count-step", self.app)
+        self.assertIn("async function changeWeeklyCount(delta)", self.app)
+        self.assertIn(".league-count", self.css)
+        saver = self.app[self.app.index("async function changeWeeklyCount(delta)"):]
+        saver = saver[:saver.index("// Wizard input is read")]
+        # Host-only, clamped to the one validation path, and the stored method
+        # and scope ride along untouched.
+        self.assertIn("state.owner !== uid()", saver)
+        self.assertIn("Math.max(MIN_FIXTURE_COUNT, Math.min(MAX_FIXTURE_COUNT", saver)
+        self.assertIn('method: state.weeklyRule?.method || "manual"', saver)
+        self.assertIn('await api("/league/weekly-rule"', saver)
+        # A failed save puts the old value back rather than lying.
+        self.assertIn("leagueState = state;", saver)
+        # And a league whose count governs nothing is not offered a stepper.
+        control = self.app[self.app.index("function weeklyCountControl(state)"):]
+        control = control[:control.index("function leagueView()")]
+        self.assertIn('if (method === "allEligible" || method === "allCompetition") return "";', control)
+
+    def test_step_two_copy_says_select(self):
+        self.assertIn("Select everything your league should draw fixtures from.", self.app)
+        self.assertNotIn("Tick everything your league should draw fixtures from.", self.app)
 
     def test_a_one_fixture_week_soft_confirms(self):
         self.assertIn("Short week — just one fixture to call!", self.app)

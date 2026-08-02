@@ -368,11 +368,15 @@ test("POST /league/slate is host-only, validated, and immutable once set", async
     assert.ok(body.slate.lockedAt);
     assert.equal((await env.KV.get(`league:${code}`)).hadSlates, true);
 
-    // Immutable: members may already hold picks against it.
-    const rewrite = await slate({ uid: "host", mode: "custom", fixtureIds: ids.slice(0, 6) });
-    assert.equal(rewrite.status, 409);
-    assert.equal((await rewrite.json()).error, "this matchweek's fixtures are already set");
-    assert.deepEqual((await env.KV.get(`custom_slate:${code}:1`)).fixtureIds, ids.slice(0, 7));
+    // v1.5k: a published week is amendable until its first kickoff, and an
+    // amendment APPENDS a version rather than rewriting the one members hold
+    // picks against.
+    const amend = await slate({ uid: "host", mode: "custom", fixtureIds: ids.slice(0, 6) });
+    assert.equal(amend.status, 200);
+    const amended = await env.KV.get(`custom_slate:${code}:1`);
+    assert.equal(amended.version, 2);
+    assert.deepEqual(amended.fixtureIds, ids.slice(0, 6), "reads resolve to the latest version");
+    assert.deepEqual(amended.versions[0].fixtureIds, ids.slice(0, 7), "version 1 still on the record");
   });
 });
 
@@ -398,9 +402,11 @@ test("any host may publish a week, whatever rule their league runs on", async ()
     assert.equal(toggled.status, 200);
     assert.deepEqual(await env.KV.get("index:custom_mix"), [code]);
 
-    // Matchweek 1 is already published above, so this is the 409 path — and
-    // turning Custom Mix on does not reopen a week that has gone out.
-    assert.equal((await send("/league/slate", { uid: "host", code, matchweek: 1, fixtureIds: ids })).status, 409);
+    // Matchweek 1 is already published above, so this is the amendment path:
+    // same fixtures, so nothing is appended.
+    const again = await send("/league/slate", { uid: "host", code, matchweek: 1, fixtureIds: ids });
+    assert.equal(again.status, 200);
+    assert.equal((await again.json()).unchanged, true);
 
     // Turning it off leaves played weeks scored on the slate they were played on.
     await send("/league/custom-mix", { uid: "host", code, enabled: false });

@@ -747,9 +747,13 @@ class CustomMixTests(unittest.TestCase):
         self.assertIn("surpriseSelection(pool,", handler)
         self.assertIn('pickerMode = "custom"', handler)
 
-    def test_setting_a_slate_needs_one_confirmation_that_says_it_is_final(self):
-        self.assertIn("Your league cannot change them after this.", self.app)
+    def test_setting_a_slate_needs_one_confirmation(self):
+        # v1.5k: publishing is no longer final — it is final at the first
+        # kickoff, and the confirm says so.
+        self.assertIn("You can amend the line-up until the first kickoff.", self.app)
+        self.assertNotIn("Your league cannot change them after this.", self.app)
         self.assertIn("Publish these ${count} fixtures?", self.app)
+        self.assertIn("Update the line-up to ${count}", self.app)
         self.assertIn("data-picker-commit", self.app)
         self.assertIn("picker-confirm-scrim", self.css)
         # Use-all-10 is an explicit full-week record, not a silent absence.
@@ -775,8 +779,9 @@ class CustomMixTests(unittest.TestCase):
             self.assertIn(f'path === "{route}"', self.worker)
         # Slates key on a period: a matchweek number, or a window like w2026-08-10.
         self.assertIn("`custom_slate:${code}:${period}`", self.logic)
-        # Immutable once set.
-        self.assertIn('json({ error: "this matchweek\'s fixtures are already set", slate: normaliseSlate(existing) }, 409, env)', self.worker)
+        # v1.5k: a published week is amendable until it locks, and frozen after.
+        self.assertIn('the first fixture has kicked off — this week\'s line-up is final', self.worker)
+        self.assertIn("async function amendSlate(env, league, period,", self.worker)
 
     def test_fallback_lead_time_is_a_day_not_two_hours(self):
         self.assertIn("const FALLBACK_LEAD_MS = 24 * 60 * 60 * 1000;", self.worker)
@@ -1445,6 +1450,136 @@ class WeekPickerTests(unittest.TestCase):
         # The lone box does not stretch across the old three columns.
         self.assertIn("stats-grid-single", picks)
         self.assertIn(".stats-grid-single { grid-template-columns: minmax(0, 200px); }", self.css)
+
+
+class AmendBeforeKickoffTests(unittest.TestCase):
+    """v1.5k: versioned publish, the amend flow, and the nickname fix."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = (ROOT / "app.js").read_text()
+        cls.css = (ROOT / "styles.css").read_text()
+        cls.worker = (ROOT / "worker/src/worker.js").read_text()
+        cls.logic = (ROOT / "worker/src/logic.js").read_text()
+
+    # --- the amend affordance -------------------------------------------
+
+    def test_a_published_line_up_offers_edit_and_shows_the_lock_moment(self):
+        notice = self.app[self.app.index("function slateNotice(period)"):]
+        notice = notice[:notice.index("function slateSummary(slate)")]
+        # Host only, and only while it is still amendable.
+        self.assertIn("const canEdit = isLeagueHost() && !published.locked;", notice)
+        self.assertIn(">Edit line-up</button>", notice)
+        self.assertIn("data-amend=", notice)
+        # Both sides see the deadline: lockLine is rendered for everyone,
+        # the button only for the host.
+        self.assertIn("${lockLine(published)}", notice)
+
+    def test_the_lock_moment_is_a_concrete_time(self):
+        fn = self.app[self.app.index("function lockTimeLabel(slate)"):]
+        fn = fn[:fn.index("function lockLine(slate)")]
+        self.assertIn("slate?.lockAt", fn)
+        self.assertIn('timeZone: "Europe/London"', fn)
+        self.assertIn('weekday: "short"', fn)
+        line = self.app[self.app.index("function lockLine(slate)"):]
+        line = line[:line.index("function slateNotice(period)")]
+        self.assertIn("Locks ${escapeHTML(when)}", line)
+        self.assertIn("Line-up locked — the first fixture has kicked off.", line)
+        self.assertIn(".lock-line", self.css)
+
+    def test_the_picker_knows_it_is_amending(self):
+        self.assertIn("let pickerAmending = false;", self.app)
+        self.assertIn("function openFixturePicker(period, amending = false)", self.app)
+        self.assertIn('openFixturePicker(open.dataset.openPicker, open.hasAttribute("data-amend"))', self.app)
+        self.assertIn('<h2>${pickerAmending ? "Edit line-up" : "Pick your fixtures"}</h2>', self.app)
+        self.assertIn('${pickerAmending ? "Update line-up" : "Publish to league"}', self.app)
+        # Abandoning an amendment must not overwrite the published line-up
+        # with a draft.
+        saver = self.app[self.app.index("async function saveSlateDraft()"):]
+        saver = saver[:saver.index("async function handleWizardClick")]
+        self.assertIn("if (pickerAmending) return;", saver)
+
+    def test_the_confirm_says_amendable_until_kickoff(self):
+        self.assertIn("You can amend the line-up until the first kickoff.", self.app)
+        self.assertNotIn("Your league cannot change them after this.", self.app)
+
+    # --- the version chain ------------------------------------------------
+
+    def test_publishing_appends_and_never_rewrites(self):
+        fn = self.logic[self.logic.index("export function appendSlateVersion(slate,"):]
+        fn = fn[:fn.index("/**\n * When the latest published version locks")]
+        # A new object, with the existing chain carried across untouched.
+        self.assertIn("const chain = slateVersions(slate);", fn)
+        self.assertIn("versions: [...chain, entry],", fn)
+        self.assertIn("const version = previous.version + 1;", fn)
+        # The latest values are mirrored up so existing readers resolve to them.
+        self.assertIn("fixtureIds,", fn)
+        # Nothing in here mutates a prior entry.
+        for mutation in ("chain[", "previous.fixtureIds =", ".push(", ".splice("):
+            if mutation == "chain[":
+                continue
+            self.assertNotIn(mutation, fn, mutation)
+
+    def test_a_slate_without_a_version_is_version_one(self):
+        self.assertIn("export const slateVersion = (slate) =>", self.logic)
+        self.assertIn("export function slateVersions(slate)", self.logic)
+        chain = self.logic[self.logic.index("export function slateVersions(slate)"):]
+        chain = chain[:chain.index("/** What an amendment did")]
+        self.assertIn("if (Array.isArray(slate.versions) && slate.versions.length) return slate.versions;", chain)
+        self.assertIn("version: 1,", chain)
+
+    def test_the_lock_is_the_earliest_kickoff_with_no_grace(self):
+        fn = self.logic[self.logic.index("export function slateLockAt(slate, pool = null)"):]
+        fn = fn[:fn.index("/** Has the latest published version locked?")]
+        # The earliest kickoff among the LATEST version's fixtures, live pool
+        # first and the snapshot as fallback.
+        self.assertIn("Math.min(...times)", fn)
+        self.assertIn("slate?.snapshot?.fixtures", fn)
+        locked = self.logic[self.logic.index("export function slateIsLocked(slate, nowMs, pool = null)"):]
+        locked = locked[:locked.index("// ---")] if "// ---" in locked else locked[:400]
+        # >= , not > : the kickoff itself freezes it. No grace window.
+        self.assertIn("nowMs >= at", locked)
+
+    def test_amendment_is_refused_after_lock_with_no_override(self):
+        fn = self.worker[self.worker.index("async function amendSlate(env, league, period,"):]
+        fn = fn[:fn.index("/** \"2 fixtures added, 1 removed\"")]
+        self.assertIn('return { amended: false, reason: "locked", lockAt, slate: normaliseSlate(existing) };', fn)
+        # No force/override parameter exists on this path at all.
+        for override in ("force", "override", "ignoreLock"):
+            self.assertNotIn(override, fn, override)
+        self.assertIn("the first fixture has kicked off — this week\u2019s line-up is final".replace("\u2019", "'"), self.worker)
+
+    def test_an_amendment_notifies_once_per_version(self):
+        fn = self.worker[self.worker.index("async function amendSlate(env, league, period,"):]
+        fn = fn[:fn.index("/** \"2 fixtures added, 1 removed\"")]
+        self.assertIn("`amend-v${next.version}`", fn)
+        self.assertIn('title: "Line-up updated"', fn)
+        self.assertIn("update your picks before kick-off.", fn)
+        # Pushes can carry a title now, not just a body.
+        self.assertIn('const alert = typeof message === "string" ? message : { title: message.title, body: message.body };', self.worker)
+
+    def test_the_fallback_still_never_touches_a_published_week(self):
+        fn = self.worker[self.worker.index("async function applyFallback(env, league, period, roundFixtures"):]
+        fn = fn[:fn.index("/**\n * Folds a reschedule into a PUBLISHED slate")]
+        self.assertIn('if (isPublishedSlate(stored)) return { published: false, reason: "alreadyPublished" };', fn)
+        self.assertNotIn("amendSlate", fn, "the safety net never amends a line-up somebody chose")
+
+    # --- the nickname fix -------------------------------------------------
+
+    def test_a_rename_writes_through_the_cache_and_repaints(self):
+        self.assertIn("function applyNickLocally(code, memberUid, nick)", self.app)
+        fn = self.app[self.app.index("function applyNickLocally(code, memberUid, nick)"):]
+        fn = fn[:fn.index("/**\n * Warms the cache")]
+        # The live state, the round table and the cached copy all follow.
+        self.assertIn("cacheLeagueState(leagueState);", fn)
+        self.assertIn("roundState = { ...roundState, table: rename(roundState.table)", fn)
+        self.assertIn("leagueStates = { ...leagueStates, [code]:", fn)
+        # And the handler repaints before waiting on the server.
+        handler = self.app[self.app.index('const nick = event.target.closest("[data-league-nick]")'):]
+        handler = handler[:handler.index("const kick = event.target.closest")]
+        self.assertIn("applyNickLocally(code, uid(), result.nick);", handler)
+        self.assertLess(handler.index("applyNickLocally"), handler.index("await loadLeagueState()"))
+        self.assertLess(handler.index("render();"), handler.index("await loadLeagueState()"))
 
 
 if __name__ == "__main__":

@@ -24,18 +24,27 @@ import {
   windowKeyFor,
 } from "../src/competitions.js";
 import {
+  appendSlateVersion,
+  applySlates,
   buildSlateSnapshot,
   canAdvanceSlate,
+  computeTable,
   isDraftSlate,
   isPublishedSlate,
   normaliseSlate,
   preloadSelection,
   randomSelection,
   refreshSnapshot,
+  slateDelta,
+  slateIsLocked,
+  slateLockAt,
   slateStatus,
+  slateVersion,
+  slateVersions,
 } from "../src/logic.js";
 
 const HOUR = 60 * 60 * 1000;
+const settleMatch = (match, p1, p2) => ({ ...match, status: "complete", result: [p1, p2] });
 const DAY = 24 * HOUR;
 
 function memoryKV(store = new Map()) {
@@ -479,44 +488,222 @@ test("a draft is rewritable, invisible to members, and does not score", async ()
   });
 });
 
-test("publishing is one-way: a published week is a 409, forever", async () => {
-  const list = round();
-  const { env } = endpointEnv();
+test("publishing is one-way, but a published week may be AMENDED until it locks", async () => {
+  // v1.5k replaces the blanket 409 with a version chain: before the first
+  // kickoff an amendment appends a version; after it, the week is final.
+  const list = round(10, Date.now() + 20 * HOUR);
+  const { env, store } = endpointEnv();
   await withFixtures(list, async () => {
     await prime(env);
     const send = post(env);
     const { code } = await (await send("/league", { uid: "host", competitions: ["PL"], fixtureMode: "limited" })).json();
     const ids = list.map((match) => match.id);
 
-    assert.equal((await send("/league/slate", { uid: "host", code, period: "1", fixtureIds: ids.slice(0, 6) })).status, 200);
-    assert.equal((await send("/league/slate", { uid: "host", code, period: "1", fixtureIds: ids.slice(0, 5) })).status, 409);
-    // Nor can it be dropped back to a draft.
-    const backwards = await send("/league/slate", { uid: "host", code, period: "1", action: "draft", fixtureIds: ids.slice(0, 3) });
-    assert.equal(backwards.status, 409);
+    const first = await send("/league/slate", { uid: "host", code, period: "1", fixtureIds: ids.slice(0, 6) });
+    assert.equal(first.status, 200);
+    assert.equal((await first.json()).slate.version, 1);
+
+    // An amendment before lock: 200, version 2, with the delta reported.
+    const amended = await send("/league/slate", { uid: "host", code, period: "1", fixtureIds: ids.slice(2, 9) });
+    assert.equal(amended.status, 200);
+    const body = await amended.json();
+    assert.equal(body.amended, true);
+    assert.equal(body.slate.version, 2);
+    assert.deepEqual(body.changed.added.sort(), [ids[6], ids[7], ids[8]].sort());
+    assert.deepEqual(body.changed.removed.sort(), [ids[0], ids[1]].sort());
+    assert.equal(body.changed.retained.length, 4);
+
+    // Publishing an identical line-up is a no-op, not a new version.
+    const same = await send("/league/slate", { uid: "host", code, period: "1", fixtureIds: ids.slice(2, 9) });
+    assert.equal(same.status, 200);
+    assert.equal((await same.json()).unchanged, true);
+    assert.equal(JSON.parse(store.get(`custom_slate:${code}:1`)).version, 2, "no version was appended");
+
+    // A draft cannot be saved over a published week.
+    const draft = await send("/league/slate", { uid: "host", code, period: "1", action: "draft", fixtureIds: ids.slice(0, 3) });
+    assert.equal(draft.status, 409);
   });
 });
 
-test("a legacy slate is published, so an existing league never becomes editable", async () => {
+test("the version chain is append-only: v1 survives v2 untouched", async () => {
+  const list = round(10, Date.now() + 20 * HOUR);
+  const { env, store } = endpointEnv();
+  await withFixtures(list, async () => {
+    await prime(env);
+    const send = post(env);
+    const { code } = await (await send("/league", { uid: "host", competitions: ["PL"], fixtureMode: "limited" })).json();
+    const ids = list.map((match) => match.id);
+
+    await send("/league/slate", { uid: "host", code, period: "1", fixtureIds: ids.slice(0, 6) });
+    const v1 = JSON.parse(store.get(`custom_slate:${code}:1`));
+    const v1Frozen = JSON.stringify(v1.versions[0]);
+
+    await send("/league/slate", { uid: "host", code, period: "1", fixtureIds: ids.slice(0, 5) });
+    await send("/league/slate", { uid: "host", code, period: "1", fixtureIds: ids.slice(0, 4) });
+    const after = JSON.parse(store.get(`custom_slate:${code}:1`));
+
+    assert.equal(after.version, 3);
+    assert.equal(after.versions.length, 3, "one entry per publish, nothing collapsed");
+    assert.equal(JSON.stringify(after.versions[0]), v1Frozen, "version 1 is byte-identical after two amendments");
+    assert.deepEqual(after.versions.map((v) => v.version), [1, 2, 3]);
+    assert.deepEqual(after.versions.map((v) => v.fixtureIds.length), [6, 5, 4]);
+    assert.equal(after.versions[0].changed, null, "the first version changed nothing");
+    assert.deepEqual(after.versions[1].changed.removed, [ids[5]]);
+    // Reads resolve to the latest.
+    assert.deepEqual(after.fixtureIds, after.versions[2].fixtureIds);
+    assert.equal(after.snapshot.fixtures.length, 4);
+  });
+});
+
+test("amendment is refused at exactly the first kickoff, with no grace", async () => {
+  // The pool's earliest kickoff is the freeze point. Ashton's rule, verbatim:
+  // refused once now >= firstKickoffAt of the latest published version.
+  const soon = Date.now() + 2 * HOUR;
+  const list = round(10, soon);
+  const { env, store } = endpointEnv();
+  await withFixtures(list, async () => {
+    await prime(env);
+    const send = post(env);
+    const { code } = await (await send("/league", { uid: "host", competitions: ["PL"], fixtureMode: "limited" })).json();
+    const ids = list.map((match) => match.id);
+    // Publish a line-up whose earliest fixture is the third, two hours out.
+    await send("/league/slate", { uid: "host", code, period: "1", fixtureIds: ids.slice(0, 4) });
+    const slate = JSON.parse(store.get(`custom_slate:${code}:1`));
+
+    const lockAt = slateLockAt(slate, list);
+    assert.equal(lockAt, Date.parse(list[0].startAt), "locks on the earliest kickoff in the version");
+    assert.equal(slateIsLocked(slate, lockAt - 1, list), false, "a millisecond before: still amendable");
+    assert.equal(slateIsLocked(slate, lockAt, list), true, "at the kickoff itself: frozen");
+    assert.equal(slateIsLocked(slate, lockAt + 1, list), true);
+  });
+
+  // And the endpoint refuses once that moment has passed.
+  const started = round(10, Date.now() - HOUR);
+  const { env: late, store: lateStore } = endpointEnv();
+  await withFixtures(started, async () => {
+    await prime(late);
+    const send = post(late);
+    const { code } = await (await send("/league", { uid: "host", competitions: ["PL"], fixtureMode: "limited" })).json();
+    const ids = started.map((match) => match.id);
+    lateStore.set(`custom_slate:${code}:1`, JSON.stringify({
+      status: "published", version: 1, mode: "custom", fixtureIds: ids.slice(0, 4),
+      periodKey: "1", ruleSource: "host", setBy: "host",
+      snapshot: { periodKey: "1", fixtures: ids.slice(0, 4).map((id) => ({ id, kickoffAt: started.find((m) => m.id === id).startAt })) },
+    }));
+    const refused = await send("/league/slate", { uid: "host", code, period: "1", fixtureIds: ids.slice(0, 6) });
+    assert.equal(refused.status, 409);
+    const body = await refused.json();
+    assert.match(body.error, /kicked off/);
+    assert.ok(body.lockAt, "the refusal says when it locked");
+    // And nothing was written.
+    assert.equal(JSON.parse(lateStore.get(`custom_slate:${code}:1`)).fixtureIds.length, 4);
+  });
+});
+
+test("an amendment notifies once per version, with the delta in the body", async () => {
+  const list = round(10, Date.now() + 20 * HOUR);
+  const { env, store } = endpointEnv();
+  await withFixtures(list, async () => {
+    await prime(env);
+    const send = post(env);
+    const { code } = await (await send("/league", { uid: "host", nickname: "Host", competitions: ["PL"], fixtureMode: "limited", name: "Sunday Six" })).json();
+    await send("/join", { uid: "m2", code, nickname: "Two" });
+    const ids = list.map((match) => match.id);
+
+    await send("/league/slate", { uid: "host", code, period: "1", fixtureIds: ids.slice(0, 6) });
+    await send("/league/slate", { uid: "host", code, period: "1", fixtureIds: ids.slice(1, 9) });
+
+    assert.ok(store.has(`notified:amend-v2:${code}:1`), "deduped on league + period + version");
+    assert.equal(store.has(`notified:amend-v3:${code}:1`), false);
+
+    // A second identical amendment neither appends nor re-notifies.
+    const before = [...store.keys()].filter((k) => k.startsWith("notified:")).length;
+    await send("/league/slate", { uid: "host", code, period: "1", fixtureIds: ids.slice(1, 9) });
+    assert.equal([...store.keys()].filter((k) => k.startsWith("notified:")).length, before);
+
+    // A third, genuinely different line-up gets its own version and notice.
+    await send("/league/slate", { uid: "host", code, period: "1", fixtureIds: ids.slice(1, 8) });
+    assert.ok(store.has(`notified:amend-v3:${code}:1`));
+  });
+});
+
+test("the amendment body reads as a member would say it", () => {
+  assert.equal(describeDeltaFor({ added: ["a", "b"], removed: ["c"], retained: [] }), "2 fixtures added, 1 fixture removed");
+  assert.equal(describeDeltaFor({ added: ["a"], removed: [], retained: [] }), "1 fixture added");
+  assert.equal(describeDeltaFor({ added: [], removed: ["a", "b"], retained: [] }), "2 fixtures removed");
+});
+
+// describeDelta is internal to the worker; mirrored here so the copy is pinned
+// by a test rather than only by eye.
+function describeDeltaFor(delta) {
+  const count = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+  const parts = [];
+  if (delta.added.length) parts.push(`${count(delta.added.length, "fixture")} added`);
+  if (delta.removed.length) parts.push(`${count(delta.removed.length, "fixture")} removed`);
+  return parts.join(", ");
+}
+
+test("picks on retained fixtures survive; dropped ones fall out of scoring", () => {
+  // Amending does not touch picks: scoring simply resolves to the latest
+  // version's fixture list, so a dropped fixture's pick stops counting without
+  // being deleted, and an added fixture starts unpicked.
+  const list = round(6).map((match) => settleMatch(match, 1, 0));
+  const members = [{ uid: "a", nick: "A", since: 0 }];
+  const picks = Object.fromEntries(list.map((match) => [match.id, { a: { p1: 1, p2: 0, ts: 1 } }]));
+  const v1 = { status: "published", version: 1, mode: "custom", fixtureIds: list.slice(0, 4).map((m) => m.id) };
+  const v2 = appendSlateVersion(v1, {
+    fixtureIds: [list[0].id, list[1].id, list[4].id],   // kept 2, dropped 2, added 1
+    mode: "custom", ruleSource: "host-amend", snapshot: null, setBy: "host",
+  });
+  assert.deepEqual(v2.versions[1].changed.retained.sort(), [list[0].id, list[1].id].sort());
+  assert.deepEqual(v2.versions[1].changed.removed.sort(), [list[2].id, list[3].id].sort());
+  assert.deepEqual(v2.versions[1].changed.added, [list[4].id]);
+
+  const completed = list.map((match) => ({
+    id: match.id, startMs: Date.parse(match.startAt), result: { p1: 1, p2: 0 }, voided: false, matchday: 1,
+  }));
+  // v1 scored four exact; v2 scores three — the two dropped picks fall away and
+  // the added fixture is picked here too, so it counts.
+  assert.equal(computeTable(members, applySlates(completed, { 1: v1 }), picks)[0].pts, 4 * 5);
+  assert.equal(computeTable(members, applySlates(completed, { 1: v2 }), picks)[0].pts, 3 * 5);
+  // The picks themselves are untouched either way.
+  assert.equal(Object.keys(picks).length, 6);
+});
+
+test("a legacy slate reads as version 1 and amends into version 2", async () => {
   const list = round();
   const store = new Map([
     ["league:OLD123", JSON.stringify({ code: "OLD123", name: "Legacy", owner: "old", customMix: true, hadSlates: true })],
     ["member:OLD123:old", JSON.stringify({ nick: "Old", since: 0 })],
-    // Exactly the shape v1.4 wrote: no status field at all.
+    // Exactly the shape v1.4 wrote: no status, no version, no chain.
     [`custom_slate:OLD123:1`, JSON.stringify({ mode: "custom", fixtureIds: list.slice(0, 6).map((m) => m.id), lockedAt: "2026-08-01T00:00:00Z", setBy: "old" })],
   ]);
   const before = store.get("custom_slate:OLD123:1");
   const { env } = endpointEnv(store);
   await withFixtures(list, async () => {
     await prime(env);
-    const send = post(env);
-    const rewrite = await send("/league/slate", { uid: "old", code: "OLD123", period: "1", fixtureIds: list.slice(0, 8).map((m) => m.id) });
-    assert.equal(rewrite.status, 409, "a slate written before the lifecycle existed is still final");
-    assert.equal(store.get("custom_slate:OLD123:1"), before, "and it is not rewritten to say so");
+    const stored = JSON.parse(before);
+    assert.equal(slateVersion(stored), 1, "a slate with no version IS version 1");
+    const chain = slateVersions(stored);
+    assert.equal(chain.length, 1);
+    assert.deepEqual(chain[0].fixtureIds, stored.fixtureIds, "synthesised from what it already carries");
+    assert.equal(chain[0].changed, null);
 
     const state = await (await get(env)("/state?code=OLD123&period=1")).json();
     assert.equal(state.slate.status, "published");
+    assert.equal(state.slate.version, 1);
     assert.equal(state.slate.count, 6);
-    assert.equal(state.draft, null);
+
+    // Reading it never rewrote it.
+    assert.equal(store.get("custom_slate:OLD123:1"), before, "untouched by reads");
+
+    // Amending appends version 2 and leaves the synthesised v1 in the chain.
+    const amended = await post(env)("/league/slate", { uid: "old", code: "OLD123", period: "1", fixtureIds: list.slice(0, 8).map((m) => m.id) });
+    assert.equal(amended.status, 200);
+    const after = JSON.parse(store.get("custom_slate:OLD123:1"));
+    assert.equal(after.version, 2);
+    assert.deepEqual(after.versions.map((v) => v.version), [1, 2]);
+    assert.deepEqual(after.versions[0].fixtureIds, JSON.parse(before).fixtureIds, "the pre-versioning line-up is on the record");
   });
 });
 

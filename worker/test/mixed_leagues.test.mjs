@@ -308,9 +308,11 @@ test("a mixed league slates, locks and scores on its own week window", async () 
     assert.equal(nextWeek.status, 200, "the pool is the only ceiling, and the floor gives way to it");
     assert.equal((await nextWeek.json()).slate.fixtureIds.length, 1);
 
-    // Immutability survives the move to windows.
+    // v1.5k: re-publishing the same line-up before lock is a no-op rather than
+    // a rewrite — and a different one would append a version, never replace.
     const rewrite = await send("/league/slate", { uid: "host", code, period: "w2026-08-11", mode: "custom", fixtureIds: ids });
-    assert.equal(rewrite.status, 409);
+    assert.equal(rewrite.status, 200);
+    assert.equal((await rewrite.json()).unchanged, true);
 
     // Results land in both competition keys and the table unions them.
     store.set("results:PL", JSON.stringify({

@@ -368,6 +368,19 @@ export function periodClosesAt(period) {
   return opens == null ? null : opens + 7 * 86400000;
 }
 
+/**
+ * A league's own periods in order. Week 1 is its opening window, and every
+ * week after it is the next number — the same counting the app shows, derived
+ * from the same pool, so a push and the screen agree.
+ */
+export const orderedPeriods = (byPeriod) => [...byPeriod.keys()].sort(comparePeriods);
+
+/** Which week of this league's season a period is, or null if unknown. */
+export function weekNumberOf(period, ordered) {
+  const index = (ordered || []).indexOf(String(period));
+  return index < 0 ? null : index + 1;
+}
+
 /** Orders periods chronologically: window keys as strings, matchweeks as numbers. */
 export function comparePeriods(a, b) {
   const numeric = Number(a) - Number(b);

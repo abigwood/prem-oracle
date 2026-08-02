@@ -47,6 +47,8 @@ import {
   MIN_FIXTURE_COUNT,
   comparePeriods,
   competitionOfFixture,
+  orderedPeriods,
+  weekNumberOf,
   defaultScopeFor,
   effectiveFixtureCount,
   isCompetition,
@@ -562,12 +564,21 @@ async function setCustomMix(env, body) {
   return json({ ok: true, code, customMix: body.enabled, fixtureMode: league.fixtureMode }, 200, env);
 }
 
-/** "Matchweek 7" / "your week of Tue 11 – Mon 17 Aug" — the member-facing period. */
-const periodLabelFor = (league, period) =>
-  (isMixedLeague(league) ? `your week of ${windowLabel(period)}` : `Matchweek ${period}`);
+/**
+ * How a period is named to members. A window league counts its own weeks —
+ * "Week 11" — matching the app exactly; a single-competition league keeps its
+ * official matchweek. If the week ordering isn't to hand the date range is
+ * still true, so it falls back to that rather than to "Week null".
+ */
+const periodLabelFor = (league, period, weekNo = null) => {
+  if (!isMixedLeague(league)) return `Matchweek ${period}`;
+  return weekNo == null ? `your week of ${windowLabel(period)}` : `Week ${weekNo}`;
+};
 
-const periodTitleFor = (league, period) =>
-  (isMixedLeague(league) ? `Your week of ${windowLabel(period)}` : `Matchweek ${period}`);
+const periodTitleFor = (league, period, weekNo = null) => {
+  if (!isMixedLeague(league)) return `Matchweek ${period}`;
+  return weekNo == null ? `Your week of ${windowLabel(period)}` : `Week ${weekNo}`;
+};
 
 /** Rejects a period that isn't shaped like one for this league. */
 function readPeriod(league, body) {
@@ -590,7 +601,7 @@ function readPeriod(league, body) {
  * carries the record the caller read, and a mismatch means somebody else got
  * there first.
  */
-async function publishSlate(env, league, period, { fixtureIds, mode, ruleSource, setBy, pool, announce = true }) {
+async function publishSlate(env, league, period, { fixtureIds, mode, ruleSource, setBy, pool, weekNo = null, announce = true }) {
   const code = league.code;
   const existing = await kvGet(env, slateKey(code, period));
   if (isPublishedSlate(existing)) return { published: false, reason: "alreadyPublished", slate: normaliseSlate(existing) };
@@ -616,7 +627,7 @@ async function publishSlate(env, league, period, { fixtureIds, mode, ruleSource,
   if (!announce) return { published: true, slate };
   const memberList = await members(env, league);
   const audience = memberList.filter((member) => member.uid !== setBy).map((member) => member.uid);
-  const label = periodLabelFor(league, period);
+  const label = periodLabelFor(league, period, weekNo);
   const who = setBy ? hostNick(memberList, league) : league.name;
   const body = setBy
     ? `${who} has set ${fixtureIds.length} fixtures for ${label}. Make your picks!`
@@ -656,7 +667,9 @@ async function setSlate(env, body) {
   }
 
   const matchList = await leagueFixtures(env, league);
-  const pool = poolByPeriod(matchList, league).get(period) || [];
+  const byPeriod = poolByPeriod(matchList, league);
+  const pool = byPeriod.get(period) || [];
+  const weekNo = weekNumberOf(period, orderedPeriods(byPeriod));
   // The single validation path: floor one, ceiling the pool. The league's own
   // count is what the picker OPENS on — it is never a cap on the week the host
   // actually publishes, whatever rule the league normally runs on. A host who
@@ -687,6 +700,7 @@ async function setSlate(env, body) {
     ruleSource: "host",
     setBy: uid,
     pool,
+    weekNo,
   });
   if (!result.published) {
     return json({ error: "this matchweek's fixtures are already set", slate: result.slate }, 409, env);
@@ -1272,6 +1286,9 @@ const fixtureLabel = (match) => (match ? `${match.player1} v ${match.player2}` :
 function relevantPeriods(byPeriod, nowMs) {
   let open = null;
   const live = [];
+  // The league's own week ordering, so a push can say "Week 11" rather than
+  // reciting the dates.
+  const ordered = orderedPeriods(byPeriod);
   for (const [period, list] of byPeriod) {
     const first = Math.min(...list.map(kickoffMs));
     if (!Number.isFinite(first)) continue;
@@ -1286,7 +1303,7 @@ function relevantPeriods(byPeriod, nowMs) {
     if (Math.max(...list.map(kickoffMs)) < nowMs - PODIUM_LOOKBACK_MS) continue;
     live.push(entry);
   }
-  return { open, live };
+  return { open, live, ordered };
 }
 
 /**
@@ -1309,10 +1326,11 @@ async function pushOnce(env, pushType, leagueId, periodKey, uids, body) {
  * league has a real matchweek number and is told it; a mixed league runs on a
  * window and has no number to give, so naming one would be a lie.
  */
-async function remindHost(env, league, period) {
+async function remindHost(env, league, period, weekNo = null) {
   const body = isMixedLeague(league)
     ? `Set this week's fixtures for ${league.name}`
     : `Matchweek ${period} is open — set your fixtures`;
+  void weekNo;   // the mixed copy deliberately says "this week", not a number
   await pushOnce(env, "slate-open", league.code, period, [league.owner], body);
 }
 
@@ -1346,7 +1364,7 @@ function resolveRuleSelection(rule, league, period, pool) {
 }
 
 /** A set-and-forget league publishes itself the moment its pool opens. */
-async function autoPublish(env, league, period, pool) {
+async function autoPublish(env, league, period, pool, weekNo = null) {
   const rule = leagueWeeklyRule(league);
   const selection = resolveRuleSelection(rule, league, period, pool);
   if (!selection?.fixtureIds.length) return null;
@@ -1356,11 +1374,12 @@ async function autoPublish(env, league, period, pool) {
     ruleSource: selection.ruleSource,
     setBy: null,
     pool,
+    weekNo,
     announce: false,
   });
   if (!result.published) return result;
   await pushOnce(env, "slate-published", league.code, period, (await members(env, league)).map((member) => member.uid),
-    `${selection.fixtureIds.length} fixtures are live for ${periodLabelFor(league, period)} in ${league.name}. Make your picks!`);
+    `${selection.fixtureIds.length} fixtures are live for ${periodLabelFor(league, period, weekNo)} in ${league.name}. Make your picks!`);
   return result;
 }
 
@@ -1375,7 +1394,7 @@ async function autoPublish(env, league, period, pool) {
  *      league's own competitions, N being its weekly count. An empty draft is
  *      NEVER what gets published.
  */
-async function applyFallback(env, league, period, roundFixtures) {
+async function applyFallback(env, league, period, roundFixtures, weekNo = null) {
   const stored = await kvGet(env, slateKey(league.code, period));
   if (isPublishedSlate(stored)) return { published: false, reason: "alreadyPublished" };
 
@@ -1399,12 +1418,13 @@ async function applyFallback(env, league, period, roundFixtures) {
     ruleSource: `auto-published:${selection.ruleSource}`,
     setBy: null,
     pool: roundFixtures,
+    weekNo,
     announce: false,
   });
   if (!result.published) return result;
   const memberList = await members(env, league);
   await pushOnce(env, "auto-published", league.code, period, memberList.map((member) => member.uid),
-    `${periodTitleFor(league, period)} in ${league.name} is set — ${selection.fixtureIds.length} fixtures are open. Get your picks in!`);
+    `${periodTitleFor(league, period, weekNo)} in ${league.name} is set — ${selection.fixtureIds.length} fixtures are open. Get your picks in!`);
   return result;
 }
 
@@ -1413,7 +1433,7 @@ async function applyFallback(env, league, period, roundFixtures) {
  * times move, a fixture that has gone is marked unavailable and stops scoring,
  * and nothing is ever swapped in behind the members.
  */
-async function reconcilePostponements(env, league, slate, period, roundFixtures, nowMs) {
+async function reconcilePostponements(env, league, slate, period, roundFixtures, nowMs, weekNo = null) {
   if (!isPublishedSlate(slate)) return;
   const change = reconcileSlate(slate, roundFixtures, nowMs);
   const snapshot = refreshSnapshot(slate.snapshot, roundFixtures);
@@ -1429,7 +1449,7 @@ async function reconcilePostponements(env, league, slate, period, roundFixtures,
   const gone = change.dropped.map((id) => fixtureLabel(byId.get(id))).join(", ");
   const memberList = await members(env, league);
   await pushToUids(env, memberList.map((member) => member.uid),
-    `${gone} was postponed and no longer counts in ${league.name}. ${periodTitleFor(league, period)} now scores ${change.fixtureIds.length} fixtures.`);
+    `${gone} was postponed and no longer counts in ${league.name}. ${periodTitleFor(league, period, weekNo)} now scores ${change.fixtureIds.length} fixtures.`);
 }
 
 /**
@@ -1461,30 +1481,36 @@ export async function weeklyLoop(env, nowMs = Date.now()) {
       const list = await leagueFixtures(env, league);
       periodsBySet.set(setKey, relevantPeriods(poolByPeriod(list, league), now));
     }
-    const { open, live } = periodsBySet.get(setKey);
+    const { open, live, ordered } = periodsBySet.get(setKey);
     for (const week of live) {
       const slate = await readPublishedSlate(env, code, week.period);
-      if (slate) await reconcilePostponements(env, league, slate, week.period, week.fixtures, now);
+      if (slate) {
+        await reconcilePostponements(env, league, slate, week.period, week.fixtures, now,
+          weekNumberOf(week.period, ordered));
+      }
     }
     if (!open) continue;
+    const openWeekNo = weekNumberOf(open.period, ordered);
     const slate = await readPublishedSlate(env, code, open.period);
     if (slate) {
-      await reconcilePostponements(env, league, slate, open.period, open.fixtures, now);
+      await reconcilePostponements(env, league, slate, open.period, open.fixtures, now, openWeekNo);
       continue;
     }
     const rule = leagueWeeklyRule(league);
     // The fallback deadline is a clear day before the first ELIGIBLE kickoff of
     // this league's period — the pool it can actually draw on, not the calendar.
     if (now >= open.firstKickoff - FALLBACK_LEAD_MS) {
-      await applyFallback(env, league, open.period, open.fixtures);
+      await applyFallback(env, league, open.period, open.fixtures, openWeekNo);
       continue;
     }
     if (isSetAndForget(rule)) {
       // Rule leagues publish as soon as the pool is open, with no admin step.
-      if (periodIsOpen(open.period, now, open.firstKickoff)) await autoPublish(env, league, open.period, open.fixtures);
+      if (periodIsOpen(open.period, now, open.firstKickoff)) {
+        await autoPublish(env, league, open.period, open.fixtures, openWeekNo);
+      }
       continue;
     }
-    if (periodIsOpen(open.period, now, open.firstKickoff)) await remindHost(env, league, open.period);
+    if (periodIsOpen(open.period, now, open.firstKickoff)) await remindHost(env, league, open.period, openWeekNo);
   }
 }
 

@@ -17,6 +17,8 @@ import {
   periodKeyOf,
   periodOpensAt,
   periodClosesAt,
+  orderedPeriods,
+  weekNumberOf,
   scopeCompetitions,
   validateWeeklyRule,
   windowKeyFor,
@@ -747,6 +749,55 @@ test("nothing opens weeks early: a matchweek waits for its own week", async () =
     const slate = JSON.parse(soonStore.get(`custom_slate:${code}:1`));
     assert.equal(slate.fixtureIds.length, 10, "every fixture, as an every-fixture league expects");
   });
+});
+
+test("a mixed league's pushes count weeks, not dates", async () => {
+  const soon = WEDNESDAY + 20 * HOUR;
+  const mixed = [
+    { id: "pl-2026-27-001-a-b", matchday: 1, player1: "A", player2: "B", startAt: new Date(soon).toISOString() },
+    { id: "elc-2026-27-001-c-d", matchday: 1, player1: "C", player2: "D", startAt: new Date(soon + HOUR).toISOString() },
+    // A later week, so the ordering has something to count.
+    { id: "pl-2026-27-002-e-f", matchday: 2, player1: "E", player2: "F", startAt: new Date(soon + 8 * DAY).toISOString() },
+  ];
+  const store = new Map();
+  const env = {
+    FIXTURES_URL: "https://example.com/pl.json",
+    FIXTURES_URL_ELC: "https://example.com/elc.json",
+    KV: memoryKV(store),
+  };
+  const sent = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => new Response(JSON.stringify({
+    fixtures: mixed.filter((f) => f.id.startsWith(String(url).includes("elc") ? "elc-" : "pl-")),
+  }), { status: 200 });
+  try {
+    await get(env)("/fixtures?competition=PL&refresh=1");
+    await get(env)("/fixtures?competition=ELC&refresh=1");
+    const { code } = await (await post(env)("/league", {
+      uid: "host", competitions: ["PL", "ELC"], fixtureMode: "limited",
+      weeklyRule: { method: "manual", competitionScope: "mixed", count: 2 },
+    })).json();
+    await runLoopAt(env, WEDNESDAY);
+    const period = windowKeyFor(mixed[0].startAt);
+    const slate = JSON.parse(store.get(`custom_slate:${code}:${period}`));
+    assert.equal(slate.status, "published", "the fallback fired");
+    // The push copy is built from the same helpers, so assert them directly:
+    // the league's opening window is Week 1, not "your week of Tue …".
+    assert.equal(weekNumberOf(period, [period, "w2099-01-01"]), 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("week numbering counts a league's own periods in order", () => {
+  const byPeriod = new Map([["w2026-09-01", []], ["w2026-08-11", []], ["w2026-08-18", []]]);
+  const ordered = orderedPeriods(byPeriod);
+  assert.deepEqual(ordered, ["w2026-08-11", "w2026-08-18", "w2026-09-01"], "chronological, not insertion order");
+  assert.equal(weekNumberOf("w2026-08-11", ordered), 1, "the opening window is Week 1");
+  assert.equal(weekNumberOf("w2026-09-01", ordered), 3);
+  assert.equal(weekNumberOf("w2026-12-25", ordered), null, "a period the league does not play has no week");
+  // Matchweeks order numerically, so a single-competition league counts too.
+  assert.deepEqual(orderedPeriods(new Map([["10", []], ["2", []], ["1", []]])), ["1", "2", "10"]);
 });
 
 // --- the fallback matrix ----------------------------------------------------

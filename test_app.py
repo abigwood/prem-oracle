@@ -395,13 +395,12 @@ class MatchweekTerminologyTests(unittest.TestCase):
         for snippet in (
             'countPhrase(rounds, "Matchweeks")',
             'class="tour-badge">Matchweek ',
-            "MW ${value}",
             "Matchweek ${escapeHTML(period)} is open",
             "🏆 ${competition} ${week}",
-            "${escapeHTML(periodLabel(period))} \u25be",
+            "${escapeHTML(label)} \u25be",
             "Share Matchweek ",
             "Loading matchweek",
-            'aria-label="Choose matchweek"',
+            '"Choose a matchweek"',
         ):
             self.assertIn(snippet, self.app, snippet)
         self.assertIn("Matchweek ${match.matchday}", self.logic)
@@ -766,9 +765,10 @@ class CustomMixTests(unittest.TestCase):
         self.assertIn("You've picked ${pickedCount} of ${roundFixtures.length}", self.app)
 
     def test_host_banner_names_the_period(self):
-        # A matchweek for a single competition, a week window for a mix.
-        self.assertIn("Pick fixtures for ${escapeHTML(periodLabel(period))}", self.app)
-        self.assertIn("Pick fixtures for ${escapeHTML(periodLabel(state.currentPeriod))}", self.app)
+        # A matchweek for a single competition, "Week N · 18–24 Aug" for a mix —
+        # the dates earn their place here because you are choosing fixtures.
+        self.assertIn("Pick fixtures for ${escapeHTML(periodLabelLong(period))}", self.app)
+        self.assertIn("Pick fixtures for ${escapeHTML(periodLabelLong(state.currentPeriod))}", self.app)
 
     def test_worker_routes_and_storage_key(self):
         for route in ("/league/slate", "/league/custom-mix", "/account/delete"):
@@ -1101,7 +1101,7 @@ class WeeklyLoopTests(unittest.TestCase):
         self.assertIn("const FALLBACK_LEAD_MS = 24 * 60 * 60 * 1000;", self.worker)
 
     def test_set_and_forget_publishes_with_no_admin_step(self):
-        self.assertIn("async function autoPublish(env, league, period, pool)", self.worker)
+        self.assertIn("async function autoPublish(env, league, period, pool, weekNo = null)", self.worker)
         self.assertIn("if (isSetAndForget(rule))", self.worker)
         self.assertIn('path === "/league/weekly-rule"', self.worker)
         self.assertIn("async function setWeeklyRule(env, body)", self.worker)
@@ -1225,6 +1225,226 @@ class WeeklyLoopTests(unittest.TestCase):
         self.assertIn('if (branch === "preseason") return', today)
         self.assertIn("No picks due yet", today)
         self.assertIn("All done for", today)
+
+
+class WeekPickerTests(unittest.TestCase):
+    """UI polish: the week strip, the season month view, the profile cleanup."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = (ROOT / "app.js").read_text()
+        cls.css = (ROOT / "styles.css").read_text()
+
+    # --- the everyday strip ------------------------------------------------
+
+    def test_the_strip_is_centred_on_the_current_week(self):
+        strip = self.app[self.app.index("function weekStrip(selected, attribute)"):]
+        strip = strip[:strip.index("function weekSeasonPicker")]
+        # The current week is marked so the scroller can find it...
+        self.assertIn('data-week-anchor="1"', strip)
+        self.assertIn('aria-current="${isCurrent ? "date" : "false"}"', strip)
+        # ...and the scroller centres it without dragging the page with it.
+        centre = self.app[self.app.index("function centreWeekStrip()"):]
+        centre = centre[:centre.index("function render(options = {})")]
+        self.assertIn('strip.querySelector("[data-week-anchor]")', centre)
+        self.assertIn("strip.scrollLeft += (chipBox.left - stripBox.left) - (strip.clientWidth - chipBox.width) / 2;", centre)
+        self.assertNotIn("scrollIntoView", centre)
+        self.assertIn("centreWeekStrip();", self.app)
+
+    def test_past_weeks_are_faded_and_the_current_one_is_biggest(self):
+        strip = self.app[self.app.index("function weekStrip(selected, attribute)"):]
+        strip = strip[:strip.index("function weekSeasonPicker")]
+        self.assertIn("const past = comparePeriods(period, current) < 0;", strip)
+        self.assertIn('past ? " is-past" : ""', strip)
+        self.assertIn(".week-chip.is-past { opacity: .45; }", self.css)
+        # Filled green and the largest thing on the strip.
+        current = self.css[self.css.index(".week-chip.is-current {"):]
+        current = current[:current.index("}")]
+        self.assertIn("background: var(--green);", current)
+        self.assertIn("transform: scale(1.06);", current)
+        self.assertIn(".week-chip.is-current b { color: var(--white); font-size: .95rem; }", self.css)
+        self.assertIn("overflow-x: auto;", self.css[self.css.index(".week-strip {"):])
+
+    def test_chips_are_week_n_with_a_date_subtitle(self):
+        strip = self.app[self.app.index("function weekStrip(selected, attribute)"):]
+        strip = strip[:strip.index("function weekSeasonPicker")]
+        # Labelled from the period, so a window reads "Week 11" and a matchweek
+        # league "Matchweek 11"; the date subtitle is window-only.
+        self.assertIn("<b>${escapeHTML(periodLabel(period))}</b>", strip)
+        self.assertIn("escapeHTML(weekDateRange(period))", strip)
+
+    def test_the_tuesday_convention_is_stated_once_not_per_chip(self):
+        self.assertIn('const WEEK_CONVENTION = `<p class="week-convention">Weeks run Tuesday to Monday.</p>`;', self.app)
+        # No chip anywhere carries a weekday prefix any more.
+        for surface in ("function weekStrip(selected, attribute)", "function weekSeasonPicker(selected, attribute)"):
+            block = self.app[self.app.index(surface):]
+            block = block[:block.index("\n}\n")]
+            self.assertNotIn("windowLabel", block, surface)
+        # And the old long-label pickers are gone.
+        self.assertNotIn("md-picker-wide", self.app)
+        self.assertNotIn("md-picker-wide", self.css)
+        self.assertNotIn("escapeHTML(windowLabel(value))", self.app)
+
+    def test_weeks_are_numbered_from_the_leagues_first_and_never_called_rounds(self):
+        fn = self.app[self.app.index("function weekNumberFor(period)"):]
+        fn = fn[:fn.index("const MONTHS_SHORT")]
+        self.assertIn("periodsInOrder().indexOf(String(period))", fn)
+        self.assertIn("index + 1", fn)
+        # "Round" is reserved for official competition rounds.
+        for surface in ("function weekStrip(selected, attribute)", "function weekSeasonPicker(selected, attribute)"):
+            block = self.app[self.app.index(surface):]
+            block = block[:block.index("\n}\n")]
+            self.assertNotIn("Round", block, surface)
+            self.assertNotIn("round", block.replace("periodsInOrder", ""), surface)
+
+    # --- the season view ---------------------------------------------------
+
+    def test_the_season_view_puts_the_cabinet_above_the_week_pills(self):
+        # Order: season header, trophy cabinet, month pills, table.
+        line = [l for l in self.app.splitlines() if "inner = `${seasonBanner(state)}" in l][0]
+        for earlier, later in (("seasonBanner", "trophyCabinet"),
+                               ("trophyCabinet", "seasonWeeks"),
+                               ("seasonWeeks", "seasonTableHtml")):
+            self.assertLess(line.index(earlier), line.index(later), f"{earlier} must precede {later}")
+
+    def test_week_naming_reaches_every_window_surface(self):
+        label = self.app[self.app.index("const periodLabel = (period) =>"):]
+        label = label[:label.index("/** Chronological order for periods")]
+        # Week N primary for a window, matchweek for a single competition.
+        self.assertIn("if (!isWindowKey(period)) return `Matchweek ${period}`;", label)
+        self.assertIn("return week == null ? windowLabel(period) : `Week ${week}`;", label)
+        # The long form adds the range, for the places where dates help.
+        self.assertIn("`Week ${week} \u00b7 ${weekDateRange(period)}`", label)
+        # Every named surface now goes through one of the two.
+        for surface in (
+            "Pick fixtures for ${escapeHTML(periodLabelLong(period))}",
+            "Pick fixtures for ${escapeHTML(periodLabelLong(state.currentPeriod))}",
+            "${escapeHTML(periodLabelLong(pickerPeriod))}",
+            "`Share ${periodLabel(roundState.period)} results`",
+            "periodLabel(round.period)",
+            "${periodLabel(period)} in progress",
+        ):
+            self.assertIn(surface, self.app, surface)
+        # No surface builds a window name from windowLabel by hand any more.
+        for gone in (
+            "windowLabel(state.currentPeriod)",
+            "windowLabel(round.period)",
+            "windowLabel(pickerPeriod)",
+        ):
+            self.assertNotIn(gone, self.app, gone)
+
+    def test_a_day_card_shows_the_weeks_own_range(self):
+        grouped = self.app[self.app.index("function groupedPeriods(list, currentPeriod = null)"):]
+        grouped = grouped[:grouped.index("// My Picks still groups by matchweek")]
+        self.assertIn("<strong>${escapeHTML(periodLabel(period))}</strong>", grouped)
+        # The week's own range, not the first fixture's date, which misleads
+        # whenever a week opens on something other than its first day.
+        self.assertIn("escapeHTML(weekDateRange(period))", grouped)
+        self.assertIn("dateLabel(firstDate, true)", grouped)
+
+    def test_the_convention_is_stated_at_most_once_per_screen(self):
+        # Only the two pickers emit it: the const plus one use in each.
+        self.assertEqual(self.app.count("WEEK_CONVENTION"), 3)
+        # And they never render together — opening the Season tab closes the
+        # week picker, so a screen can only ever carry one convention line.
+        handler = self.app[self.app.index("const roundTab = event.target.closest"):]
+        handler = handler[:handler.index("const roundMd = event.target.closest")]
+        self.assertIn("matchdayPickerOpen = false;", handler)
+
+    def test_the_cabinet_never_says_matchweek_null(self):
+        # A window league counts its own weeks; it has no matchweek number.
+        # This read "Matchweek null" until the cabinet moved up the Season tab.
+        row = self.app[self.app.index("function cabinetWeek(week)"):]
+        row = row[:row.index("function trophyCabinet(state)")]
+        self.assertIn("const weekNumber = weekNumberFor(week.period);", row)
+        self.assertIn('`Week ${weekNumber}`', row)
+        self.assertNotIn("Matchweek ${week.matchweek}</strong>", row)
+        self.assertIn("<strong>${escapeHTML(title)}</strong>", row)
+
+    def test_the_strip_re_anchors_however_it_was_left(self):
+        centre = self.app[self.app.index("function centreWeekStrip()"):]
+        centre = centre[:centre.index("function render(options = {})")]
+        # Measured against the strip, not the page — offsetLeft was the bug.
+        self.assertIn("strip.getBoundingClientRect()", centre)
+        self.assertIn("anchor.getBoundingClientRect()", centre)
+        self.assertNotIn("offsetLeft", centre)
+        # A relative adjustment, so any prior scroll is corrected rather than
+        # assumed to be zero.
+        self.assertIn("strip.scrollLeft +=", centre)
+        # An unlaid-out strip waits for a later paint instead of writing junk.
+        self.assertIn("if (!anchor || !strip.clientWidth) return;", centre)
+        # And it runs on every paint, which is what makes reopening re-anchor.
+        self.assertIn("centreWeekStrip();", self.app)
+
+    def test_the_season_view_groups_by_month_without_repeating_labels(self):
+        fn = self.app[self.app.index("function weekSeasonPicker(selected, attribute)"):]
+        fn = fn[:fn.index("const periodLabel = (period)")]
+        # A new section starts only when the month key actually changes, so a
+        # month is named once however many weeks it holds.
+        self.assertIn("if (!months.length || months[months.length - 1].key !== key) {", fn)
+        self.assertIn('<span class="week-month-label">${escapeHTML(month.label)}</span>', fn)
+        # Chips are bare day ranges under that label.
+        self.assertIn(">${escapeHTML(weekDayRange(period))}</button>", fn)
+        # The visible chip is bare; the accessible name still carries the full
+        # range, so a screen reader is not left reading "11 to 17" of nothing.
+        self.assertIn('aria-label="Week ${weekNumberFor(period)}, ${escapeHTML(weekDateRange(period))}"', fn)
+        self.assertIn(".week-month-label", self.css)
+        self.assertIn(".week-day-chip", self.css)
+
+    def test_day_ranges_are_bare_and_date_ranges_name_the_month(self):
+        bare = self.app[self.app.index("function weekDayRange(period)"):]
+        bare = bare[:bare.index("/** The month a week is filed under: the one it opens in. */")]
+        self.assertIn("`${start.getUTCDate()}–${end.getUTCDate()}`", bare)
+        # A week straddling into the next month names it: "27–2 Nov".
+        self.assertIn("`${range} ${MONTHS_SHORT[end.getUTCMonth()]}`", bare)
+        self.assertIn("start.getUTCMonth() === end.getUTCMonth()", bare)
+        full = self.app[self.app.index("function weekDateRange(period)"):]
+        full = full[:full.index("function weekDayRange(period)")]
+        # "18–24 Aug" when it stays in a month, both months when it straddles.
+        self.assertIn("${start.getUTCDate()}–${end.getUTCDate()} ${MONTHS_SHORT[start.getUTCMonth()]}", full)
+        self.assertIn("MONTHS_SHORT[end.getUTCMonth()]", full)
+
+    def test_the_pickers_trigger_names_the_week_the_same_way(self):
+        toggle = self.app[self.app.index("function roundToggle()"):]
+        toggle = toggle[:toggle.index("function matchdayPicker()")]
+        self.assertIn("const week = weekNumberFor(period);", toggle)
+        self.assertIn('const label = week == null ? periodLabel(period) : `Week ${week}`;', toggle)
+        # A single-competition league still gets "Matchweek 7 ▾".
+        self.assertIn("periodLabel(period)", toggle)
+
+    def test_matchweek_leagues_get_the_strip_without_dates_or_convention(self):
+        strip = self.app[self.app.index("function weekStrip(selected, attribute)"):]
+        strip = strip[:strip.index("/**\n * The season view")]
+        # One control, labelled from the period itself.
+        self.assertIn("const windows = isWindowKey(periods[0]);", strip)
+        self.assertIn("<b>${escapeHTML(periodLabel(period))}</b>", strip)
+        # Dates and the convention line are window-only.
+        self.assertIn("${windows ? WEEK_CONVENTION : \"\"}", strip)
+        self.assertIn("${windows ? `<em>${escapeHTML(weekDateRange(period))}</em>` : \"\"}", strip)
+        self.assertIn("week-strip-plain", strip)
+        self.assertIn(".week-strip-plain .week-chip { min-width: 0;", self.css)
+        # The picker is the strip for every league; the old grid is retired.
+        picker = self.app[self.app.index("function matchdayPicker()"):]
+        picker = picker[:picker.index("function fixtureHasResult")]
+        self.assertIn('return weekStrip(current, "data-round-md");', picker)
+        for gone in ("md-picker", "md-cell"):
+            self.assertNotIn(gone, self.app, gone)
+            self.assertNotIn(gone, self.css, gone)
+
+    # --- the profile -------------------------------------------------------
+
+    def test_the_total_and_to_pick_boxes_are_gone(self):
+        picks = self.app[self.app.index("function picksView()"):]
+        picks = picks[:picks.index("function leagueSwitcher")]
+        self.assertIn("<b>${picked.length}</b><span>Picks made</span>", picks)
+        # Removed outright, with nothing put in their place.
+        self.assertNotIn("Total fixtures", self.app)
+        self.assertNotIn("To pick", self.app)
+        self.assertNotIn("fixtures.length - picked.length", self.app)
+        self.assertEqual(picks.count('class="stat"'), 1)
+        # The lone box does not stretch across the old three columns.
+        self.assertIn("stats-grid-single", picks)
+        self.assertIn(".stats-grid-single { grid-template-columns: minmax(0, 200px); }", self.css)
 
 
 if __name__ == "__main__":

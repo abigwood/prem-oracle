@@ -1368,6 +1368,20 @@ body.picker-open { overflow: hidden; }
 /* A carry-over that could not be honoured is called out, never left silent. */
 .picker-note-warn { background: #fdf0e6; color: #8a4b12; }
 
+/* --- Amend before kick-off ------------------------------------------------
+   A published line-up stays editable until its first fixture starts, so both
+   sides are shown the concrete moment that stops. */
+
+.slate-notice-published { border-color: var(--line); background: var(--white); }
+.lock-line {
+  margin: 0 0 10px !important;
+  color: var(--muted);
+  font-size: .78rem;
+  font-weight: 800;
+}
+.lock-line.is-locked { color: var(--purple); }
+.slate-notice-published .secondary { margin: 0; }
+
 /* --- Week picker ---------------------------------------------------------
    Forty-odd weeks is too many to grid. The everyday control is one strip
    centred on the week in play; the season view files them under their month.

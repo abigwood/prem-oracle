@@ -669,6 +669,34 @@ function forgetLeagueState(code) {
 }
 
 /**
+ * Renames one member everywhere this device already holds them: the live state,
+ * the cached copy, and the round table if one is loaded. The server is the
+ * source of truth, but it reads members through an eventually-consistent list,
+ * so waiting for it is what produced a stale name on screen.
+ */
+function applyNickLocally(code, memberUid, nick) {
+  const rename = (rows) => (rows || []).map((row) => (row.uid === memberUid ? { ...row, nick } : row));
+  if (leagueState && !leagueState.error && leagueState.code === code) {
+    leagueState = {
+      ...leagueState,
+      table: rename(leagueState.table),
+      reveals: (leagueState.reveals || []).map((reveal) => ({ ...reveal, picks: rename(reveal.picks) })),
+      cabinet: leagueState.cabinet && leagueState.cabinet.uid === memberUid
+        ? { ...leagueState.cabinet, nick }
+        : leagueState.cabinet,
+    };
+    cacheLeagueState(leagueState);
+  }
+  if (roundState && !roundState.error) {
+    roundState = { ...roundState, table: rename(roundState.table), podium: rename(roundState.podium) };
+  }
+  const cached = leagueStates[code];
+  if (cached && cached !== leagueState) {
+    leagueStates = { ...leagueStates, [code]: { ...cached, table: rename(cached.table) } };
+  }
+}
+
+/**
  * Warms the cache for every league the viewer is NOT currently looking at, so
  * the first tap on another pill is already a cache hit. Fire-and-forget: it
  * renders nothing and its failures are silent.
@@ -1255,7 +1283,38 @@ function awaitingSlate(period) {
   return String(leagueState.currentPeriod) === String(period) && !slateForPeriod(period);
 }
 
+/** "Sat 16 Aug, 12:30" — the concrete moment a line-up stops being editable. */
+function lockTimeLabel(slate) {
+  const at = slate?.lockAt ? Date.parse(slate.lockAt) : NaN;
+  if (!Number.isFinite(at)) return "";
+  return new Intl.DateTimeFormat("en-GB", {
+    weekday: "short", day: "numeric", month: "short",
+    hour: "2-digit", minute: "2-digit", timeZone: "Europe/London",
+  }).format(new Date(at)).replace(/(\d{2}:\d{2})$/, ", $1").replace(/,\s*,/, ",");
+}
+
+/**
+ * What the league is told about the deadline. Before the first kickoff the
+ * line-up can still be amended, so both host and members see when that stops.
+ */
+function lockLine(slate) {
+  if (!slate) return "";
+  if (slate.locked) return `<p class="lock-line is-locked">Line-up locked — the first fixture has kicked off.</p>`;
+  const when = lockTimeLabel(slate);
+  return when ? `<p class="lock-line">Locks ${escapeHTML(when)}</p>` : "";
+}
+
 function slateNotice(period) {
+  const published = slateForPeriod(period);
+  // Published and still amendable: the host can change the line-up, and both
+  // sides are told when that stops.
+  if (published) {
+    const canEdit = isLeagueHost() && !published.locked;
+    return `<div class="slate-notice slate-notice-published">
+      ${lockLine(published)}
+      ${canEdit ? `<button class="secondary wide" type="button" data-open-picker="${escapeHTML(period)}" data-amend="1">Edit line-up</button>` : ""}
+    </div>`;
+  }
   if (!awaitingSlate(period)) return "";
   if (isLeagueHost() && !setAndForgetActive()) {
     // The copy splits on what the league runs on: a single-competition league
@@ -1898,12 +1957,15 @@ function surpriseSelection(list, wanted) {
 // drafted that has since been postponed or rescheduled out of the week is named
 // rather than silently missing.
 let pickerUnavailable = [];
+// True when the picker was opened on an already-published line-up.
+let pickerAmending = false;
 // True while the host's weekly count is being saved, so the stepper cannot be
 // double-tapped into a race.
 let countBusy = false;
 
-function openFixturePicker(period) {
+function openFixturePicker(period, amending = false) {
   pickerOpen = true;
+  pickerAmending = amending;
   pickerPeriod = String(period);
   pickerMode = "custom";
   pickerConfirmOpen = false;
@@ -1918,6 +1980,7 @@ function openFixturePicker(period) {
 
 function closeFixturePicker() {
   pickerOpen = false;
+  pickerAmending = false;
   pickerConfirmOpen = false;
   pickerSelection = new Set();
   pickerUnavailable = [];
@@ -1948,11 +2011,13 @@ function pickerConfirm(total) {
   const count = pickerSelection.size;
   return `<div class="picker-confirm-scrim">
     <div class="picker-confirm" role="dialog" aria-modal="true" aria-label="Confirm fixtures">
-      <strong>${pickerMode === "full" ? `Publish all ${total} fixtures?` : `Publish these ${count} fixtures?`}</strong>
-      <p>Your league cannot change them after this.</p>
+      <strong>${pickerAmending
+        ? `Update the line-up to ${count} ${count === 1 ? "fixture" : "fixtures"}?`
+        : pickerMode === "full" ? `Publish all ${total} fixtures?` : `Publish these ${count} fixtures?`}</strong>
+      <p>You can amend the line-up until the first kickoff.</p>
       <div class="picker-confirm-actions">
         <button class="secondary" type="button" data-picker-cancel ${pickerBusy ? "disabled" : ""}>Back</button>
-        <button class="primary" type="button" data-picker-commit ${pickerBusy ? "disabled" : ""}>${pickerBusy ? "Publishing…" : "Publish"}</button>
+        <button class="primary" type="button" data-picker-commit ${pickerBusy ? "disabled" : ""}>${pickerBusy ? "Publishing…" : pickerAmending ? "Update" : "Publish"}</button>
       </div>
     </div>
   </div>`;
@@ -2023,7 +2088,7 @@ function fixturePickerView() {
 
   return `<div class="picker-overlay" role="dialog" aria-modal="true" aria-label="Pick your fixtures">
     <header class="picker-head">
-      <div><h2>Pick your fixtures</h2><p>${escapeHTML(periodLabelLong(pickerPeriod))} · ${escapeHTML(leagueName)}</p></div>
+      <div><h2>${pickerAmending ? "Edit line-up" : "Pick your fixtures"}</h2><p>${escapeHTML(periodLabelLong(pickerPeriod))} · ${escapeHTML(leagueName)}</p></div>
       <button class="picker-close" type="button" data-picker-close aria-label="Close fixture picker">×</button>
     </header>
     <div class="picker-counter">
@@ -2035,7 +2100,7 @@ function fixturePickerView() {
     <div class="picker-list">${body}</div>
     <div class="picker-actions">
       <button class="picker-secondary" type="button" data-picker-all>Use all ${list.length} this week</button>
-      <button class="primary wide" type="button" data-picker-set ${ready ? "" : "disabled"}>Publish to league</button>
+      <button class="primary wide" type="button" data-picker-set ${ready ? "" : "disabled"}>${pickerAmending ? "Update line-up" : "Publish to league"}</button>
     </div>
     ${pickerConfirm(list.length)}
   </div>`;
@@ -2315,6 +2380,29 @@ function weeklyCountControl(state) {
   </div>`;
 }
 
+/**
+ * The host's control for the current period on the League card: publish it if
+ * it has not gone out, edit it if it has and is still amendable, and either way
+ * say when it locks. The Next tab shows the same states through slateNotice —
+ * both read the one published slate, so they cannot disagree.
+ */
+function hostSlateControl(state) {
+  if (!state || state.error || state.currentPeriod == null) return "";
+  const isOwner = state.owner === uid();
+  const slate = state.currentSlate;
+  if (!slate) {
+    return isOwner
+      ? `<button class="primary wide host-slate-banner" type="button" data-open-picker="${escapeHTML(state.currentPeriod)}">Pick fixtures for ${escapeHTML(periodLabelLong(state.currentPeriod))}</button>`
+      : "";
+  }
+  return `<div class="slate-notice slate-notice-published">
+    ${lockLine(slate)}
+    ${isOwner && !slate.locked
+      ? `<button class="secondary wide" type="button" data-open-picker="${escapeHTML(state.currentPeriod)}" data-amend="1">Edit line-up</button>`
+      : ""}
+  </div>`;
+}
+
 function leagueView() {
   const recovery = localStorage.getItem(STORAGE.recovery);
   const joinDefault = inviteCode && !leagueCodes.includes(inviteCode) ? inviteCode : "";
@@ -2368,9 +2456,7 @@ function leagueView() {
           <span class="eyebrow">${escapeHTML(leagueSummaryLine(state))}</span>
           <h2>${escapeHTML(state.name)}</h2>
           <div class="league-code"><span>League code</span><strong>${state.code}</strong></div>
-          ${isOwner && state.fixtureMode === "limited" && state.currentPeriod != null && !state.currentSlate
-            ? `<button class="primary wide host-slate-banner" type="button" data-open-picker="${escapeHTML(state.currentPeriod)}">Pick fixtures for ${escapeHTML(periodLabelLong(state.currentPeriod))}</button>`
-            : ""}
+          ${hostSlateControl(state)}
           ${weeklyCountControl(state)}
           <button class="secondary wide" type="button" data-share-league="${state.code}">Invite mates</button>
           <button class="secondary wide" type="button" data-league-nick="${state.code}">Change my name in this league</button>
@@ -2517,9 +2603,12 @@ async function commitSlate() {
   pickerBusy = true;
   render();
   try {
-    await api("/league/slate", { uid: uid(), code: activeLeague, period, mode, fixtureIds, action: "publish" });
+    const result = await api("/league/slate", { uid: uid(), code: activeLeague, period, mode, fixtureIds, action: "publish" });
+    const amended = result?.amended === true;
     closeFixturePicker();
-    setFlash(`${periodLabel(period)} is published — ${fixtureIds.length} fixtures.`);
+    setFlash(amended
+      ? `${periodLabel(period)} line-up updated — ${fixtureIds.length} fixtures.`
+      : `${periodLabel(period)} is published — ${fixtureIds.length} fixtures.`);
     await loadLeagueState();
   } catch (error) {
     pickerBusy = false;
@@ -2535,6 +2624,9 @@ async function commitSlate() {
 async function saveSlateDraft() {
   const period = pickerPeriod;
   const fixtureIds = [...pickerSelection];
+  // A published week has no draft slot — closing an amendment simply abandons
+  // it, leaving the line-up members already hold picks against untouched.
+  if (pickerAmending) return;
   if (!period || !fixtureIds.length || !API) return;
   try {
     await api("/league/slate", { uid: uid(), code: activeLeague, period, mode: "custom", fixtureIds, action: "draft" });
@@ -2634,7 +2726,7 @@ async function handleWizardClick(event) {
 async function handlePickerClick(event) {
   const open = event.target.closest("[data-open-picker]");
   if (open) {
-    openFixturePicker(open.dataset.openPicker);
+    openFixturePicker(open.dataset.openPicker, open.hasAttribute("data-amend"));
     render();
     return true;
   }
@@ -2801,7 +2893,13 @@ document.addEventListener("click", async (event) => {
     if (!trimmed) { setFlash("Name can't be empty", "error"); render(); return; }
     try {
       const result = await api("/league/nick", { uid: uid(), code, nick: trimmed });
+      // Write through the cached state and repaint on the spot. The server read
+      // that follows goes via a KV list, which can lag its own write by up to a
+      // minute — long enough for the banner to say the new name while the table
+      // underneath still said "Anon".
+      applyNickLocally(code, uid(), result.nick);
       setFlash(`Now showing as ${result.nick} in this league`);
+      render();
       await loadLeagueState();
     } catch (error) {
       setFlash(error.message, "error");

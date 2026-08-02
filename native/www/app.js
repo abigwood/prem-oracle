@@ -1747,6 +1747,9 @@ function surpriseSelection(list, wanted) {
 // drafted that has since been postponed or rescheduled out of the week is named
 // rather than silently missing.
 let pickerUnavailable = [];
+// True while the host's weekly count is being saved, so the stepper cannot be
+// double-tapped into a race.
+let countBusy = false;
 
 function openFixturePicker(period) {
   pickerOpen = true;
@@ -1938,7 +1941,7 @@ function trophyCabinet(state) {
 // started" — and the questions arrive one at a time instead of as a form the
 // host has to decode. The old two-form "start a competition" framing is retired.
 
-const WIZARD_STEPS = ["name", "competitions", "rule", "share"];
+const WIZARD_STEPS = ["name", "competitions", "count", "share"];
 
 let wizard = null;
 
@@ -1947,8 +1950,6 @@ function openWizard() {
     step: "name",
     name: "",
     competitions: [availableCompetitions()[0]],
-    method: "manual",
-    scope: null,          // only meaningful for allCompetition
     count: DEFAULT_FIXTURE_COUNT,
     confirmSingle: false, // the soft confirm a one-fixture week asks for
     busy: false,
@@ -1959,48 +1960,17 @@ function openWizard() {
 
 const closeWizard = () => { wizard = null; };
 
-/** The rule the wizard will send. The scope is always explicit, never inferred. */
+/**
+ * The rule the wizard writes. v1.5j: there is no rule CHOICE in the product —
+ * every league is manual-first, the host picks and publishes each week, and a
+ * week they miss is dealt for them. The scope is still explicit rather than
+ * inferred, and the other methods remain valid in the data model for leagues
+ * that already carry one.
+ */
 function wizardRule() {
-  const mixed = wizard.competitions.length > 1;
-  const scope = wizard.method === "allCompetition"
-    ? (wizard.scope || wizard.competitions[0])
-    : mixed ? "mixed" : wizard.competitions[0];
-  return { method: wizard.method, competitionScope: scope, count: wizard.count };
+  const scope = wizard.competitions.length > 1 ? "mixed" : wizard.competitions[0];
+  return { method: "manual", competitionScope: scope, count: wizard.count };
 }
-
-const WEEKLY_RULE_LABEL = {
-  manual: "I'll pick each week",
-  allEligible: "All fixtures",
-  random: "Random weekly",
-};
-
-/** The rule options this league can actually offer, given its competitions. */
-function ruleOptions() {
-  const options = [
-    { key: "manual", method: "manual", title: WEEKLY_RULE_LABEL.manual, sub: "You choose the fixtures every week" },
-    { key: "allEligible", method: "allEligible", title: WEEKLY_RULE_LABEL.allEligible, sub: "Every fixture in your competitions counts" },
-  ];
-  for (const code of wizard.competitions) {
-    options.push({
-      key: `all:${code}`,
-      method: "allCompetition",
-      scope: code,
-      title: `All ${competitionMeta(code).short}`,
-      sub: `Every ${competitionMeta(code).short} fixture that week`,
-    });
-  }
-  options.push({
-    key: "random", method: "random", title: WEEKLY_RULE_LABEL.random,
-    sub: `App picks ${wizard.count} random ${wizard.count === 1 ? "fixture" : "fixtures"} each week`,
-  });
-  // A single-competition league would offer "all fixtures" and "all <that
-  // competition>" as the same thing, so only the specific one is shown.
-  return wizard.competitions.length > 1 ? options : options.filter((option) => option.method !== "allEligible");
-}
-
-const wizardOptionSelected = (option) =>
-  option.method === wizard.method &&
-  (option.method !== "allCompetition" || (wizard.scope || wizard.competitions[0]) === option.scope);
 
 function wizardProgress() {
   const index = WIZARD_STEPS.indexOf(wizard.step);
@@ -2023,7 +1993,7 @@ function wizardStepCompetitions() {
   const codes = availableCompetitions();
   return `<span class="eyebrow">Step 2 of 4</span>
     <h3>Choose competitions</h3>
-    <p class="wizard-hint">Tick everything your league should draw fixtures from.</p>
+    <p class="wizard-hint">Select everything your league should draw fixtures from.</p>
     <div class="competition-choice" role="group" aria-label="Competitions">
       ${codes.map((code) => `<label class="competition-option${wizard.competitions.includes(code) ? " is-selected" : ""}">
         <input type="checkbox" name="competitions" value="${code}" data-wizard-competition="${code}"${wizard.competitions.includes(code) ? " checked" : ""}>
@@ -2036,17 +2006,11 @@ function wizardStepCompetitions() {
     </div>`;
 }
 
-function wizardStepRule() {
+function wizardStepCount() {
   const single = wizard.count === 1;
   return `<span class="eyebrow">Step 3 of 4</span>
-    <h3>Your weekly rule</h3>
-    <p class="wizard-hint">Pick the fixtures yourself each week, or set it and forget it.</p>
-    <div class="rule-choice" role="radiogroup" aria-label="Weekly rule">
-      ${ruleOptions().map((option) => `<button type="button" class="rule-option${wizardOptionSelected(option) ? " is-selected" : ""}"
-        role="radio" aria-checked="${wizardOptionSelected(option)}" data-wizard-rule="${escapeHTML(option.key)}">
-        <strong>${escapeHTML(option.title)}</strong><em>${escapeHTML(option.sub)}</em>
-      </button>`).join("")}
-    </div>
+    <h3>Fixtures each week</h3>
+    <p class="wizard-hint">How many fixtures should your mates predict each week? You can change this — and pick the fixtures yourself — every week.</p>
     <div class="fixture-count" data-fixture-count>
       <span>Fixtures each week</span>
       <div class="count-stepper">
@@ -2080,7 +2044,7 @@ function wizardStepShare() {
 const WIZARD_VIEWS = {
   name: wizardStepName,
   competitions: wizardStepCompetitions,
-  rule: wizardStepRule,
+  count: wizardStepCount,
   share: wizardStepShare,
 };
 
@@ -2105,7 +2069,7 @@ function wizardStepError() {
   if (wizard.step === "name" && !wizard.name.trim()) return "Give your league a name";
   if (wizard.step === "competitions" && !wizard.competitions.length) return "Choose at least one competition";
   // A one-fixture week is legal, but it is unusual enough to be worth a nod.
-  if (wizard.step === "rule" && wizard.count === 1 && !wizard.confirmSingle) {
+  if (wizard.step === "count" && wizard.count === 1 && !wizard.confirmSingle) {
     return "Short week — just one fixture to call! Tick to confirm.";
   }
   return "";
@@ -2116,7 +2080,7 @@ async function advanceWizard() {
   if (error) { wizard.error = error; render(); return; }
   wizard.error = "";
   const index = WIZARD_STEPS.indexOf(wizard.step);
-  if (wizard.step !== "rule") {
+  if (wizard.step !== "count") {
     wizard.step = WIZARD_STEPS[index + 1];
     render();
     return;
@@ -2130,7 +2094,9 @@ async function advanceWizard() {
       competitions: wizard.competitions,
       weeklyRule: wizardRule(),
       // Kept in step for a worker that predates the rule.
-      fixtureMode: wizard.method === "manual" || wizard.method === "random" ? "limited" : "all",
+      // Kept in step for a worker that predates the rule; every wizard league
+      // is manual, so this is always the limited shape.
+      fixtureMode: "limited",
       fixtureLimit: wizard.count,
     });
     saveLeague(response.code);
@@ -2157,11 +2123,38 @@ function leagueSummaryLine(state) {
   if (rule?.method === "allCompetition") return `${names} · every ${competitionMeta(rule.competitionScope).short} fixture`;
   // "~" because the count is a rule of thumb: individual weeks can differ.
   if (rule?.method === "random") return `${names} · ~${rule.count} random fixtures/week`;
-  if (rule?.method === "manual") return `${names} · host picks each week`;
+  // Plain text: the caller escapes this line, so markup here would show as tags.
+  if (rule?.method === "manual") return `${names} · ${rule.count} fixtures/week`;
   // A worker that predates the rule still answers with the old fields.
   if (state?.fixtureMode !== "limited") return `${names} · every fixture`;
   const limit = state?.fixtureLimit;
   return limit == null ? `${names} · host picks each week` : `${names} · ~${limit} fixtures/week`;
+}
+
+/**
+ * The host's one standing setting: how many fixtures a week this league plays.
+ *
+ * v1.5j removed the rule choice from creation, so this is all that is left to
+ * edit — and it is worth editing, because a host who opened on six may want
+ * eight by October. It is the default the picker opens on and the number the
+ * fallback deals; the week actually published is still whatever the host takes
+ * in the picker.
+ */
+function weeklyCountControl(state) {
+  if (!state || state.error || state.owner !== uid()) return "";
+  // A league still carrying one of the retired every-fixture methods plays its
+  // whole card regardless of the count, so offering a stepper would be a lie.
+  const method = state.weeklyRule?.method || "manual";
+  if (method === "allEligible" || method === "allCompetition") return "";
+  const count = state.weeklyRule?.count ?? state.fixtureLimit ?? DEFAULT_FIXTURE_COUNT;
+  return `<div class="fixture-count league-count" data-league-count="${escapeHTML(state.code)}">
+    <span>Fixtures each week</span>
+    <div class="count-stepper">
+      <button type="button" data-league-count-step="-1" aria-label="Fewer fixtures each week"${countBusy ? " disabled" : ""}>−</button>
+      <b data-count-value>${count}</b>
+      <button type="button" data-league-count-step="1" aria-label="More fixtures each week"${countBusy ? " disabled" : ""}>＋</button>
+    </div>
+  </div>`;
 }
 
 function leagueView() {
@@ -2214,6 +2207,7 @@ function leagueView() {
           ${isOwner && state.fixtureMode === "limited" && state.currentPeriod != null && !state.currentSlate
             ? `<button class="primary wide host-slate-banner" type="button" data-open-picker="${escapeHTML(state.currentPeriod)}">Pick fixtures for ${escapeHTML(periodLabel(state.currentPeriod))}</button>`
             : ""}
+          ${weeklyCountControl(state)}
           <button class="secondary wide" type="button" data-share-league="${state.code}">Invite mates</button>
           <button class="secondary wide" type="button" data-league-nick="${state.code}">Change my name in this league</button>
           ${isOwner ? `<button class="link-danger" type="button" data-delete-league="${state.code}">Delete league</button>` : ""}
@@ -2354,6 +2348,39 @@ async function saveSlateDraft() {
   }
 }
 
+/**
+ * Saves a new weekly count for this league. The stored method and scope ride
+ * along untouched — this control edits the count and nothing else, so a league
+ * that already carries one of the older methods keeps it.
+ */
+async function changeWeeklyCount(delta) {
+  const state = leagueState;
+  if (!state || state.error || state.owner !== uid()) return;
+  const current = state.weeklyRule?.count ?? state.fixtureLimit ?? DEFAULT_FIXTURE_COUNT;
+  const next = Math.max(MIN_FIXTURE_COUNT, Math.min(MAX_FIXTURE_COUNT, current + delta));
+  if (next === current) return;
+  const rule = {
+    method: state.weeklyRule?.method || "manual",
+    competitionScope: state.weeklyRule?.competitionScope
+      || ((state.competitions || []).length > 1 ? "mixed" : (state.competitions || [DEFAULT_COMPETITION])[0]),
+    count: next,
+  };
+  countBusy = true;
+  // Optimistic: the stepper answers on the tap, the save happens behind it.
+  leagueState = { ...state, weeklyRule: rule, fixtureLimit: next };
+  render();
+  try {
+    await api("/league/weekly-rule", { uid: uid(), code: state.code, weeklyRule: rule });
+    cacheLeagueState(leagueState);
+  } catch (error) {
+    leagueState = state;   // put it back; nothing was saved
+    setFlash(error.message, "error");
+  } finally {
+    countBusy = false;
+    render();
+  }
+}
+
 // Wizard input is read on the way OUT of a step rather than on every keystroke,
 // so typing a league name never triggers a re-render mid-word.
 function readWizardInputs() {
@@ -2404,17 +2431,6 @@ async function handleWizardClick(event) {
     readWizardInputs();
     dismissKeyboard();
     if (!wizard.busy) await advanceWizard();
-    return true;
-  }
-  const rule = event.target.closest("[data-wizard-rule]");
-  if (rule) {
-    const option = ruleOptions().find((entry) => entry.key === rule.dataset.wizardRule);
-    if (option) {
-      wizard.method = option.method;
-      wizard.scope = option.scope || null;
-      wizard.error = "";
-      render();
-    }
     return true;
   }
   return !!event.target.closest(".wizard");
@@ -2489,6 +2505,11 @@ async function handlePickerClick(event) {
 }
 
 document.addEventListener("click", async (event) => {
+  const leagueCountStep = event.target.closest("[data-league-count-step]");
+  if (leagueCountStep) {
+    if (!countBusy) await changeWeeklyCount(Number(leagueCountStep.dataset.leagueCountStep));
+    return;
+  }
   const countStep = event.target.closest("[data-count-step]");
   if (countStep) {
     // v1.5 §9: one validation path — 1 to 20, default 6, floor 1. The worker
@@ -2817,11 +2838,6 @@ document.addEventListener("change", (event) => {
     wizard.competitions = competition.checked
       ? availableCompetitions().filter((entry) => entry === code || wizard.competitions.includes(entry))
       : wizard.competitions.filter((entry) => entry !== code);
-    // Dropping a competition can invalidate an "all <that competition>" rule.
-    if (wizard.scope && !wizard.competitions.includes(wizard.scope)) {
-      wizard.method = "manual";
-      wizard.scope = null;
-    }
     wizard.error = "";
     render();
     return;

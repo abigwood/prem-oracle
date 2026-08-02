@@ -1443,23 +1443,10 @@ body.picker-open { overflow: hidden; }
 }
 .wizard-confirm input { width: 20px; height: 20px; margin: 0; accent-color: var(--purple); }
 
-.rule-choice { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
-.rule-option {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  padding: 12px 14px;
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  background: var(--white);
-  text-align: left;
-}
-.rule-option strong { color: var(--ink); font-size: .87rem; font-weight: 900; }
-.rule-option em { color: var(--muted); font-size: .74rem; font-style: normal; font-weight: 700; }
-/* Selected state matches the v1.4.1 competition checkboxes: green, not purple. */
-.rule-option.is-selected { border-color: var(--green); background: #eaf7f1; }
-.rule-option.is-selected strong { color: var(--green-2); }
-.rule-option.is-selected em { color: var(--green); }
+/* The host's standing weekly count, on the League card. The only rule setting
+   the product still exposes since v1.5j retired the creation rule list. */
+.league-count { margin-top: 13px; }
+.league-count[disabled] { opacity: .6; }
 
 /* --- Launch states -------------------------------------------------------- */
 

@@ -1,4 +1,5 @@
 import {
+  appendSlateVersion,
   applySlates,
   buildFixtureIcs,
   buildReveals,
@@ -13,6 +14,7 @@ import {
   fixturesByMatchweek,
   fixturesNeedingNotification,
   isDraftSlate,
+  isEmptyDelta,
   isPublishedSlate,
   isVoided,
   matchLocked,
@@ -30,9 +32,14 @@ import {
   roundComplete,
   roundStatus,
   roundWinners,
+  slateDelta,
   slateFixtures,
+  slateIsLocked,
   slateKey,
+  slateLockAt,
   slateStatus,
+  slateVersion,
+  slateVersions,
   validFootballScore,
   validateSlate,
 } from "./logic.js";
@@ -193,9 +200,13 @@ async function updateCustomMixIndex(env, code, member) {
 
 // Sends one alert to a specific set of members. Everything league-scoped rides
 // the existing APNs path and the existing push:<uid> token records.
-async function pushToUids(env, uids, body) {
+async function pushToUids(env, uids, message) {
   if (!apnsConfigured(env) || !uids?.length) return 0;
-  const payload = { aps: { alert: body, sound: "default" } };
+  // A plain string is the body on its own; an object carries a title too, which
+  // is what lets an amendment announce itself as "Line-up updated" rather than
+  // arriving as another anonymous line of text.
+  const alert = typeof message === "string" ? message : { title: message.title, body: message.body };
+  const payload = { aps: { alert, sound: "default" } };
   let sent = 0;
   await Promise.all([...new Set(uids)].map(async (uid) => {
     const record = await kvGet(env, `push:${uid}`);
@@ -608,16 +619,24 @@ async function publishSlate(env, league, period, { fixtureIds, mode, ruleSource,
   if (!canAdvanceSlate(existing, "published")) {
     return { published: false, reason: "notAdvanceable", slate: normaliseSlate(existing) };
   }
+  const now = new Date().toISOString();
+  const snapshot = buildSlateSnapshot(fixtureIds, pool, period, ruleSource);
   const slate = {
     status: "published",
+    version: 1,
     mode,
     fixtureIds,
     periodKey: String(period),
     ruleSource,
-    snapshot: buildSlateSnapshot(fixtureIds, pool, period, ruleSource),
-    lockedAt: new Date().toISOString(),
-    publishedAt: new Date().toISOString(),
+    snapshot,
+    lockedAt: now,
+    publishedAt: now,
     setBy: setBy || null,
+    // The chain starts here. Every later amendment appends; nothing rewrites.
+    versions: [{
+      version: 1, fixtureIds, mode, ruleSource, snapshot,
+      publishedAt: now, setBy: setBy || null, changed: null,
+    }],
   };
   await kvPut(env, slateKey(code, period), slate);
   if (!league.hadSlates) {
@@ -634,6 +653,61 @@ async function publishSlate(env, league, period, { fixtureIds, mode, ruleSource,
     : `${fixtureIds.length} fixtures are live for ${label} in ${league.name}. Make your picks!`;
   await pushToUids(env, audience, body);
   return { published: true, slate };
+}
+
+/**
+ * Amends a published line-up. Appends a version rather than rewriting one, so
+ * what the league was asked to predict at any point stays on the record.
+ *
+ * Refused outright once the latest version has locked — Ashton's rule: the
+ * first kickoff of that version freezes it, with no grace window and no
+ * override. Members hold picks against fixtures that are under way.
+ */
+async function amendSlate(env, league, period, { fixtureIds, mode, setBy, pool, weekNo = null }) {
+  const code = league.code;
+  const existing = await kvGet(env, slateKey(code, period));
+  if (!isPublishedSlate(existing)) return { amended: false, reason: "notPublished" };
+
+  const lockAt = slateLockAt(existing, pool);
+  if (slateIsLocked(existing, Date.now(), pool)) {
+    return { amended: false, reason: "locked", lockAt, slate: normaliseSlate(existing) };
+  }
+
+  const delta = slateDelta(existing.fixtureIds, fixtureIds);
+  if (isEmptyDelta(delta)) {
+    return { amended: false, reason: "unchanged", slate: normaliseSlate(existing), delta };
+  }
+
+  const next = appendSlateVersion(existing, {
+    fixtureIds,
+    mode,
+    ruleSource: "host-amend",
+    snapshot: buildSlateSnapshot(fixtureIds, pool, period, "host-amend"),
+    setBy,
+  });
+  await kvPut(env, slateKey(code, period), next);
+
+  // One push per committed amendment, deduped on league + period + version so
+  // a retry cannot double-notify.
+  const memberList = await members(env, league);
+  await pushOnce(
+    env,
+    `amend-v${next.version}`,
+    code,
+    period,
+    memberList.filter((member) => member.uid !== setBy).map((member) => member.uid),
+    { title: "Line-up updated", body: `${league.name}: ${describeDelta(delta)} — update your picks before kick-off.` }
+  );
+  return { amended: true, slate: next, delta, lockAt: slateLockAt(next, pool), weekNo };
+}
+
+/** "2 fixtures added, 1 removed" — the delta as a member reads it. */
+function describeDelta(delta) {
+  const count = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+  const parts = [];
+  if (delta.added.length) parts.push(`${count(delta.added.length, "fixture")} added`);
+  if (delta.removed.length) parts.push(`${count(delta.removed.length, "fixture")} removed`);
+  return parts.join(", ");
 }
 
 // POST /league/slate — the host's working copy, and the moment it goes live.
@@ -660,12 +734,6 @@ async function setSlate(env, body) {
   const { period } = read;
 
   const existing = await kvGet(env, slateKey(code, period));
-  // A legacy slate has no status and reads as published — an existing league
-  // must not become editable just because the lifecycle arrived.
-  if (isPublishedSlate(existing)) {
-    return json({ error: "this matchweek's fixtures are already set", slate: normaliseSlate(existing) }, 409, env);
-  }
-
   const matchList = await leagueFixtures(env, league);
   const byPeriod = poolByPeriod(matchList, league);
   const pool = byPeriod.get(period) || [];
@@ -679,6 +747,36 @@ async function setSlate(env, body) {
   const mode = String(body.mode || "custom");
   const validated = validateSlate(mode, body.fixtureIds, pool, bounds);
   if (validated.error) return json({ error: validated.error }, 400, env);
+
+  // A published line-up can still be edited, right up to the first kickoff of
+  // its latest version — an amendment appends a version rather than rewriting
+  // one. After that moment it is frozen, and this is where that is enforced.
+  if (isPublishedSlate(existing)) {
+    if (action === "draft") {
+      return json({ error: "this week is already published; edit the line-up instead", slate: normaliseSlate(existing) }, 409, env);
+    }
+    const amended = await amendSlate(env, league, period, {
+      fixtureIds: validated.fixtureIds, mode, setBy: uid, pool, weekNo,
+    });
+    if (amended.reason === "locked") {
+      return json({
+        error: "the first fixture has kicked off — this week's line-up is final",
+        lockAt: amended.lockAt ? new Date(amended.lockAt).toISOString() : null,
+        slate: amended.slate,
+      }, 409, env);
+    }
+    if (amended.reason === "unchanged") {
+      return json({ ok: true, unchanged: true, code, period, slate: amended.slate }, 200, env);
+    }
+    if (!amended.amended) {
+      return json({ error: "this matchweek's fixtures are already set", slate: amended.slate }, 409, env);
+    }
+    return json({
+      ok: true, amended: true, code, period, matchweek: Number(period) || null,
+      slate: amended.slate, changed: amended.delta,
+      lockAt: amended.lockAt ? new Date(amended.lockAt).toISOString() : null,
+    }, 200, env);
+  }
 
   if (action === "draft") {
     const draft = {
@@ -951,19 +1049,32 @@ async function migrationAdmin(env, body) {
 
 // A draft is the host's private working copy: it is reported so their own
 // picker can reopen on it, but it is never presented as this week's slate.
-const publicSlate = (slate, period) => (slate && isPublishedSlate(slate) ? {
-  period,
-  matchweek: Number(period) || null,
-  status: slateStatus(slate),
-  mode: slate.mode,
-  fixtureIds: slate.fixtureIds,
-  count: slate.fixtureIds.length,
-  ruleSource: slate.ruleSource || null,
-  setBy: slate.setBy || null,
-  lockedAt: slate.lockedAt || null,
-  publishedAt: slate.publishedAt || null,
-  snapshot: slate.snapshot || null,
-} : null);
+const publicSlate = (slate, period, pool = null) => {
+  if (!slate || !isPublishedSlate(slate)) return null;
+  const lockAt = slateLockAt(slate, pool);
+  const chain = slateVersions(slate);
+  return {
+    period,
+    matchweek: Number(period) || null,
+    status: slateStatus(slate),
+    mode: slate.mode,
+    fixtureIds: slate.fixtureIds,
+    count: slate.fixtureIds.length,
+    ruleSource: slate.ruleSource || null,
+    setBy: slate.setBy || null,
+    lockedAt: slate.lockedAt || null,
+    publishedAt: slate.publishedAt || null,
+    amendedAt: slate.amendedAt || null,
+    snapshot: slate.snapshot || null,
+    // The version chain, so the app can offer "Edit line-up" and say when the
+    // line-up stops being editable.
+    version: slateVersion(slate),
+    versionCount: chain.length,
+    changed: chain[chain.length - 1]?.changed || null,
+    lockAt: lockAt == null ? null : new Date(lockAt).toISOString(),
+    locked: lockAt != null && Date.now() >= lockAt,
+  };
+};
 
 const publicDraft = (slate, period) => (isDraftSlate(slate) ? {
   period,
@@ -1077,7 +1188,7 @@ async function state(env, url) {
       matchday: Number(period) || null,
       windowLabel: mixed ? windowLabel(period) : null,
       poolSize: pool.length,
-      slate: publicSlate(slate, period),
+      slate: publicSlate(slate, period, pool),
       draft: publicDraft(stored, period),
       preload: await pickerPreload(env, league, period, pool, stored),
       table,
@@ -1126,7 +1237,7 @@ async function state(env, url) {
     currentFixtureCount: effectiveFixtureCount(league, currentPool.length),
     currentMatchdayStatus: currentPeriod == null ? "complete" : roundStatus(currentFixtures),
     currentMatchdayHasResults: currentFixtures.some((match) => !!normaliseResult(match)),
-    currentSlate: currentPeriod == null ? null : publicSlate(currentPublished, currentPeriod),
+    currentSlate: currentPeriod == null ? null : publicSlate(currentPublished, currentPeriod, currentPool),
     currentDraft: currentPeriod == null ? null : publicDraft(currentStored, currentPeriod),
     // The launch decision tree turns on exactly this: is there a published
     // slate for the current period, or is the league still waiting on one?

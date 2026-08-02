@@ -221,6 +221,126 @@ export const canAdvanceSlate = (slate, next) => {
   return STATUS_RANK[next] > STATUS_RANK[slateStatus(slate)];
 };
 
+// ---------------------------------------------------------------------------
+// Versions
+//
+// Publishing is append-only. The first publish is version 1; every amendment
+// before lock appends a new immutable version carrying its own snapshot and a
+// record of what changed against the one before. No earlier version is ever
+// mutated or removed — the chain is the league's history of what it was asked
+// to predict, and members' picks were made against specific versions of it.
+//
+// The top-level `fixtureIds` / `mode` / `snapshot` always mirror the LATEST
+// version, so every reader that already asks a slate what it contains — scoring,
+// the cabinet, settlement — resolves to the latest without knowing versions
+// exist. A slate written before versioning has no chain at all and reads as
+// version 1, built from the fields it already carries.
+// ---------------------------------------------------------------------------
+
+/** The version number a slate is currently at. A legacy slate is version 1. */
+export const slateVersion = (slate) => {
+  const stored = Number(slate?.version);
+  return Number.isInteger(stored) && stored >= 1 ? stored : 1;
+};
+
+/** The full chain, oldest first. Synthesised for a slate written before versions. */
+export function slateVersions(slate) {
+  if (!slate) return [];
+  if (Array.isArray(slate.versions) && slate.versions.length) return slate.versions;
+  return [{
+    version: 1,
+    fixtureIds: slate.fixtureIds || [],
+    mode: slate.mode,
+    ruleSource: slate.ruleSource || null,
+    snapshot: slate.snapshot || null,
+    publishedAt: slate.publishedAt || slate.lockedAt || null,
+    setBy: slate.setBy || null,
+    changed: null,
+  }];
+}
+
+/** What an amendment did to the line-up, against the version before it. */
+export function slateDelta(previousIds, nextIds) {
+  const before = new Set((previousIds || []).map(String));
+  const after = new Set((nextIds || []).map(String));
+  return {
+    added: [...after].filter((id) => !before.has(id)),
+    removed: [...before].filter((id) => !after.has(id)),
+    retained: [...after].filter((id) => before.has(id)),
+  };
+}
+
+/** True when an amendment would change nothing. */
+export const isEmptyDelta = (delta) => !delta.added.length && !delta.removed.length;
+
+/**
+ * Appends a version. Returns a NEW slate object; the versions already in the
+ * chain are carried across by reference and never touched.
+ */
+export function appendSlateVersion(slate, { fixtureIds, mode, ruleSource, snapshot, setBy }) {
+  const chain = slateVersions(slate);
+  const previous = chain[chain.length - 1];
+  const version = previous.version + 1;
+  const entry = {
+    version,
+    fixtureIds,
+    mode,
+    ruleSource,
+    snapshot,
+    publishedAt: new Date().toISOString(),
+    setBy: setBy || null,
+    changed: slateDelta(previous.fixtureIds, fixtureIds),
+  };
+  return {
+    ...slate,
+    status: "published",
+    version,
+    // The latest version's values are mirrored up, so every existing reader
+    // resolves to it without knowing the chain is there.
+    fixtureIds,
+    mode,
+    ruleSource,
+    snapshot,
+    amendedAt: entry.publishedAt,
+    setBy: setBy || slate.setBy || null,
+    versions: [...chain, entry],
+  };
+}
+
+/**
+ * When the latest published version locks: the earliest kickoff among ITS
+ * fixtures. Live pool times win over the snapshot, because a reschedule moves
+ * the real lock; the snapshot is the fallback when the pool is not to hand.
+ *
+ * Ashton's rule, verbatim: amendment is refused once now >= this moment. There
+ * is no grace window and no override — the first kickoff freezes the latest
+ * version permanently.
+ */
+export function slateLockAt(slate, pool = null) {
+  const ids = new Set((slate?.fixtureIds || []).map(String));
+  if (!ids.size) return null;
+  const times = [];
+  for (const match of pool || []) {
+    if (!ids.has(String(match.id))) continue;
+    const at = Date.parse(match.startAt || match.lockAt);
+    if (Number.isFinite(at)) times.push(at);
+  }
+  if (!times.length) {
+    for (const entry of slate?.snapshot?.fixtures || []) {
+      if (!ids.has(String(entry.id))) continue;
+      const at = Date.parse(entry.kickoffAt);
+      if (Number.isFinite(at)) times.push(at);
+    }
+  }
+  return times.length ? Math.min(...times) : null;
+}
+
+/** Has the latest published version locked? Unknown kickoffs never lock it. */
+export function slateIsLocked(slate, nowMs, pool = null) {
+  const at = slateLockAt(slate, pool);
+  return at != null && nowMs >= at;
+}
+
 /**
  * What publishing freezes: the fixture ids, which competition each came from,
  * the kickoff times as they stood, the period key, and where the selection came

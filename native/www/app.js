@@ -1,6 +1,6 @@
 const SEASON_START = new Date("2026-08-21T20:00:00+01:00");
 const SEASON_START_DATE = "2026-08-21";
-const APP_BUILD = "20260802d";
+const APP_BUILD = "20260802e";
 const API = window.PREM_API || null;
 // Canonical public home of the web app. Inside the Capacitor shell the page is
 // served from premoracle://localhost, so location.origin can never be used to
@@ -19,6 +19,7 @@ const STORAGE = {
   competition: "prem_oracle_competition",
   mutedCompetitions: "prem_oracle_muted_competitions",
   leagueStates: "prem_oracle_league_states",
+  pickSections: "prem_oracle_pick_sections",
 };
 
 function isNativeApp() {
@@ -213,6 +214,10 @@ let busyMatch = "";
 let flashMessage = "";
 let flashTone = "success";
 let openScheduleDates = new Set();
+// Which My Predictions sections the viewer has collapsed. Sections default to
+// open, so only the closed ones are worth remembering — and remembering them
+// means a long list stays the shape they left it in.
+let collapsedPickSections = new Set(readJSON(STORAGE.pickSections, []));
 let updateReloading = false;
 let pendingUpdateReload = false;
 // Custom Mix host Fixture Picker. Held outside the view functions because the
@@ -1596,15 +1601,31 @@ function pickEntry(fixture, note) {
   return `<div class="pick-entry">${matchCard(fixture)}${note}</div>`;
 }
 
+/**
+ * One collapsible section. The count rides in the header so a collapsed league
+ * still says how much is inside it, and the open/closed state is remembered —
+ * a viewer in five leagues should not have to re-close four of them every time.
+ */
 function pickSection(title, subtitle, groups, contexts, code) {
   if (!groups.length) return "";
-  return `<section class="pick-section">
-    <div class="pick-section-head"><h3>${escapeHTML(title)}</h3>${subtitle ? `<span>${escapeHTML(subtitle)}</span>` : ""}</div>
-    ${groups.map((group) => `<div class="pick-week">
-      <span class="pick-week-label">${escapeHTML(group.label)}</span>
-      ${group.matches.map((fixture) => pickEntry(fixture, code ? sharedLeagueNote(fixture.id, contexts, code) : "")).join("")}
-    </div>`).join("")}
-  </section>`;
+  const key = code || "__other";
+  const count = groups.reduce((total, group) => total + group.matches.length, 0);
+  const open = !collapsedPickSections.has(key);
+  return `<details class="pick-section" data-pick-section="${escapeHTML(key)}"${open ? " open" : ""}>
+    <summary class="pick-section-head">
+      <div class="pick-section-title">
+        <h3>${escapeHTML(title)}</h3>
+        ${subtitle ? `<span>${escapeHTML(subtitle)}</span>` : ""}
+      </div>
+      <span class="pick-section-count">${countPhrase(count, count === 1 ? "pick" : "picks")}</span>
+    </summary>
+    <div class="pick-section-body">
+      ${groups.map((group) => `<div class="pick-week">
+        <span class="pick-week-label">${escapeHTML(group.label)}</span>
+        ${group.matches.map((fixture) => pickEntry(fixture, code ? sharedLeagueNote(fixture.id, contexts, code) : "")).join("")}
+      </div>`).join("")}
+    </div>
+  </details>`;
 }
 
 function picksView() {
@@ -2592,10 +2613,11 @@ function leagueView() {
     // A window league gets the whole season laid out by month here — every week
     // named once, so jumping to one is a tap rather than a scroll through forty.
     const seasonWeeks = isMixedActive() ? weekSeasonPicker(selectedPeriod, "data-round-md") : "";
-    // Order matters here: what you won, then where you can go, then the table.
-    // The cabinet is the reward and sits directly under the season header; the
-    // week pills are navigation and belong with the table they lead to.
-    inner = `${seasonBanner(state)}${trophyCabinet(state)}${seasonWeeks}${seasonTableHtml(state, isOwner, true)}${leagueRevealsHtml(state)}`;
+    // Order matters here: where you stand, then how you got there. The cabinet
+    // is the reward and sits under the season header; the table is what people
+    // actually come to the Season tab for, so it comes before the week pills,
+    // which are navigation and belong at the bottom.
+    inner = `${seasonBanner(state)}${trophyCabinet(state)}${seasonTableHtml(state, isOwner, true)}${seasonWeeks}${leagueRevealsHtml(state)}`;
   } else if (state && !state.error) {
     // Resilient fallback: an old worker response without round data.
     inner = `${seasonTableHtml(state, isOwner, false)}${leagueRevealsHtml(state)}`;
@@ -3246,6 +3268,18 @@ document.addEventListener("submit", async (event) => {
 });
 
 document.addEventListener("toggle", (event) => {
+  const section = event.target.closest?.("[data-pick-section]");
+  if (section) {
+    const key = section.dataset.pickSection;
+    if (section.open) collapsedPickSections.delete(key);
+    else collapsedPickSections.add(key);
+    try {
+      localStorage.setItem(STORAGE.pickSections, JSON.stringify([...collapsedPickSections]));
+    } catch {
+      // A full quota must not break collapsing; it just will not persist.
+    }
+    return;
+  }
   const card = event.target.closest?.("[data-day-card]");
   if (!card) return;
   if (card.open) openScheduleDates.add(card.dataset.dayCard);

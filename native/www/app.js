@@ -1,6 +1,6 @@
 const SEASON_START = new Date("2026-08-21T20:00:00+01:00");
 const SEASON_START_DATE = "2026-08-21";
-const APP_BUILD = "20260802a";
+const APP_BUILD = "20260802b";
 const API = window.PREM_API || null;
 // Canonical public home of the web app. Inside the Capacitor shell the page is
 // served from premoracle://localhost, so location.origin can never be used to
@@ -439,10 +439,19 @@ function weekDateRange(period) {
     : `${start.getUTCDate()} ${MONTHS_SHORT[start.getUTCMonth()]} – ${end.getUTCDate()} ${MONTHS_SHORT[end.getUTCMonth()]}`;
 }
 
-/** Bare "11–17" — for the season view, where the month is the section label. */
+/**
+ * "11–17" for the season view, where the month is the section label. A week
+ * that straddles into the next month names it — "27–2 Nov" — because the
+ * section header above says October and the 2nd is not October's.
+ */
 function weekDayRange(period) {
   const bounds = weekBounds(period);
-  return bounds ? `${bounds.start.getUTCDate()}–${bounds.end.getUTCDate()}` : "";
+  if (!bounds) return "";
+  const { start, end } = bounds;
+  const range = `${start.getUTCDate()}–${end.getUTCDate()}`;
+  return start.getUTCMonth() === end.getUTCMonth()
+    ? range
+    : `${range} ${MONTHS_SHORT[end.getUTCMonth()]}`;
 }
 
 /** The month a week is filed under: the one it opens in. */
@@ -463,11 +472,15 @@ const WEEK_CONVENTION = `<p class="week-convention">Weeks run Tuesday to Monday.
  * Weeks already gone are faded and sit to the left; the rest are a swipe right.
  */
 function weekStrip(selected, attribute) {
-  const periods = periodsInOrder().filter(isWindowKey);
+  const periods = periodsInOrder();
   if (!periods.length) return "";
   const current = leagueState?.currentPeriod ?? currentPeriodKey();
-  return `${WEEK_CONVENTION}
-    <div class="week-strip" role="group" aria-label="Choose a week">
+  // A window league counts weeks and states the Tuesday convention once; a
+  // matchweek league has an official number that needs no explaining and no
+  // date beneath it.
+  const windows = isWindowKey(periods[0]);
+  return `${windows ? WEEK_CONVENTION : ""}
+    <div class="week-strip${windows ? "" : " week-strip-plain"}" role="group" aria-label="${windows ? "Choose a week" : "Choose a matchweek"}">
       ${periods.map((period) => {
         const isSelected = String(period) === String(selected);
         const isCurrent = String(period) === String(current);
@@ -477,8 +490,8 @@ function weekStrip(selected, attribute) {
           ${attribute}="${escapeHTML(period)}"
           ${isCurrent ? 'data-week-anchor="1"' : ""}
           aria-current="${isCurrent ? "date" : "false"}">
-          <b>Week ${weekNumberFor(period)}</b>
-          <em>${escapeHTML(weekDateRange(period))}</em>
+          <b>${escapeHTML(periodLabel(period))}</b>
+          ${windows ? `<em>${escapeHTML(weekDateRange(period))}</em>` : ""}
         </button>`;
       }).join("")}
     </div>`;
@@ -1399,17 +1412,11 @@ function todayView() {
 function scheduleView() {
   const current = leagueState?.currentPeriod ?? currentPeriodKey();
   const filtered = fixtures.filter((fixture) => matchdayFilter === "all" || String(periodOfFixture(fixture)) === String(matchdayFilter));
-  const periods = periodsInOrder();
   const awaiting = leagueCodes.length && current != null && !slateForPeriod(current);
   return `<div class="section-head"><div><span class="eyebrow">Full season</span><h2>Prediction schedule</h2></div></div>
     ${awaiting ? `<div class="launch-card"><p>No picks due yet — fixtures will appear here when your host publishes this week's slate.</p></div>` : ""}
-    ${isMixedActive()
-      ? `<div class="filters filters-week"><button class="filter${matchdayFilter === "all" ? " active" : ""}" data-filter="all">All weeks</button></div>
-         ${weekStrip(matchdayFilter, "data-filter")}`
-      : `<div class="filters">
-      <button class="filter${matchdayFilter === "all" ? " active" : ""}" data-filter="all">All rounds</button>
-      ${periods.map((value) => `<button class="filter${String(matchdayFilter) === String(value) ? " active" : ""}" data-filter="${escapeHTML(value)}">MW ${value}</button>`).join("")}
-    </div>`}
+    <div class="filters filters-week"><button class="filter${matchdayFilter === "all" ? " active" : ""}" data-filter="all">${isMixedActive() ? "All weeks" : "All rounds"}</button></div>
+    ${weekStrip(matchdayFilter, "data-filter")}
     ${groupedPeriods(filtered, current)}`;
 }
 
@@ -1512,12 +1519,10 @@ function roundToggle() {
 function matchdayPicker() {
   if (!matchdayPickerOpen) return "";
   const current = selectedPeriod ?? currentPeriodKey();
-  // A window league gets the week strip; a single-competition league keeps the
-  // matchweek grid it has always had.
-  if (isMixedActive()) return weekStrip(current, "data-round-md");
-  const options = Array.from({ length: seasonRounds() || 0 }, (_, i) => String(i + 1));
-  return `<div class="md-picker" role="group" aria-label="Choose matchweek">${options.map((value) =>
-    `<button type="button" class="md-cell${String(value) === String(current) ? " active" : ""}" data-round-md="${escapeHTML(value)}">${value}</button>`).join("")}</div>`;
+  // One control for both league shapes: the strip labels itself from the
+  // period, so a matchweek league reads "Matchweek 11" and a window league
+  // "Week 11 / 3–9 Nov".
+  return weekStrip(current, "data-round-md");
 }
 
 function fixtureHasResult(match) {

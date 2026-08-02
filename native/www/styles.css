@@ -718,27 +718,6 @@ th.wins-col { font-size: .92rem; }
   cursor: pointer;
 }
 .round-seg.active { color: var(--white); background: var(--purple); }
-.md-picker {
-  display: grid;
-  grid-template-columns: repeat(7, 1fr);
-  gap: 6px;
-  margin: 8px 0 4px;
-  padding: 10px;
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  background: var(--white);
-}
-.md-cell {
-  padding: 8px 0;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  color: var(--ink);
-  background: var(--white);
-  font-size: .76rem;
-  font-weight: 800;
-  cursor: pointer;
-}
-.md-cell.active { color: var(--white); border-color: var(--green); background: var(--green); }
 .round-banner {
   margin: 12px 0;
   padding: 11px 13px;
@@ -1426,6 +1405,8 @@ body.picker-open { overflow: hidden; }
   transition: transform .16s ease, background .16s ease;
 }
 .week-chip b { color: var(--ink); font-size: .86rem; font-weight: 900; }
+/* A matchweek chip carries no date line, so it need not reserve room for one. */
+.week-strip-plain .week-chip { min-width: 0; padding: 11px 16px; }
 .week-chip em { color: var(--muted); font-size: .68rem; font-style: normal; font-weight: 800; white-space: nowrap; }
 /* Weeks already gone sit back rather than compete for attention. */
 .week-chip.is-past { opacity: .45; }

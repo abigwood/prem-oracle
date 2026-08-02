@@ -580,6 +580,34 @@ function currentPeriodKey() {
 // before the league state arrived — that mismatch is exactly the case that
 // would otherwise render a Championship league against Premier League cards.
 let loadedCompetition = null;
+// Fixtures for competitions the ACTIVE league does not play, fetched only for
+// My Predictions so a second league on another competition can still render its
+// section. Deliberately separate from `fixtures`, which stays exactly the
+// active league's world so Next and Schedule are unaffected.
+let extraFixtures = {};
+
+/**
+ * Loads any competition a league needs that the active one does not, into the
+ * side map. One request per missing competition, once.
+ */
+async function loadFixturesForLeagues() {
+  const wanted = new Set();
+  for (const code of leagueCodes) {
+    const state = leagueState?.code === code ? leagueState : leagueStates[code];
+    for (const competition of state?.competitions || []) {
+      if (competitionEnabled(competition)) wanted.add(competition);
+    }
+  }
+  const have = new Set(activeCompetitions());
+  const missing = [...wanted].filter((code) => !have.has(code) && !extraFixtures[`__loaded_${code}`]);
+  if (!missing.length) return;
+  await Promise.allSettled(missing.map(async (code) => {
+    const data = await loadOneCompetition(code, false);
+    const next = { ...extraFixtures, [`__loaded_${code}`]: true };
+    for (const fixture of data.fixtures || []) next[String(fixture.id)] = fixture;
+    extraFixtures = next;
+  }));
+}
 
 function rememberCompetition(codes) {
   const list = (Array.isArray(codes) ? codes : [codes]).filter(competitionEnabled);
@@ -1479,13 +1507,137 @@ function scheduleView() {
     ${groupedPeriods(filtered, current)}`;
 }
 
+// --- My Predictions ---------------------------------------------------------
+// One section per league, then everything else. A pick is only ever HIDDEN, and
+// only in one case: a line-up amendment dropped its fixture and no league the
+// viewer plays still lists it. The stored pick is untouched, so if a later
+// amendment puts the fixture back the prediction reappears already made.
+
+/** The leagues this device knows about, with what each is asking for. */
+function leaguePickContexts() {
+  return leagueCodes
+    .map((code) => (leagueState?.code === code && !leagueState.error ? leagueState : leagueStates[code]))
+    .filter((state) => state && !state.error && state.code)
+    .map((state) => ({
+      code: state.code,
+      name: state.name || leagueNames[state.code] || state.code,
+      lineup: new Set((state.lineupFixtureIds || []).map(String)),
+      dropped: new Set((state.droppedFixtureIds || []).map(String)),
+    }));
+}
+
+/**
+ * Picks the viewer should not be shown: dropped by an amendment somewhere, and
+ * not asked for by any of their leagues now. A viewer with no leagues hides
+ * nothing, and a pick on a fixture that was never in anybody's line-up is never
+ * hidden — it simply was not dropped.
+ */
+function hiddenPickIds(contexts = leaguePickContexts()) {
+  const hidden = new Set();
+  if (!contexts.length) return hidden;
+  const stillAsked = new Set();
+  for (const league of contexts) for (const id of league.lineup) stillAsked.add(id);
+  for (const league of contexts) {
+    for (const id of league.dropped) if (!stillAsked.has(id)) hidden.add(id);
+  }
+  return hidden;
+}
+
+/** A fixture by id, from whatever the app currently holds. */
+const fixtureById = (id) => fixtures.find((fixture) => String(fixture.id) === String(id)) || extraFixtures[String(id)] || null;
+
+/** Every fixture the viewer has predicted and is allowed to see. */
+function visiblePickedFixtures(hidden = hiddenPickIds()) {
+  return Object.keys(picks)
+    .filter((id) => !hidden.has(String(id)))
+    .map(fixtureById)
+    .filter(Boolean)
+    .sort(byKickoffAsc);
+}
+
+const byKickoffAsc = (a, b) =>
+  (Date.parse(a.startAt || "") || 0) - (Date.parse(b.startAt || "") || 0) || String(a.id).localeCompare(String(b.id));
+
+/** "also in Sunday Six" — so a pick shared across leagues syncing is no surprise. */
+function sharedLeagueNote(fixtureId, contexts, thisCode) {
+  const others = contexts
+    .filter((league) => league.code !== thisCode && league.lineup.has(String(fixtureId)))
+    .map((league) => league.name);
+  if (!others.length) return "";
+  return `<p class="pick-shared">Also in ${escapeHTML(others.join(", "))} — one pick counts in both.</p>`;
+}
+
+/**
+ * Groups a section's fixtures into the weeks that league runs on. Labelled by
+ * date range rather than week number: the number comes from the ACTIVE league's
+ * ordering, which is not this league's when the two play different competitions.
+ */
+function pickWeekGroups(list, mixed) {
+  const keyOf = (fixture) => (mixed
+    ? windowKeyFor(fixture.startAt)
+    : fixture.matchday == null ? null : String(fixture.matchday));
+  const groups = new Map();
+  for (const fixture of list) {
+    const period = keyOf(fixture);
+    if (period == null) continue;
+    if (!groups.has(period)) groups.set(period, []);
+    groups.get(period).push(fixture);
+  }
+  return [...groups.entries()]
+    .sort((a, b) => comparePeriods(a[0], b[0]))
+    .map(([period, matches]) => ({
+      period,
+      label: isWindowKey(period) ? weekDateRange(period) : `Matchweek ${period}`,
+      matches,
+    }));
+}
+
+function pickEntry(fixture, note) {
+  return `<div class="pick-entry">${matchCard(fixture)}${note}</div>`;
+}
+
+function pickSection(title, subtitle, groups, contexts, code) {
+  if (!groups.length) return "";
+  return `<section class="pick-section">
+    <div class="pick-section-head"><h3>${escapeHTML(title)}</h3>${subtitle ? `<span>${escapeHTML(subtitle)}</span>` : ""}</div>
+    ${groups.map((group) => `<div class="pick-week">
+      <span class="pick-week-label">${escapeHTML(group.label)}</span>
+      ${group.matches.map((fixture) => pickEntry(fixture, code ? sharedLeagueNote(fixture.id, contexts, code) : "")).join("")}
+    </div>`).join("")}
+  </section>`;
+}
+
 function picksView() {
-  const picked = fixtures.filter((fixture) => picks[fixture.id]);
-  return `<div class="section-head"><div><span class="eyebrow">${playerName || "Your profile"}</span><h2>My predictions</h2><p>Synced securely when online; cached on this device</p></div></div>
+  const contexts = leaguePickContexts();
+  const hidden = hiddenPickIds(contexts);
+  const visible = visiblePickedFixtures(hidden);
+  const head = `<div class="section-head"><div><span class="eyebrow">${playerName || "Your profile"}</span><h2>My predictions</h2><p>Synced securely when online; cached on this device</p></div></div>
     <div class="stats-grid stats-grid-single">
-      <div class="stat"><b>${picked.length}</b><span>Picks made</span></div>
-    </div>
-    ${picked.length ? groupedMatchdays(picked) : `<div class="empty"><strong>No picks yet</strong><p>Choose a scoreline on any fixture before kick-off.</p></div>`}`;
+      <div class="stat"><b>${visible.length}</b><span>Picks made</span></div>
+    </div>`;
+  const empty = `<div class="empty"><strong>No picks yet</strong><p>Choose a scoreline on any fixture before kick-off.</p></div>`;
+
+  // No leagues: the plain week-grouped list, exactly as before.
+  if (!contexts.length) {
+    return `${head}${visible.length ? groupedMatchdays(visible) : empty}`;
+  }
+
+  const claimed = new Set();
+  const sections = contexts.map((league) => {
+    const mine = visible.filter((fixture) => league.lineup.has(String(fixture.id)));
+    mine.forEach((fixture) => claimed.add(String(fixture.id)));
+    const state = leagueState?.code === league.code ? leagueState : leagueStates[league.code];
+    const mixed = (state?.competitions || []).length > 1;
+    return pickSection(league.name, null, pickWeekGroups(mine, mixed), contexts, league.code);
+  }).join("");
+
+  // Anything predicted outside every current line-up — solo play lives here.
+  const others = visible.filter((fixture) => !claimed.has(String(fixture.id)));
+  const otherSection = pickSection("Your other predictions",
+    "Not in any of your leagues' line-ups", pickWeekGroups(others, isMixedActive()), contexts, null);
+
+  const body = `${sections}${otherSection}`;
+  return `${head}${body.trim() ? body : empty}`;
 }
 
 function leagueSwitcher() {
@@ -2591,6 +2743,14 @@ async function navigateToView(view) {
     render();
     // Warm every other league now, so the first pill tap is a cache hit.
     prefetchLeagueStates();
+  }
+  if (currentView === "picks") {
+    // My Predictions is sectioned by league, so it needs every league's
+    // line-up — and the fixtures behind any competition the active league
+    // does not itself play.
+    await prefetchLeagueStates();
+    await loadFixturesForLeagues();
+    render();
   }
 }
 

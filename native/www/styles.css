@@ -1368,6 +1368,38 @@ body.picker-open { overflow: hidden; }
 /* A carry-over that could not be honoured is called out, never left silent. */
 .picker-note-warn { background: #fdf0e6; color: #8a4b12; }
 
+/* --- My Predictions, sectioned by league ---------------------------------- */
+
+.pick-section + .pick-section { margin-top: 26px; }
+.pick-section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 20px 2px 4px;
+  padding-bottom: 7px;
+  border-bottom: 2px solid var(--line);
+}
+.pick-section-head h3 { margin: 0; font-family: Georgia, serif; font-size: 1.15rem; }
+.pick-section-head span { color: var(--muted); font-size: .72rem; font-weight: 800; text-align: right; }
+.pick-week + .pick-week { margin-top: 14px; }
+.pick-week-label {
+  display: block;
+  margin: 12px 2px 6px;
+  color: var(--muted);
+  font-size: .68rem;
+  font-weight: 900;
+  letter-spacing: .11em;
+  text-transform: uppercase;
+}
+/* A fixture two leagues both asked for is one pick, and says so. */
+.pick-shared {
+  margin: -4px 2px 10px;
+  color: var(--green);
+  font-size: .72rem;
+  font-weight: 800;
+}
+
 /* --- Amend before kick-off ------------------------------------------------
    A published line-up stays editable until its first fixture starts, so both
    sides are shown the concrete moment that stops. */

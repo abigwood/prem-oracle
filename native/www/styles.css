@@ -668,6 +668,8 @@ main {
 }
 
 .stats-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 9px; margin: 14px 0; }
+/* One box left on the profile since the total/to-pick counts were removed. */
+.stats-grid-single { grid-template-columns: minmax(0, 200px); }
 .stat { padding: 14px 8px; border: 1px solid var(--line); border-radius: 14px; background: var(--white); text-align: center; }
 .stat b { display: block; font-size: 1.5rem; color: var(--green); }
 .stat span { color: var(--muted); font-size: .67rem; font-weight: 800; text-transform: uppercase; }
@@ -1386,6 +1388,86 @@ body.picker-open { overflow: hidden; }
 }
 /* A carry-over that could not be honoured is called out, never left silent. */
 .picker-note-warn { background: #fdf0e6; color: #8a4b12; }
+
+/* --- Week picker ---------------------------------------------------------
+   Forty-odd weeks is too many to grid. The everyday control is one strip
+   centred on the week in play; the season view files them under their month.
+   The Tuesday-to-Monday convention is stated once, not prefixed onto each. */
+
+.week-convention {
+  margin: 12px 2px 8px;
+  color: var(--muted);
+  font-size: .72rem;
+  font-weight: 800;
+}
+.week-strip {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 15px;
+  padding: 2px 2px 6px;
+  overflow-x: auto;
+  scroll-snap-type: x proximity;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+.week-strip::-webkit-scrollbar { display: none; }
+.week-chip {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 92px;
+  padding: 10px 14px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--white);
+  scroll-snap-align: center;
+  text-align: left;
+  transition: transform .16s ease, background .16s ease;
+}
+.week-chip b { color: var(--ink); font-size: .86rem; font-weight: 900; }
+.week-chip em { color: var(--muted); font-size: .68rem; font-style: normal; font-weight: 800; white-space: nowrap; }
+/* Weeks already gone sit back rather than compete for attention. */
+.week-chip.is-past { opacity: .45; }
+/* The week in play: filled, and the biggest thing on the strip. */
+.week-chip.is-current {
+  border-color: var(--green);
+  background: var(--green);
+  transform: scale(1.06);
+}
+.week-chip.is-current b { color: var(--white); font-size: .95rem; }
+.week-chip.is-current em { color: #cfe9dc; }
+.week-chip.is-selected:not(.is-current) { border-color: var(--purple); background: var(--purple-soft); }
+.week-chip.is-selected:not(.is-current) b { color: var(--purple); }
+
+.week-months { margin-bottom: 15px; }
+.week-month + .week-month { margin-top: 13px; }
+.week-month-label {
+  display: block;
+  margin-bottom: 7px;
+  color: var(--muted);
+  font-size: .68rem;
+  font-weight: 900;
+  letter-spacing: .11em;
+  text-transform: uppercase;
+}
+.week-month-row { display: flex; flex-wrap: wrap; gap: 6px; }
+.week-day-chip {
+  min-width: 58px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: var(--white);
+  color: var(--ink);
+  font-size: .78rem;
+  font-weight: 800;
+}
+.week-day-chip.is-past { opacity: .45; }
+.week-day-chip.is-current { border-color: var(--green); background: var(--green); color: var(--white); }
+.week-day-chip.is-selected:not(.is-current) { border-color: var(--purple); background: var(--purple-soft); color: var(--purple); }
+/* The week strip replaces the filter row entirely, so all that is left of it
+   is the single "All weeks" reset. */
+.filters-week { margin-bottom: 0; }
 
 /* --- Create a league wizard ---------------------------------------------- */
 

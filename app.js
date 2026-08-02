@@ -402,9 +402,159 @@ function windowLabel(key) {
 const periodOfFixture = (fixture) =>
   (isMixedActive() ? windowKeyFor(fixture?.startAt) : fixture?.matchday == null ? null : String(fixture.matchday));
 
-/** Human label for a period: "Matchweek 7" or "Tue 11 – Mon 17 Aug". */
-const periodLabel = (period) =>
-  (isWindowKey(period) ? windowLabel(period) : `Matchweek ${period}`);
+// --- Week naming ------------------------------------------------------------
+// A window league counts its own weeks: Week 1 is the league's opening window,
+// and every week after it is the next number. Deliberately NOT "Round" — that
+// word belongs to official competition rounds and would be a lie here.
+//
+// The Tuesday-to-Monday convention is stated ONCE, above the strip, instead of
+// being repeated as a "Tue …– Mon …" prefix on all forty-odd chips.
+
+/** Sequential week number for a window period, or null if it isn't one. */
+function weekNumberFor(period) {
+  if (!isWindowKey(period)) return null;
+  const index = periodsInOrder().indexOf(String(period));
+  return index < 0 ? null : index + 1;
+}
+
+const MONTHS_SHORT = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const MONTHS_LONG = ["January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December"];
+
+/** The Tuesday a window opens and the Monday it closes, as UTC dates. */
+function weekBounds(period) {
+  if (!isWindowKey(period)) return null;
+  const start = new Date(`${String(period).slice(1)}T12:00:00Z`);
+  return { start, end: new Date(start.getTime() + 6 * 86400000) };
+}
+
+/** "18–24 Aug", or "27 Aug – 2 Sep" when the week straddles a month. */
+function weekDateRange(period) {
+  const bounds = weekBounds(period);
+  if (!bounds) return "";
+  const { start, end } = bounds;
+  const sameMonth = start.getUTCMonth() === end.getUTCMonth();
+  return sameMonth
+    ? `${start.getUTCDate()}–${end.getUTCDate()} ${MONTHS_SHORT[start.getUTCMonth()]}`
+    : `${start.getUTCDate()} ${MONTHS_SHORT[start.getUTCMonth()]} – ${end.getUTCDate()} ${MONTHS_SHORT[end.getUTCMonth()]}`;
+}
+
+/**
+ * "11–17" for the season view, where the month is the section label. A week
+ * that straddles into the next month names it — "27–2 Nov" — because the
+ * section header above says October and the 2nd is not October's.
+ */
+function weekDayRange(period) {
+  const bounds = weekBounds(period);
+  if (!bounds) return "";
+  const { start, end } = bounds;
+  const range = `${start.getUTCDate()}–${end.getUTCDate()}`;
+  return start.getUTCMonth() === end.getUTCMonth()
+    ? range
+    : `${range} ${MONTHS_SHORT[end.getUTCMonth()]}`;
+}
+
+/** The month a week is filed under: the one it opens in. */
+function weekMonthKey(period) {
+  const bounds = weekBounds(period);
+  return bounds ? `${bounds.start.getUTCFullYear()}-${bounds.start.getUTCMonth()}` : "";
+}
+
+function weekMonthLabel(period) {
+  const bounds = weekBounds(period);
+  return bounds ? `${MONTHS_LONG[bounds.start.getUTCMonth()]} ${bounds.start.getUTCFullYear()}` : "";
+}
+
+const WEEK_CONVENTION = `<p class="week-convention">Weeks run Tuesday to Monday.</p>`;
+
+/**
+ * The everyday control: one horizontal strip, centred on the week in play.
+ * Weeks already gone are faded and sit to the left; the rest are a swipe right.
+ */
+function weekStrip(selected, attribute) {
+  const periods = periodsInOrder();
+  if (!periods.length) return "";
+  const current = leagueState?.currentPeriod ?? currentPeriodKey();
+  // A window league counts weeks and states the Tuesday convention once; a
+  // matchweek league has an official number that needs no explaining and no
+  // date beneath it.
+  const windows = isWindowKey(periods[0]);
+  return `${windows ? WEEK_CONVENTION : ""}
+    <div class="week-strip${windows ? "" : " week-strip-plain"}" role="group" aria-label="${windows ? "Choose a week" : "Choose a matchweek"}">
+      ${periods.map((period) => {
+        const isSelected = String(period) === String(selected);
+        const isCurrent = String(period) === String(current);
+        const past = comparePeriods(period, current) < 0;
+        return `<button type="button"
+          class="week-chip${isCurrent ? " is-current" : ""}${isSelected ? " is-selected" : ""}${past ? " is-past" : ""}"
+          ${attribute}="${escapeHTML(period)}"
+          ${isCurrent ? 'data-week-anchor="1"' : ""}
+          aria-current="${isCurrent ? "date" : "false"}">
+          <b>${escapeHTML(periodLabel(period))}</b>
+          ${windows ? `<em>${escapeHTML(weekDateRange(period))}</em>` : ""}
+        </button>`;
+      }).join("")}
+    </div>`;
+}
+
+/**
+ * The season view: every week of the season, each month named once and the
+ * chips reduced to the day range under it.
+ */
+function weekSeasonPicker(selected, attribute) {
+  const periods = periodsInOrder().filter(isWindowKey);
+  if (!periods.length) return "";
+  const current = leagueState?.currentPeriod ?? currentPeriodKey();
+  const months = [];
+  for (const period of periods) {
+    const key = weekMonthKey(period);
+    if (!months.length || months[months.length - 1].key !== key) {
+      months.push({ key, label: weekMonthLabel(period), weeks: [] });
+    }
+    months[months.length - 1].weeks.push(period);
+  }
+  return `${WEEK_CONVENTION}
+    <div class="week-months">
+      ${months.map((month) => `<div class="week-month">
+        <span class="week-month-label">${escapeHTML(month.label)}</span>
+        <div class="week-month-row" role="group" aria-label="${escapeHTML(month.label)}">
+          ${month.weeks.map((period) => {
+            const isSelected = String(period) === String(selected);
+            const isCurrent = String(period) === String(current);
+            const past = comparePeriods(period, current) < 0;
+            return `<button type="button"
+              class="week-day-chip${isCurrent ? " is-current" : ""}${isSelected ? " is-selected" : ""}${past ? " is-past" : ""}"
+              ${attribute}="${escapeHTML(period)}"
+              aria-label="Week ${weekNumberFor(period)}, ${escapeHTML(weekDateRange(period))}">${escapeHTML(weekDayRange(period))}</button>`;
+          }).join("")}
+        </div>
+      </div>`).join("")}
+    </div>`;
+}
+
+/**
+ * How a period is named everywhere in the app.
+ *
+ * A window league counts its own weeks — "Week 11" — and states the
+ * Tuesday-to-Monday convention once per screen instead of prefixing every
+ * mention with it. A single-competition league keeps its official matchweek.
+ *
+ * `periodLabelLong` adds the date range for the places where knowing *which*
+ * dates genuinely helps: the picker, and the button that opens it.
+ */
+const periodLabel = (period) => {
+  if (!isWindowKey(period)) return `Matchweek ${period}`;
+  const week = weekNumberFor(period);
+  // Before fixtures load there is no week ordering to count against; the date
+  // range is still true, so fall back to it rather than to "Week null".
+  return week == null ? windowLabel(period) : `Week ${week}`;
+};
+
+const periodLabelLong = (period) => {
+  if (!isWindowKey(period)) return periodLabel(period);
+  const week = weekNumberFor(period);
+  return week == null ? windowLabel(period) : `Week ${week} · ${weekDateRange(period)}`;
+};
 
 /** Chronological order for periods: window keys as strings, matchweeks as numbers. */
 const comparePeriods = (a, b) => {
@@ -1032,7 +1182,12 @@ function groupedPeriods(list, currentPeriod = null) {
       const open = openScheduleDates.has(key) || (!openScheduleDates.size && String(period) === String(current));
       return `<details class="day-card" data-day-card="${escapeHTML(key)}" ${open ? "open" : ""}>
         <summary>
-          <div><strong>${escapeHTML(periodLabel(period))}</strong><span>${firstDate ? dateLabel(firstDate, true) : ""}</span></div>
+          <div><strong>${escapeHTML(periodLabel(period))}</strong><span>${
+            isWindowKey(period)
+              // The week's own range, not the first fixture's date — a week
+              // that opens on a Friday would otherwise look like a Friday.
+              ? escapeHTML(weekDateRange(period))
+              : firstDate ? dateLabel(firstDate, true) : ""}</span></div>
           <span>${countPhrase(matches.length, matches.length === 1 ? "fixture" : "fixtures")}</span>
         </summary>
         <div class="day-body">${matches.map(matchCard).join("")}</div>
@@ -1112,7 +1267,7 @@ function slateNotice(period) {
     return `<div class="slate-notice slate-notice-host">
       <p>${headline}</p>
       ${draft ? `<p class="slate-draft-note">You have a draft of ${countPhrase(draft.count, draft.count === 1 ? "fixture" : "fixtures")} saved.</p>` : ""}
-      <button class="primary wide" type="button" data-open-picker="${escapeHTML(period)}">${draft ? "Finish your picks" : `Pick fixtures for ${escapeHTML(periodLabel(period))}`}</button>
+      <button class="primary wide" type="button" data-open-picker="${escapeHTML(period)}">${draft ? "Finish your picks" : `Pick fixtures for ${escapeHTML(periodLabelLong(period))}`}</button>
     </div>`;
   }
   if (setAndForgetActive()) {
@@ -1257,24 +1412,19 @@ function todayView() {
 function scheduleView() {
   const current = leagueState?.currentPeriod ?? currentPeriodKey();
   const filtered = fixtures.filter((fixture) => matchdayFilter === "all" || String(periodOfFixture(fixture)) === String(matchdayFilter));
-  const periods = periodsInOrder();
   const awaiting = leagueCodes.length && current != null && !slateForPeriod(current);
   return `<div class="section-head"><div><span class="eyebrow">Full season</span><h2>Prediction schedule</h2></div></div>
     ${awaiting ? `<div class="launch-card"><p>No picks due yet — fixtures will appear here when your host publishes this week's slate.</p></div>` : ""}
-    <div class="filters">
-      <button class="filter${matchdayFilter === "all" ? " active" : ""}" data-filter="all">All rounds</button>
-      ${periods.map((value) => `<button class="filter${String(matchdayFilter) === String(value) ? " active" : ""}" data-filter="${escapeHTML(value)}">${isWindowKey(value) ? escapeHTML(windowLabel(value)) : `MW ${value}`}</button>`).join("")}
-    </div>
+    <div class="filters filters-week"><button class="filter${matchdayFilter === "all" ? " active" : ""}" data-filter="all">${isMixedActive() ? "All weeks" : "All rounds"}</button></div>
+    ${weekStrip(matchdayFilter, "data-filter")}
     ${groupedPeriods(filtered, current)}`;
 }
 
 function picksView() {
   const picked = fixtures.filter((fixture) => picks[fixture.id]);
   return `<div class="section-head"><div><span class="eyebrow">${playerName || "Your profile"}</span><h2>My predictions</h2><p>Synced securely when online; cached on this device</p></div></div>
-    <div class="stats-grid">
+    <div class="stats-grid stats-grid-single">
       <div class="stat"><b>${picked.length}</b><span>Picks made</span></div>
-      <div class="stat"><b>${fixtures.length}</b><span>Total fixtures</span></div>
-      <div class="stat"><b>${fixtures.length - picked.length}</b><span>To pick</span></div>
     </div>
     ${picked.length ? groupedMatchdays(picked) : `<div class="empty"><strong>No picks yet</strong><p>Choose a scoreline on any fixture before kick-off.</p></div>`}`;
 }
@@ -1355,8 +1505,13 @@ function roundShareText(state, round) {
 
 function roundToggle() {
   const period = selectedPeriod ?? leagueState?.currentPeriod ?? currentPeriodKey();
+  // The segment that opens the picker names the week the same way the picker
+  // does — "Week 11", not "Tue 3 – Mon 9 Nov". Anything else reads as two
+  // different controls.
+  const week = weekNumberFor(period);
+  const label = week == null ? periodLabel(period) : `Week ${week}`;
   return `<div class="round-toggle">
-    <button type="button" class="round-seg${leagueTab === "matchday" ? " active" : ""}" data-round-tab="matchday">${escapeHTML(periodLabel(period))} ▾</button>
+    <button type="button" class="round-seg${leagueTab === "matchday" ? " active" : ""}" data-round-tab="matchday">${escapeHTML(label)} ▾</button>
     <button type="button" class="round-seg${leagueTab === "season" ? " active" : ""}" data-round-tab="season">Season</button>
   </div>`;
 }
@@ -1364,14 +1519,10 @@ function roundToggle() {
 function matchdayPicker() {
   if (!matchdayPickerOpen) return "";
   const current = selectedPeriod ?? currentPeriodKey();
-  // A single-competition league picks a matchweek number; a mixed one picks one
-  // of its own windows. Same control, same abstraction, different labels.
-  const options = isMixedActive()
-    ? periodsInOrder()
-    : Array.from({ length: seasonRounds() || 0 }, (_, i) => String(i + 1));
-  return `<div class="md-picker${isMixedActive() ? " md-picker-wide" : ""}" role="group" aria-label="Choose matchweek">${options.map((value) =>
-    `<button type="button" class="md-cell${String(value) === String(current) ? " active" : ""}" data-round-md="${escapeHTML(value)}">${
-      isWindowKey(value) ? escapeHTML(windowLabel(value)) : value}</button>`).join("")}</div>`;
+  // One control for both league shapes: the strip labels itself from the
+  // period, so a matchweek league reads "Matchweek 11" and a window league
+  // "Week 11 / 3–9 Nov".
+  return weekStrip(current, "data-round-md");
 }
 
 function fixtureHasResult(match) {
@@ -1872,7 +2023,7 @@ function fixturePickerView() {
 
   return `<div class="picker-overlay" role="dialog" aria-modal="true" aria-label="Pick your fixtures">
     <header class="picker-head">
-      <div><h2>Pick your fixtures</h2><p>${escapeHTML(periodLabel(pickerPeriod))} · ${escapeHTML(leagueName)}</p></div>
+      <div><h2>Pick your fixtures</h2><p>${escapeHTML(periodLabelLong(pickerPeriod))} · ${escapeHTML(leagueName)}</p></div>
       <button class="picker-close" type="button" data-picker-close aria-label="Close fixture picker">×</button>
     </header>
     <div class="picker-counter">
@@ -1907,10 +2058,17 @@ function cabinetWeek(week) {
     ? `<span class="cab-award" aria-label="${week.place}">${PLACE_EMOJI[week.place]}</span>`
     : `<span class="cab-award cab-award-none" aria-label="No podium"></span>`;
   const slate = week.slateType === "custom" ? "Custom Mix" : "Full card";
+  // A window league has no matchweek number — it counts its own weeks. Naming
+  // it "Matchweek null" is what this said before the cabinet moved up the
+  // Season tab and the fault became the first thing you read.
+  const weekNumber = weekNumberFor(week.period);
+  const title = week.matchweek != null
+    ? `Matchweek ${week.matchweek}`
+    : weekNumber != null ? `Week ${weekNumber}` : periodLabel(week.period);
   return `<li class="cabinet-week">
     ${award}
     <div class="cabinet-week-main">
-      <strong>Matchweek ${week.matchweek}</strong>
+      <strong>${escapeHTML(title)}</strong>
       <span>${slate} · ${countPhrase(week.fixtures, week.fixtures === 1 ? "fixture" : "fixtures")}</span>
     </div>
     <b>${countPhrase(week.pts, "pts")}${week.place ? "" : ` · ${ordinal(week.rank)}`}</b>
@@ -2181,7 +2339,7 @@ function leagueView() {
   const supportsRounds = leagueSupportsRounds(state);
   const showMatchday = supportsRounds && leagueTab === "matchday";
   const shareLabel = showMatchday && roundState && !roundState.error && roundState.period != null
-    ? (roundState.matchday != null ? `Share Matchweek ${roundState.matchday} result` : `Share ${periodLabel(roundState.period)} result`)
+    ? (roundState.matchday != null ? `Share Matchweek ${roundState.matchday} result` : `Share ${periodLabel(roundState.period)} results`)
     : "Share table to WhatsApp";
   let inner;
   if (showMatchday) {
@@ -2191,7 +2349,13 @@ function leagueView() {
         ? `<div class="empty"><strong>${escapeHTML(roundState.error)}</strong></div>`
         : `${roundBanner(roundState)}${roundTableHtml(roundState)}`;
   } else if (supportsRounds) {
-    inner = `${seasonBanner(state)}${seasonTableHtml(state, isOwner, true)}${trophyCabinet(state)}${leagueRevealsHtml(state)}`;
+    // A window league gets the whole season laid out by month here — every week
+    // named once, so jumping to one is a tap rather than a scroll through forty.
+    const seasonWeeks = isMixedActive() ? weekSeasonPicker(selectedPeriod, "data-round-md") : "";
+    // Order matters here: what you won, then where you can go, then the table.
+    // The cabinet is the reward and sits directly under the season header; the
+    // week pills are navigation and belong with the table they lead to.
+    inner = `${seasonBanner(state)}${trophyCabinet(state)}${seasonWeeks}${seasonTableHtml(state, isOwner, true)}${leagueRevealsHtml(state)}`;
   } else if (state && !state.error) {
     // Resilient fallback: an old worker response without round data.
     inner = `${seasonTableHtml(state, isOwner, false)}${leagueRevealsHtml(state)}`;
@@ -2205,7 +2369,7 @@ function leagueView() {
           <h2>${escapeHTML(state.name)}</h2>
           <div class="league-code"><span>League code</span><strong>${state.code}</strong></div>
           ${isOwner && state.fixtureMode === "limited" && state.currentPeriod != null && !state.currentSlate
-            ? `<button class="primary wide host-slate-banner" type="button" data-open-picker="${escapeHTML(state.currentPeriod)}">Pick fixtures for ${escapeHTML(periodLabel(state.currentPeriod))}</button>`
+            ? `<button class="primary wide host-slate-banner" type="button" data-open-picker="${escapeHTML(state.currentPeriod)}">Pick fixtures for ${escapeHTML(periodLabelLong(state.currentPeriod))}</button>`
             : ""}
           ${weeklyCountControl(state)}
           <button class="secondary wide" type="button" data-share-league="${state.code}">Invite mates</button>
@@ -2269,6 +2433,36 @@ function rememberMatchDay(matchId) {
   if (match?.matchday) openScheduleDates.add(`md-${match.matchday}`);
 }
 
+/**
+ * Anchors every week strip on the current week — weeks gone to the left, weeks
+ * to come a swipe right. Runs on every paint, and a paint rebuilds the strip,
+ * so opening or expanding the picker always lands on the green chip whatever
+ * the strip was showing before.
+ *
+ * Measured from bounding rects, not offsetLeft. `.week-strip` is not a
+ * positioning context, so offsetLeft was being measured against the page and
+ * put the strip at an arbitrary mid-list position. Rects are relative to the
+ * viewport, so the delta is correct wherever the strip is scrolled — which is
+ * also what makes re-anchoring after the user has scrolled elsewhere exact
+ * rather than approximate.
+ *
+ * Done on the strip's own scrollLeft rather than with scrollIntoView, which
+ * would drag the page as well as the strip.
+ */
+function centreWeekStrip() {
+  requestAnimationFrame(() => {
+    document.querySelectorAll(".week-strip").forEach((strip) => {
+      const anchor = strip.querySelector("[data-week-anchor]");
+      // No width yet means the strip has not been laid out; a later paint will
+      // anchor it rather than this one writing a nonsense offset.
+      if (!anchor || !strip.clientWidth) return;
+      const stripBox = strip.getBoundingClientRect();
+      const chipBox = anchor.getBoundingClientRect();
+      strip.scrollLeft += (chipBox.left - stripBox.left) - (strip.clientWidth - chipBox.width) / 2;
+    });
+  });
+}
+
 function render(options = {}) {
   const app = document.getElementById("app");
   const views = { today: todayView, schedule: scheduleView, picks: picksView, league: leagueView, rules: rulesView };
@@ -2276,6 +2470,7 @@ function render(options = {}) {
   renderPickerLayer();
   document.getElementById("profileInitial").textContent = playerInitial();
   document.querySelectorAll(".bottom-nav button").forEach((button) => button.classList.toggle("active", button.dataset.view === currentView));
+  centreWeekStrip();
   if (options.anchorMatchId) {
     requestAnimationFrame(() => document.querySelector(`[data-match-card="${CSS.escape(options.anchorMatchId)}"]`)?.scrollIntoView({ block: "center" }));
   } else if (options.scrollTop) {

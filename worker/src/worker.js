@@ -1442,9 +1442,13 @@ async function reconcilePostponements(env, league, slate, period, roundFixtures,
  * every push is deduped on leagueId + periodKey + pushType — because a cron
  * tick may be delivered more than once.
  */
-async function weeklyLoop(env) {
+export async function weeklyLoop(env, nowMs = Date.now()) {
   if (!env.KV.list) return;
-  const now = Date.now();
+  // The clock is a parameter so the weekly beat can be tested against a fixed
+  // point. Every boundary here — pool-open, the fallback horizon — is a
+  // weekday question, and a suite that asks it of "today" answers differently
+  // on a Sunday than on a Wednesday.
+  const now = nowMs;
   const codes = (await listAllKeys(env, "league:")).map((key) => key.slice("league:".length));
   if (!codes.length) return;
   // Keyed by the league's competition set, so leagues sharing a set share work.
@@ -1477,20 +1481,27 @@ async function weeklyLoop(env) {
     }
     if (isSetAndForget(rule)) {
       // Rule leagues publish as soon as the pool is open, with no admin step.
-      if (periodIsOpen(open.period, now)) await autoPublish(env, league, open.period, open.fixtures);
+      if (periodIsOpen(open.period, now, open.firstKickoff)) await autoPublish(env, league, open.period, open.fixtures);
       continue;
     }
-    if (periodIsOpen(open.period, now)) await remindHost(env, league, open.period);
+    if (periodIsOpen(open.period, now, open.firstKickoff)) await remindHost(env, league, open.period);
   }
 }
 
 /**
- * Has this period's pool opened? A window opens on its own Tuesday morning; a
- * matchweek has no calendar opening of its own and is open as soon as it is the
- * next round to kick off, which is the only way `relevantPeriods` reports it.
+ * Has this period's pool opened?
+ *
+ * A window says so itself: it opens on its own Tuesday morning. A matchweek
+ * carries no calendar of its own, so it takes the opening of the week its first
+ * fixture falls in — which is the same Tuesday boundary, reached a different
+ * way. Without that a matchweek counts as open the moment it becomes the next
+ * round to kick off, which in pre-season is weeks early: hosts were nudged and
+ * set-and-forget leagues published in the middle of August for a round that
+ * starts at the end of it.
  */
-function periodIsOpen(period, nowMs) {
-  const opens = periodOpensAt(period);
+function periodIsOpen(period, nowMs, firstKickoffMs) {
+  const opens = periodOpensAt(period)
+    ?? (Number.isFinite(firstKickoffMs) ? periodOpensAt(windowKeyFor(new Date(firstKickoffMs))) : null);
   return opens == null || nowMs >= opens;
 }
 

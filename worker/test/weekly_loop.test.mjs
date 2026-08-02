@@ -4,7 +4,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import worker from "../src/worker.js";
+import worker, { weeklyLoop } from "../src/worker.js";
 import {
   DEFAULT_FIXTURE_COUNT,
   MAX_FIXTURE_COUNT,
@@ -357,6 +357,12 @@ async function runScheduled(env) {
   await Promise.all(pending);
 }
 
+// A fixed Wednesday morning. Every boundary in the weekly loop is a weekday
+// question, so the tests that turn on one ask it of a known day rather than of
+// whichever day the suite happens to run.
+const WEDNESDAY = Date.parse("2026-09-16T09:00:00Z");
+const runLoopAt = (env, nowMs) => weeklyLoop(env, nowMs);
+
 // --- wizard end to end ------------------------------------------------------
 
 test("the wizard stores name, competitions and the weekly rule", async () => {
@@ -608,7 +614,9 @@ test("a just-published week is visible before KV.list catches up", async () => {
 // --- the weekly loop --------------------------------------------------------
 
 test("a manual host is nudged once, with copy that matches their league", async () => {
-  const list = round(10, Date.now() + 40 * HOUR);
+  // Friday of the same Tue-anchored week: the pool is open, and the first
+  // kickoff is still comfortably outside the fallback's day.
+  const list = round(10, WEDNESDAY + 40 * HOUR);
   const { env, store } = endpointEnv();
   await withFixtures(list, async () => {
     await prime(env);
@@ -618,7 +626,7 @@ test("a manual host is nudged once, with copy that matches their league", async 
       weeklyRule: { method: "manual", competitionScope: "PL", count: 6 },
     })).json();
 
-    await runScheduled(env);
+    await runLoopAt(env, WEDNESDAY);
     // A single-competition league has a real matchweek number, so it is named.
     assert.ok(store.has(`notified:slate-open:${code}:1`));
     // Nothing was published on the host's behalf this far out.
@@ -626,13 +634,13 @@ test("a manual host is nudged once, with copy that matches their league", async 
 
     // A second tick is silent: dedupe is leagueId + periodKey + pushType.
     const keysBefore = [...store.keys()].filter((key) => key.startsWith("notified:")).length;
-    await runScheduled(env);
+    await runLoopAt(env, WEDNESDAY);
     assert.equal([...store.keys()].filter((key) => key.startsWith("notified:")).length, keysBefore);
   });
 });
 
 test("a set-and-forget league publishes itself with no admin step", async () => {
-  const list = round(10, Date.now() + 40 * HOUR);
+  const list = round(10, WEDNESDAY + 40 * HOUR);
   const { env, store } = endpointEnv();
   await withFixtures(list, async () => {
     await prime(env);
@@ -643,7 +651,7 @@ test("a set-and-forget league publishes itself with no admin step", async () => 
     })).json();
     await send("/join", { uid: "m2", code, nickname: "Two" });
 
-    await runScheduled(env);
+    await runLoopAt(env, WEDNESDAY);
     const slate = JSON.parse(store.get(`custom_slate:${code}:1`));
     assert.equal(slate.status, "published");
     assert.equal(slate.ruleSource, "random");
@@ -655,7 +663,7 @@ test("a set-and-forget league publishes itself with no admin step", async () => 
 
     // Idempotent: a second tick republishes nothing and re-deals nothing.
     const before = store.get(`custom_slate:${code}:1`);
-    await runScheduled(env);
+    await runLoopAt(env, WEDNESDAY);
     assert.equal(store.get(`custom_slate:${code}:1`), before);
   });
 });
@@ -697,6 +705,48 @@ test("an allCompetition rule publishes exactly the competition it names", async 
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test("nothing opens weeks early: a matchweek waits for its own week", async () => {
+  // A matchweek carries no calendar, so before this it counted as open the
+  // moment it was the next round to kick off. In pre-season that is weeks
+  // early — the live every-fixture leagues would have been published, and
+  // their members notified, a fortnight before a ball was kicked.
+  const far = round(10, WEDNESDAY + 30 * DAY);
+  const { env, store } = endpointEnv();
+  await withFixtures(far, async () => {
+    await prime(env);
+    const send = post(env);
+    // A set-and-forget league...
+    const rule = await (await send("/league", {
+      uid: "a", competitions: ["PL"],
+      weeklyRule: { method: "allEligible", competitionScope: "PL", count: 6 },
+    })).json();
+    // ...and a manual one.
+    const manual = await (await send("/league", {
+      uid: "b", competitions: ["PL"], fixtureMode: "limited",
+      weeklyRule: { method: "manual", competitionScope: "PL", count: 6 },
+    })).json();
+
+    await runLoopAt(env, WEDNESDAY);
+    assert.equal(store.has(`custom_slate:${rule.code}:1`), false, "nothing published a month out");
+    assert.equal(store.has(`notified:slate-published:${rule.code}:1`), false, "and nobody was told");
+    assert.equal(store.has(`notified:slate-open:${manual.code}:1`), false, "no host nudge a month out either");
+  });
+
+  // The same league, once the fixture's own week has opened.
+  const near = round(10, WEDNESDAY + 2 * DAY);
+  const { env: soon, store: soonStore } = endpointEnv();
+  await withFixtures(near, async () => {
+    await prime(soon);
+    const { code } = await (await post(soon)("/league", {
+      uid: "a", competitions: ["PL"],
+      weeklyRule: { method: "allEligible", competitionScope: "PL", count: 6 },
+    })).json();
+    await runLoopAt(soon, WEDNESDAY);
+    const slate = JSON.parse(soonStore.get(`custom_slate:${code}:1`));
+    assert.equal(slate.fixtureIds.length, 10, "every fixture, as an every-fixture league expects");
+  });
 });
 
 // --- the fallback matrix ----------------------------------------------------

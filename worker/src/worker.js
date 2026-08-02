@@ -1317,13 +1317,18 @@ async function remindHost(env, league, period) {
 }
 
 /**
- * Resolves what a league's weekly rule publishes for one period.
+ * Resolves what a league publishes for one period without its host.
  *
- * `manual` has no rule of its own — it is the host, and the only reason this is
- * ever asked for a manual league is the fallback, where "what would they most
- * likely have done" is last week's count, and failing that the whole card.
+ * Since v1.5j every league created in the app is `manual`: the host picks and
+ * publishes each week, and if they don't, this deals them a random N from the
+ * competitions they chose — competition-balanced in a mixed league, exactly as
+ * the picker's dice does. N is the league's own weekly count, so a league that
+ * plays six gets six, and a count at or above the pool takes the whole card.
+ *
+ * The other methods are no longer offered at creation but remain valid in the
+ * data model, so leagues that already carry one keep behaving as they did.
  */
-function resolveRuleSelection(rule, league, period, pool, lastCount) {
+function resolveRuleSelection(rule, league, period, pool) {
   const scope = new Set(scopeCompetitions(rule, league));
   const scoped = pool.filter((match) => scope.has(competitionOfFixture(match.id)));
   const ordered = [...scoped].sort(byKickoff).map((match) => String(match.id));
@@ -1331,38 +1336,19 @@ function resolveRuleSelection(rule, league, period, pool, lastCount) {
   if (rule.method === "allEligible" || rule.method === "allCompetition") {
     return { fixtureIds: ordered, mode: "full", ruleSource: rule.method };
   }
-  if (rule.method === "random") {
-    return {
-      // Seeded on league + period, so a job that runs twice deals the same week.
-      fixtureIds: randomSelection(scoped, rule.count, `${league.code}:${period}`),
-      mode: "custom",
-      ruleSource: "random",
-    };
-  }
-  // Manual, reached only through the fallback.
-  if (lastCount == null) return { fixtureIds: ordered, mode: "fallback", ruleSource: "fallback-full" };
+  // Both `random` and the manual fallback deal the same way. Seeded on league
+  // and period, so a job that runs twice deals the identical week.
   return {
-    fixtureIds: randomSelection(scoped, Math.min(lastCount, ordered.length), `${league.code}:${period}`),
+    fixtureIds: randomSelection(scoped, rule.count, `${league.code}:${period}`),
     mode: "custom",
-    ruleSource: "fallback-lastUsed",
+    ruleSource: rule.method === "random" ? "random" : "fallback-random",
   };
-}
-
-/** The count the league last actually played, or null if it never has. */
-async function lastPlayedCount(env, league, period) {
-  if (!slateAware(league)) return null;
-  const slates = await readSlates(env, league.code);
-  const earlier = Object.keys(slates)
-    .filter((key) => comparePeriods(key, period) < 0)
-    .sort(comparePeriods)
-    .pop();
-  return earlier ? slates[earlier].fixtureIds.length : null;
 }
 
 /** A set-and-forget league publishes itself the moment its pool opens. */
 async function autoPublish(env, league, period, pool) {
   const rule = leagueWeeklyRule(league);
-  const selection = resolveRuleSelection(rule, league, period, pool, null);
+  const selection = resolveRuleSelection(rule, league, period, pool);
   if (!selection?.fixtureIds.length) return null;
   const result = await publishSlate(env, league, period, {
     fixtureIds: selection.fixtureIds,
@@ -1385,9 +1371,9 @@ async function autoPublish(env, league, period, pool) {
  *   1. Already published — do nothing at all.
  *   2. A valid, non-empty draft the host saved — publish exactly that. A draft
  *      is never discarded in favour of a rule.
- *   3. Anything else (no draft, or an empty/invalid one) — the weekly rule, or
- *      for a manual league the count it last played, or failing both the whole
- *      card. An empty draft is NEVER what gets published.
+ *   3. Anything else (no draft, or an empty/invalid one) — a random N from the
+ *      league's own competitions, N being its weekly count. An empty draft is
+ *      NEVER what gets published.
  */
 async function applyFallback(env, league, period, roundFixtures) {
   const stored = await kvGet(env, slateKey(league.code, period));
@@ -1402,9 +1388,7 @@ async function applyFallback(env, league, period, roundFixtures) {
     }
   }
   if (!selection) {
-    const rule = leagueWeeklyRule(league);
-    const lastCount = rule.method === "manual" ? await lastPlayedCount(env, league, period) : null;
-    selection = resolveRuleSelection(rule, league, period, roundFixtures, lastCount);
+    selection = resolveRuleSelection(leagueWeeklyRule(league), league, period, roundFixtures);
   }
   if (!selection?.fixtureIds.length) return { published: false, reason: "emptyPool" };
 

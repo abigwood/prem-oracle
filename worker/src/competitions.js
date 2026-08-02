@@ -179,6 +179,15 @@ export function leagueWeeklyRule(league) {
     };
   }
   const plan = leagueFixturePlan(league);
+  // A league that has always played EVERY fixture keeps doing exactly that.
+  // Since v1.5j the fallback deals a random N rather than the whole card, so
+  // normalising these to `manual` would quietly shrink their week from ten
+  // fixtures to six. `allEligible` is the honest reading of the intent they
+  // already stored, and it is still a valid method — just no longer offered at
+  // creation.
+  if (plan.mode === "all") {
+    return { method: "allEligible", competitionScope: fallbackScope, count: clampCount(DEFAULT_FIXTURE_COUNT), source: "legacy" };
+  }
   return {
     method: "manual",
     competitionScope: fallbackScope,

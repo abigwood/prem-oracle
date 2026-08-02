@@ -1304,12 +1304,15 @@ class WeekPickerTests(unittest.TestCase):
 
     # --- the season view ---------------------------------------------------
 
-    def test_the_season_view_puts_the_cabinet_above_the_week_pills(self):
-        # Order: season header, trophy cabinet, month pills, table.
+    def test_the_season_view_is_ordered_standings_first(self):
+        # Order: season header, trophy cabinet, league table, then the month
+        # pills — the table is what people open the Season tab for; the pills
+        # are navigation and sit at the bottom.
         line = [l for l in self.app.splitlines() if "inner = `${seasonBanner(state)}" in l][0]
         for earlier, later in (("seasonBanner", "trophyCabinet"),
-                               ("trophyCabinet", "seasonWeeks"),
-                               ("seasonWeeks", "seasonTableHtml")):
+                               ("trophyCabinet", "seasonTableHtml"),
+                               ("seasonTableHtml", "seasonWeeks"),
+                               ("seasonWeeks", "leagueRevealsHtml")):
             self.assertLess(line.index(earlier), line.index(later), f"{earlier} must precede {later}")
 
     def test_week_naming_reaches_every_window_surface(self):
@@ -1664,6 +1667,50 @@ class MyPredictionsTests(unittest.TestCase):
         saver = self.app[self.app.index("async function savePick(matchId, p1, p2)"):]
         saver = saver[:saver.index("document.addEventListener(\"submit\"")]
         self.assertIn("picks[matchId] = { p1, p2, savedAt: Date.now() };", saver)
+
+    def test_league_sections_collapse_and_remember(self):
+        fn = self.app[self.app.index("function pickSection(title, subtitle, groups, contexts, code)"):]
+        fn = fn[:fn.index("function picksView()")]
+        # A native details/summary, so the chevron and keyboard both work.
+        self.assertIn('<details class="pick-section" data-pick-section=', fn)
+        self.assertIn("<summary class=\"pick-section-head\">", fn)
+        # Default expanded: only the collapsed ones are remembered.
+        self.assertIn("const open = !collapsedPickSections.has(key);", fn)
+        self.assertIn("${open ? \" open\" : \"\"}", fn)
+        self.assertIn("let collapsedPickSections = new Set(readJSON(STORAGE.pickSections, []));", self.app)
+        self.assertIn('pickSections: "prem_oracle_pick_sections",', self.app)
+        # The other-predictions section collapses on the same mechanism.
+        self.assertIn('const key = code || "__other";', fn)
+
+    def test_a_collapsed_header_still_shows_its_pick_count(self):
+        fn = self.app[self.app.index("function pickSection(title, subtitle, groups, contexts, code)"):]
+        fn = fn[:fn.index("function picksView()")]
+        # Counted from the section's own groups, and rendered in the header
+        # rather than the body, so collapsing cannot hide it.
+        self.assertIn("const count = groups.reduce((total, group) => total + group.matches.length, 0);", fn)
+        self.assertIn('<span class="pick-section-count">${countPhrase(count, count === 1 ? "pick" : "picks")}</span>', fn)
+        header_end = fn.index('</summary>')
+        self.assertLess(fn.index('pick-section-count'), header_end, 'the count must be inside the summary')
+        self.assertIn(".pick-section-count", self.css)
+
+    def test_toggling_a_section_persists_it(self):
+        handler = self.app[self.app.index('document.addEventListener("toggle"'):]
+        handler = handler[:handler.index("// --- Per-competition notification preferences")]
+        self.assertIn('const section = event.target.closest?.("[data-pick-section]");', handler)
+        self.assertIn("if (section.open) collapsedPickSections.delete(key);", handler)
+        self.assertIn("else collapsedPickSections.add(key);", handler)
+        self.assertIn("localStorage.setItem(STORAGE.pickSections, JSON.stringify([...collapsedPickSections]));", handler)
+        # The schedule day-cards keep their own separate memory.
+        self.assertIn("openScheduleDates.add(card.dataset.dayCard);", handler)
+        self.assertLess(handler.index("data-pick-section"), handler.index("data-day-card"))
+
+    def test_the_chevron_turns_with_the_section(self):
+        self.assertIn('.pick-section-head::after', self.css)
+        self.assertIn('content: "⌄";', self.css)
+        self.assertIn(".pick-section[open] > .pick-section-head::after { transform: rotate(180deg); }", self.css)
+        # The default marker is suppressed so only our chevron shows.
+        self.assertIn(".pick-section-head::-webkit-details-marker { display: none; }", self.css)
+        self.assertIn("list-style: none;", self.css[self.css.index(".pick-section-head {"):])
 
     def test_my_picks_loads_every_leagues_state_and_fixtures(self):
         nav = self.app[self.app.index("async function navigateToView(view)"):]

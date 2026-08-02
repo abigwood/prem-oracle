@@ -1373,15 +1373,38 @@ body.picker-open { overflow: hidden; }
 .pick-section + .pick-section { margin-top: 26px; }
 .pick-section-head {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
   gap: 10px;
   margin: 20px 2px 4px;
   padding-bottom: 7px;
   border-bottom: 2px solid var(--line);
+  list-style: none;
+  cursor: pointer;
 }
+.pick-section-head::-webkit-details-marker { display: none; }
+.pick-section-title { min-width: 0; }
 .pick-section-head h3 { margin: 0; font-family: Georgia, serif; font-size: 1.15rem; }
-.pick-section-head span { color: var(--muted); font-size: .72rem; font-weight: 800; text-align: right; }
+.pick-section-title span { display: block; margin-top: 2px; color: var(--muted); font-size: .72rem; font-weight: 800; }
+/* The count stays in the header, so a collapsed league still says how much is
+   folded away inside it. */
+.pick-section-count {
+  flex: none;
+  color: var(--muted);
+  font-size: .72rem;
+  font-weight: 800;
+  white-space: nowrap;
+}
+.pick-section-head::after {
+  flex: none;
+  content: "⌄";
+  margin-left: 2px;
+  color: var(--purple);
+  font-size: 1.1rem;
+  line-height: 1;
+  transition: transform .16s ease;
+}
+.pick-section[open] > .pick-section-head::after { transform: rotate(180deg); }
 .pick-week + .pick-week { margin-top: 14px; }
 .pick-week-label {
   display: block;

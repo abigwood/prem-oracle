@@ -1441,7 +1441,9 @@ class WeekPickerTests(unittest.TestCase):
     def test_the_total_and_to_pick_boxes_are_gone(self):
         picks = self.app[self.app.index("function picksView()"):]
         picks = picks[:picks.index("function leagueSwitcher")]
-        self.assertIn("<b>${picked.length}</b><span>Picks made</span>", picks)
+        # The count now reflects VISIBLE picks, since a dropped fixture's pick
+        # is filtered from the view (never deleted).
+        self.assertIn("<b>${visible.length}</b><span>Picks made</span>", picks)
         # Removed outright, with nothing put in their place.
         self.assertNotIn("Total fixtures", self.app)
         self.assertNotIn("To pick", self.app)
@@ -1580,6 +1582,100 @@ class AmendBeforeKickoffTests(unittest.TestCase):
         self.assertIn("applyNickLocally(code, uid(), result.nick);", handler)
         self.assertLess(handler.index("applyNickLocally"), handler.index("await loadLeagueState()"))
         self.assertLess(handler.index("render();"), handler.index("await loadLeagueState()"))
+
+
+class MyPredictionsTests(unittest.TestCase):
+    """Clean removal of dropped picks, and the league-sectioned layout."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = (ROOT / "app.js").read_text()
+        cls.css = (ROOT / "styles.css").read_text()
+        cls.worker = (ROOT / "worker/src/worker.js").read_text()
+
+    # --- A. clean removal ------------------------------------------------
+
+    def test_a_pick_is_hidden_not_deleted(self):
+        fn = self.app[self.app.index("function hiddenPickIds(contexts"):]
+        fn = fn[:fn.index("/** A fixture by id")]
+        # Hidden = dropped somewhere AND asked for by nobody.
+        self.assertIn("if (!contexts.length) return hidden;", fn)
+        self.assertIn("if (!stillAsked.has(id)) hidden.add(id);", fn)
+        # Nothing in the whole view deletes a pick.
+        view = self.app[self.app.index("// --- My Predictions ---"):]
+        view = view[:view.index("function leagueSwitcher")]
+        for destructive in ("delete picks[", "picks = {}", "removeItem(STORAGE.picks"):
+            self.assertNotIn(destructive, view, destructive)
+
+    def test_the_count_reflects_visible_picks(self):
+        view = self.app[self.app.index("function picksView()"):]
+        view = view[:view.index("function leagueSwitcher")]
+        self.assertIn("<b>${visible.length}</b><span>Picks made</span>", view)
+        self.assertIn("const visible = visiblePickedFixtures(hidden);", view)
+
+    def test_the_dropped_set_comes_from_the_version_deltas(self):
+        # The app cannot derive 'dropped' from a slate's latest state; the
+        # worker walks the version chain and hands both sets over.
+        self.assertIn("for (const entry of slateVersions(slate)) {", self.worker)
+        self.assertIn("for (const id of entry.changed?.removed || []) droppedFixtureIds.add(String(id));", self.worker)
+        # A fixture put back is not dropped.
+        self.assertIn("const dropped = [...droppedFixtureIds].filter((id) => !lineup.includes(id));", self.worker)
+        self.assertIn("lineupFixtureIds: lineup,", self.worker)
+        self.assertIn("droppedFixtureIds: dropped,", self.worker)
+
+    # --- B. the sectioned layout ------------------------------------------
+
+    def test_one_section_per_league_then_the_rest(self):
+        view = self.app[self.app.index("function picksView()"):]
+        view = view[:view.index("function leagueSwitcher")]
+        # A section per league, over that league's own line-up.
+        self.assertIn("const mine = visible.filter((fixture) => league.lineup.has(String(fixture.id)));", view)
+        self.assertIn("pickWeekGroups(mine, mixed)", view)
+        # Then everything not claimed by a league.
+        self.assertIn("const others = visible.filter((fixture) => !claimed.has(String(fixture.id)));", view)
+        self.assertIn('pickSection("Your other predictions"', view)
+        # A league-less viewer keeps the plain list.
+        self.assertIn("if (!contexts.length) {", view)
+        self.assertIn("groupedMatchdays(visible)", view)
+
+    def test_sections_are_week_grouped_by_that_leagues_own_shape(self):
+        fn = self.app[self.app.index("function pickWeekGroups(list, mixed)"):]
+        fn = fn[:fn.index("function pickEntry(fixture, note)")]
+        self.assertIn("mixed", fn)
+        self.assertIn("windowKeyFor(fixture.startAt)", fn)
+        self.assertIn("`Matchweek ${period}`", fn)
+        # Labelled by date range, not week number: the number belongs to the
+        # active league's ordering, which is not this league's.
+        self.assertIn("weekDateRange(period)", fn)
+        self.assertIn(".pick-week-label", self.css)
+
+    def test_a_shared_fixture_says_so_in_both_sections(self):
+        fn = self.app[self.app.index("function sharedLeagueNote(fixtureId, contexts, thisCode)"):]
+        fn = fn[:fn.index("function picksView()")] if "function picksView()" in fn else fn[:900]
+        self.assertIn("league.code !== thisCode && league.lineup.has(String(fixtureId))", fn)
+        self.assertIn("Also in ${escapeHTML(others.join(\", \"))}", fn)
+        self.assertIn("one pick counts in both", fn)
+        self.assertIn(".pick-shared", self.css)
+
+    def test_one_pick_per_fixture_is_still_the_model(self):
+        # Sections render the same matchCard, which reads and writes the one
+        # picks[matchId] entry — so editing in either section is one edit.
+        self.assertIn("return `<div class=\"pick-entry\">${matchCard(fixture)}${note}</div>`;", self.app)
+        saver = self.app[self.app.index("async function savePick(matchId, p1, p2)"):]
+        saver = saver[:saver.index("document.addEventListener(\"submit\"")]
+        self.assertIn("picks[matchId] = { p1, p2, savedAt: Date.now() };", saver)
+
+    def test_my_picks_loads_every_leagues_state_and_fixtures(self):
+        nav = self.app[self.app.index("async function navigateToView(view)"):]
+        nav = nav[:nav.index("// Publishes the slate")]
+        self.assertIn('if (currentView === "picks") {', nav)
+        self.assertIn("await prefetchLeagueStates();", nav)
+        self.assertIn("await loadFixturesForLeagues();", nav)
+        # The side map never disturbs the active league's fixture list.
+        loader = self.app[self.app.index("async function loadFixturesForLeagues()"):]
+        loader = loader[:loader.index("function rememberCompetition(codes)")]
+        self.assertIn("extraFixtures = next;", loader)
+        self.assertNotIn("fixtures =", loader)
 
 
 if __name__ == "__main__":

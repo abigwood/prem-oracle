@@ -1224,6 +1224,26 @@ async function state(env, url) {
   const currentPublished = isPublishedSlate(currentStored)
     ? currentStored
     : (currentPeriod == null ? null : slates[currentPeriod] || null);
+
+  // What this league is currently asking its members to predict, and what it
+  // has ever stopped asking. My Predictions needs both: a pick is hidden only
+  // when an amendment dropped its fixture AND no league still lists it, and
+  // neither half is derivable from a slate's latest state alone — "dropped"
+  // only exists in the version deltas.
+  const allPublished = { ...slates };
+  if (currentPeriod != null && isPublishedSlate(currentStored)) allPublished[currentPeriod] = currentStored;
+  const lineupFixtureIds = [];
+  const droppedFixtureIds = new Set();
+  for (const slate of Object.values(allPublished)) {
+    for (const id of slate.fixtureIds || []) lineupFixtureIds.push(String(id));
+    for (const entry of slateVersions(slate)) {
+      for (const id of entry.changed?.removed || []) droppedFixtureIds.add(String(id));
+    }
+  }
+  const lineup = [...new Set(lineupFixtureIds)];
+  // A fixture dropped and later re-added is not dropped: the league is asking
+  // for it again, and the member's original pick stands.
+  const dropped = [...droppedFixtureIds].filter((id) => !lineup.includes(id));
   const viewer = url.searchParams.get("uid") || "";
   return json({
     code,
@@ -1242,6 +1262,8 @@ async function state(env, url) {
     // The launch decision tree turns on exactly this: is there a published
     // slate for the current period, or is the league still waiting on one?
     awaitingPublish: currentPeriod != null && !currentPublished,
+    lineupFixtureIds: lineup,
+    droppedFixtureIds: dropped,
     table: computeTableWithMovement(memberList, scopedCompleted, picks).map((row) => ({ ...row, wins: wins[row.uid] || 0 })),
     reveals: buildReveals(memberList, scopedFixtures, picks, Date.now()).slice(0, 20),
     cabinet: viewer ? computeCabinet(viewer, memberList, matchList, picks, slates, keyOf) : null,

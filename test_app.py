@@ -1026,7 +1026,7 @@ class WeeklyLoopTests(unittest.TestCase):
         self.assertIn("comparePeriods", self.worker)
         # And the app groups the Schedule on the same abstraction.
         self.assertIn("function groupedPeriods(list, currentPeriod = null)", self.app)
-        self.assertIn("list.map(periodOfFixture)", self.app)
+        self.assertIn("const period = periodOfFixture(fixture);", self.app)
 
     def test_the_window_runs_tuesday_to_monday(self):
         self.assertIn("const WEEKDAY_INDEX = { Tue: 0, Wed: 1, Thu: 2, Fri: 3, Sat: 4, Sun: 5, Mon: 6 };", self.competitions)
@@ -1128,12 +1128,21 @@ class WeeklyLoopTests(unittest.TestCase):
         self.assertNotIn("Today's predictions", self.app)
 
     def test_schedule_opens_on_now_and_collapses_the_future_without_hiding_it(self):
+        # Which week starts open is now its own rule, shared by the renderer
+        # and the lazy-body decision so they can never disagree.
+        rule = self.app[self.app.index("function periodIsOpen(period, current)"):]
+        rule = rule[:rule.index("\n}")]
+        self.assertIn('String(period) === String(current)', rule)
+        self.assertIn("openScheduleDates.has(`md-${period}`)", rule)
+
         grouped = self.app[self.app.index("function groupedPeriods(list, currentPeriod = null)"):]
-        grouped = grouped[:grouped.index("// My Picks still groups by matchweek")]
-        self.assertIn('String(period) === String(current)', grouped)
+        grouped = grouped[:grouped.index("\n}")]
         self.assertIn("<details", grouped)
-        # Every period is rendered; only the open attribute varies.
+        self.assertIn("periodIsOpen(period, current)", grouped)
+        # Every period is still rendered; only the open attribute and whether
+        # its cards exist yet vary.
         self.assertNotIn("filter((period) =>", grouped)
+        self.assertIn("dayBody(period, matches, open)", grouped)
 
     def test_the_launch_decision_tree_has_all_four_branches(self):
         branch = self.app[self.app.index("function launchBranch()"):]
@@ -1587,9 +1596,11 @@ class AmendBeforeKickoffTests(unittest.TestCase):
         self.assertIn("cacheLeagueState(leagueState);", fn)
         self.assertIn("roundState = { ...roundState, table: rename(roundState.table)", fn)
         self.assertIn("leagueStates = { ...leagueStates, [code]:", fn)
-        # And the handler repaints before waiting on the server.
-        handler = self.app[self.app.index('const nick = event.target.closest("[data-league-nick]")'):]
-        handler = handler[:handler.index("const kick = event.target.closest")]
+        # And the rename repaints before waiting on the server. That now lives
+        # in the nick dialog's submit handler rather than the click branch,
+        # because prompt() was replaced with a real field.
+        handler = self.app[self.app.index('document.getElementById("nickForm").addEventListener'):]
+        handler = handler[:handler.index('document.getElementById("nickDialog").addEventListener')]
         self.assertIn("applyNickLocally(code, uid(), result.nick);", handler)
         self.assertLess(handler.index("applyNickLocally"), handler.index("await loadLeagueState()"))
         self.assertLess(handler.index("render();"), handler.index("await loadLeagueState()"))
@@ -1866,6 +1877,228 @@ class LeagueSwitchAndShareTests(unittest.TestCase):
         later = later[:later.index("const scoreWindow")]
         self.assertIn("await shareLeagueTableGraphic(leagueState);", later)
         self.assertNotIn("isNativeApp()", later, "the native paths are handled above")
+
+
+class ScheduleTabTests(unittest.TestCase):
+    """A tab tap is answered on the tap, and a week costs nothing until opened."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = (ROOT / "app.js").read_text()
+        cls.css = (ROOT / "styles.css").read_text()
+
+    def test_every_tab_acknowledges_the_tap_before_working(self):
+        nav = self.app[self.app.index("async function navigateToView(view)"):]
+        nav = nav[:nav.index("\n}")]
+        self.assertIn("if (paintShell(view)) await nextPaint();", nav)
+        self.assertLess(nav.index("paintShell(view)"), nav.index("render({ scrollTop: true })"))
+        # The rule is not Schedule-only: every view has a shell.
+        shells = self.app[self.app.index("const VIEW_SHELLS = {"):self.app.index("const loadingLine =")]
+        for view in ("schedule", "picks", "league", "today", "rules"):
+            self.assertIn(f"{view}:", shells, view)
+
+    def test_the_schedule_shell_is_the_header_and_filters_only(self):
+        shells = self.app[self.app.index("const VIEW_SHELLS = {"):self.app.index("const loadingLine =")]
+        self.assertIn("scheduleHead()", shells)
+        self.assertIn("scheduleFilters()", shells)
+        self.assertIn('loadingLine("Loading fixtures…")', shells)
+        # Nothing heavy: no fixture cards, no week bodies.
+        self.assertNotIn("groupedPeriods", shells)
+        self.assertNotIn("matchCard", shells)
+        self.assertIn(".view-loading", self.css)
+
+    def test_the_shell_bypasses_the_tap_hold_and_the_dedupe(self):
+        paint = self.app[self.app.index("function paintShell(view)"):]
+        paint = paint[:paint.index("\n}")]
+        # render() is held for the length of a tap, and a tab tap is a tap.
+        self.assertNotIn("render(", paint)
+        self.assertIn("app.innerHTML = shell();", paint)
+        self.assertIn("renderedHTML = null;", paint)
+        self.assertIn("markActiveTab();", paint)
+
+    def test_the_pause_is_long_enough_to_actually_paint(self):
+        line = self.app[self.app.index("const nextPaint ="):]
+        line = line[:line.index("\n")]
+        self.assertIn("requestAnimationFrame", line)
+        self.assertIn("setTimeout(resolve, 0)", line)
+
+    def test_a_closed_week_builds_no_cards(self):
+        body = self.app[self.app.index("function dayBody(period, matches, open)"):]
+        body = body[:body.index("\n}")]
+        self.assertIn('if (!open) return `<div class="day-body" data-lazy-body=', body)
+        self.assertIn('matches.map(matchCard).join("")', body)
+
+    def test_expanding_builds_that_week_on_demand(self):
+        fill = self.app[self.app.index("function fillDayBody(card)"):]
+        fill = fill[:fill.index("\n}")]
+        self.assertIn('const body = card.querySelector("[data-lazy-body]");', fill)
+        self.assertIn("if (!body) return;", fill)
+        self.assertIn('body.removeAttribute("data-lazy-body");', fill)
+        # Same card builder as the eager path, so calendar and TV info cannot drift.
+        self.assertIn('matches.map(matchCard).join("")', fill)
+        toggle = self.app[self.app.index('document.addEventListener("toggle"'):]
+        self.assertIn("fillDayBody(card);", toggle)
+
+    def test_the_list_is_walked_once(self):
+        group = self.app[self.app.index("function groupedPeriods(list, currentPeriod = null)"):]
+        group = group[:group.index("\n}")]
+        self.assertNotIn("list.filter", group)
+        self.assertIn("byPeriod(list)", group)
+
+    def test_filtering_to_a_week_opens_it(self):
+        handler = self.app[self.app.index('const filter = event.target.closest("[data-filter]");'):]
+        handler = handler[:handler.index("const league = event.target.closest")]
+        self.assertIn('if (matchdayFilter !== "all") openScheduleDates.add(`md-${matchdayFilter}`);', handler)
+
+
+class NamesAndViewportTests(unittest.TestCase):
+    """Build 12: nobody is Anon by accident, and the keyboard cannot leave the
+    page displaced."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = (ROOT / "app.js").read_text()
+        cls.css = (ROOT / "styles.css").read_text()
+        cls.html = (ROOT / "index.html").read_text()
+        cls.worker = (ROOT / "worker/src/worker.js").read_text()
+
+    # --- A. names ---------------------------------------------------------
+
+    def test_the_join_form_asks_for_a_name(self):
+        view = self.app[self.app.index("function leagueView()"):]
+        view = view[:view.index("function rulesView()")]
+        self.assertIn('<input id="joinNick" name="joinNick" maxlength="24"', view)
+        # Prefilled with whatever is already known, and required either way.
+        self.assertIn('value="${escapeHTML(playerName)}"', view)
+        self.assertIn("required", view)
+        self.assertIn("This is what your mates will see", view)
+
+    def test_joining_sends_the_name_and_keeps_it(self):
+        handler = self.app[self.app.index('if (event.target.matches("[data-join-league]")) {'):]
+        handler = handler[:handler.index("if (event.target.matches(\"[data-restore]\"))")]
+        self.assertIn('const nick = String(data.get("joinNick") || "").trim().slice(0, 24);', handler)
+        self.assertIn('api("/join", { uid: uid(), nickname: playerName || nick, nick, code })', handler)
+        # A first-time joiner ends up with a profile name too.
+        self.assertIn("if (!playerName) {", handler)
+        self.assertIn("localStorage.setItem(STORAGE.name, playerName);", handler)
+
+    def test_saving_a_profile_name_reaches_the_server(self):
+        self.assertIn("syncProfileName();", self.app)
+        fn = self.app[self.app.index("async function syncProfileName()"):]
+        fn = fn[:fn.index("\n}")]
+        self.assertIn('api("/profile", { uid: uid(), nickname: playerName })', fn)
+        # Only the leagues the server says it changed are repainted.
+        self.assertIn("for (const code of result.updated || []) applyNickLocally(code, uid(), result.nickname);", fn)
+
+    def test_the_profile_dialog_explains_the_split(self):
+        self.assertIn("Used in your leagues unless you set a league name.", self.html)
+        self.assertIn(".field-hint", self.css)
+
+    def test_the_server_only_replaces_the_default_nick(self):
+        fn = self.worker[self.worker.index("async function setProfile(env, body)"):]
+        fn = fn[:fn.index("\nasync function updateLeagueNick")]
+        self.assertIn("if (member.nick && member.nick !== DEFAULT_NICK) { kept.push(code); continue; }", fn)
+        self.assertIn("nick: nickname", fn)
+        # One definition of the default, shared with the fallback that creates it.
+        self.assertIn("DEFAULT_NICK,", self.worker)
+        logic = (ROOT / "worker/src/logic.js").read_text()
+        self.assertIn('export const DEFAULT_NICK = "Anon";', logic)
+        self.assertIn("|| DEFAULT_NICK;", logic)
+
+    def test_join_prefers_the_name_given_for_that_league(self):
+        fn = self.worker[self.worker.index("async function joinLeague(env, body)"):]
+        fn = fn[:fn.index("\n}")]
+        self.assertIn('const offered = String(body.nick || body.nickname || "").trim();', fn)
+        self.assertIn("nick: offered ? normNick(offered) : (user.nickname || existing?.nick || DEFAULT_NICK),", fn)
+
+    def test_renaming_uses_a_real_field_not_a_prompt(self):
+        # prompt() returns null both when WKWebView declines to show it and when
+        # the viewer cancels, so a rename could fail with no feedback at all.
+        code_only = re.sub(r"//[^\n]*", "", self.app)   # comments may name it
+        self.assertNotIn("prompt(", code_only)
+        self.assertIn('<dialog id="nickDialog">', self.html)
+        self.assertIn('<input id="leagueNick" name="leagueNick" maxlength="24"', self.html)
+        self.assertIn("required", self.html[self.html.index('id="leagueNick"'):self.html.index("</dialog>", self.html.index('id="leagueNick"'))])
+        handler = self.app[self.app.index('const nick = event.target.closest("[data-league-nick]");'):]
+        handler = handler[:handler.index("const kick = event.target.closest")]
+        self.assertIn("openNickDialog(nick.dataset.leagueNick);", handler)
+
+    def test_a_failed_rename_always_says_so(self):
+        fn = self.app[self.app.index('document.getElementById("nickForm").addEventListener'):]
+        fn = fn[:fn.index("document.getElementById(\"nickDialog\").addEventListener")]
+        self.assertIn('api("/league/nick", { uid: uid(), code, nick: trimmed })', fn)
+        self.assertIn('setFlash(error.message, "error");', fn)
+        self.assertIn("applyNickLocally(code, uid(), result.nick);", fn)
+        # And it prefills with the name in force for that league.
+        opener = self.app[self.app.index("function openNickDialog(code)"):]
+        opener = opener[:opener.index("\n}")]
+        self.assertIn("leagueState?.table?.find((row) => row.uid === uid())?.nick || playerName", opener)
+        self.assertIn("dialog.showModal();", opener)
+
+    # --- B. the viewport --------------------------------------------------
+
+    def test_the_keyboard_cannot_leave_the_page_displaced(self):
+        fn = self.app[self.app.index("function restoreViewport()"):]
+        fn = fn[:fn.index("\n}\n")]
+        self.assertIn("window.scrollTo(0, 0);", fn)
+        self.assertIn("document.scrollingElement.scrollTop = 0;", fn)
+        self.assertIn("document.body.scrollTop = 0;", fn)
+        # The keyboard animates out, so one correction is not enough.
+        self.assertIn("requestAnimationFrame(settle);", fn)
+        for delay in ("60", "250", "600"):
+            self.assertIn(f"setTimeout(settle, {delay});", fn)
+
+    def test_every_way_the_keyboard_closes_restores_the_viewport(self):
+        # Submitting, cancelling, Escape and the close button.
+        self.assertIn('document.getElementById("profileDialog").addEventListener("close", restoreViewport);', self.app)
+        dismiss = self.app[self.app.index("function dismissKeyboard()"):]
+        dismiss = dismiss[:dismiss.index("\n}")]
+        self.assertIn("restoreViewport();", dismiss)
+        # And a safety net for any scroll at all, since the app never scrolls
+        # the document itself.
+        self.assertIn('window.addEventListener("scroll", () => {', self.app)
+        self.assertIn("if (window.scrollY || document.scrollingElement?.scrollTop) restoreViewport();", self.app)
+        # The visual viewport returning to full height is the keyboard leaving.
+        self.assertIn("if (vv.height >= tallest - 1) restoreViewport();", self.app)
+
+    def test_the_body_stays_one_viewport_tall_and_unscrolled(self):
+        # Pinning the documentElement as well was tried and dropped: the
+        # simulator showed it changed nothing, and restoreViewport() is what
+        # actually puts the page back.
+        body = self.css[self.css.index("body {"):]
+        body = body[:body.index("}")]
+        self.assertIn("overflow: hidden;", body)
+        # position: fixed on the body is still deliberately absent — it breaks
+        # iOS Full Keyboard Access, which is a worse bug.
+        self.assertNotIn("position: fixed;", body)
+
+    def test_the_slate_control_has_a_reserved_slot(self):
+        # It swaps between "Pick fixtures" (48px) and the published lock line
+        # plus "Edit line-up" (96px) when a stale cached card is replaced by
+        # fresh state. Measured: the three buttons below it moved 48px without
+        # the reservation and 2px with it.
+        view = self.app[self.app.index("function leagueView()"):]
+        view = view[:view.index("function rulesView()")]
+        self.assertIn('<div class="slate-slot">${hostSlateControl(state)}</div>', view)
+        slot = self.css[self.css.index(".slate-slot {"):]
+        slot = slot[:slot.index("}")]
+        self.assertIn("min-height: 96px;", slot)
+        # The slot sits above the action buttons, which is the whole point.
+        self.assertLess(view.index("slate-slot"), view.index("data-share-league"))
+        self.assertLess(view.index("slate-slot"), view.index("data-league-nick"))
+
+    # --- C. the nav -------------------------------------------------------
+
+    def test_inactive_nav_icons_are_visibly_dimmed(self):
+        span = self.css[self.css.index(".bottom-nav button span {"):]
+        span = span[:span.index("}")]
+        self.assertIn("filter: grayscale(1);", span)
+        # Greyscale alone cannot dim a football, which is already monochrome.
+        self.assertIn("opacity: .45;", span)
+        active = self.css[self.css.index(".bottom-nav button.active span {"):]
+        active = active[:active.index("}")]
+        self.assertIn("filter: none;", active)
+        self.assertIn("opacity: 1;", active)
 
 
 if __name__ == "__main__":

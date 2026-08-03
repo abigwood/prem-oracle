@@ -54,12 +54,29 @@
       </div>
       <label for="playerName">Display name</label>
       <input id="playerName" maxlength="24" autocomplete="nickname" placeholder="Adam">
+      <p class="field-hint">Used in your leagues unless you set a league name.</p>
       <div id="notificationPrefs" class="notif-prefs" hidden>
         <span class="eyebrow">Notifications</span>
         <p class="notif-hint">Kick-off reminders, per competition.</p>
         <div id="notificationPrefsList"></div>
       </div>
       <button class="primary wide" value="save">Save name</button>
+    </form>
+  </dialog>
+
+  <dialog id="nickDialog">
+    <form method="dialog" id="nickForm">
+      <div class="dialog-head">
+        <div>
+          <span class="eyebrow">League name</span>
+          <h2>Your name in this league</h2>
+        </div>
+        <button class="icon-button" value="cancel" aria-label="Close" data-nick-cancel>×</button>
+      </div>
+      <label for="leagueNick">Display name</label>
+      <input id="leagueNick" name="leagueNick" maxlength="24" autocomplete="nickname" placeholder="Your name" required>
+      <p class="field-hint" id="nickHint">Only your mates in this league see it.</p>
+      <button class="primary wide" value="save">Save league name</button>
     </form>
   </dialog>
 

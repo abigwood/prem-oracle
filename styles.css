@@ -854,9 +854,12 @@ th.wins-col { font-size: .92rem; }
   transform: translateZ(0);
 }
 .bottom-nav button { height: 52px; min-height: 52px; padding: 3px 0 5px; border: 0; color: #839087; background: transparent; font-size: .62rem; font-weight: 800; }
-.bottom-nav button span { display: block; margin-bottom: 2px; font-size: 1.15rem; filter: grayscale(1); }
+/* Greyscale alone cannot dim the football — the emoji is already black and
+   white — so inactive icons carry opacity too, which is what actually reads as
+   "not this tab". */
+.bottom-nav button span { display: block; margin-bottom: 2px; font-size: 1.15rem; filter: grayscale(1); opacity: .45; transition: opacity .15s ease, filter .15s ease; }
 .bottom-nav button.active { color: var(--purple); }
-.bottom-nav button.active span { filter: none; }
+.bottom-nav button.active span { filter: none; opacity: 1; }
 
 /* Native shell only: tighten the bottom-nav's home-indicator padding so the
    icons sit lower while the bar still clears the indicator and its background
@@ -1609,3 +1612,41 @@ body.picker-open { overflow: hidden; }
 .proof-teams { display: flex; align-items: center; gap: 7px; flex: 1; min-width: 0; }
 .proof-teams em { color: var(--muted); font-size: .7rem; font-style: normal; font-weight: 900; }
 .proof-date { color: var(--muted); font-size: .74rem; font-weight: 800; white-space: nowrap; }
+
+/* The line a tab shows while its real content is being built. Muted and
+   unobtrusive: on a fast device it is on screen for a single frame. */
+.view-loading {
+  margin: 24px 4px;
+  color: var(--muted, #6b7280);
+  font-size: 15px;
+}
+
+/* Explains the profile name / league name split, right where the split is. */
+.field-hint {
+  margin: 6px 2px 0;
+  color: var(--muted, #6b7280);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.field-label {
+  display: block;
+  margin: 14px 2px 6px;
+  color: var(--muted, #6b7280);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+/* The week's slate control arrives with the fresh league state, a beat after
+   the cached card has already painted. Without a reserved slot it appears from
+   nothing and shoves Invite mates, Change my name and Delete league 48px down
+   the screen — under a finger already on its way to one of them. The slot is
+   the control's own height, so the buttons below it never move. */
+.slate-slot {
+  /* Sized to the TALLER of the two things that live here: "Pick fixtures"
+     (48px) before a line-up is published, the lock line plus "Edit line-up"
+     (96px) after. The control swaps between them when a stale cached card is
+     replaced by fresh state, and without the reservation the three buttons
+     below it jump 48px — under a finger already moving towards one of them. */
+  min-height: 96px;
+}

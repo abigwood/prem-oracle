@@ -1266,30 +1266,69 @@ function matchCard(match) {
  * The current period opens; every future period is collapsed but expandable.
  * None of them is hidden.
  */
+/** One pass over the list, rather than a scan per period. */
+function byPeriod(list) {
+  const groups = new Map();
+  for (const fixture of list) {
+    const period = periodOfFixture(fixture);
+    if (period == null) continue;
+    const key = String(period);
+    if (!groups.has(key)) groups.set(key, { period, matches: [] });
+    groups.get(key).matches.push(fixture);
+  }
+  return [...groups.values()].sort((a, b) => comparePeriods(a.period, b.period));
+}
+
+/** Is this week the one that starts expanded? */
+function periodIsOpen(period, current) {
+  // Once the viewer has opened or closed anything, their choice wins; until
+  // then the current week is the one that starts open.
+  return openScheduleDates.has(`md-${period}`)
+    || (!openScheduleDates.size && String(period) === String(current));
+}
+
 function groupedPeriods(list, currentPeriod = null) {
   const current = currentPeriod ?? currentPeriodKey();
-  return [...new Set(list.map(periodOfFixture).filter((key) => key != null))]
-    .sort(comparePeriods)
-    .map((period) => {
-      const matches = list.filter((fixture) => periodOfFixture(fixture) === period);
-      const key = `md-${period}`;
-      const firstDate = matches[0]?.date;
-      // Once the viewer has opened or closed anything, their choice wins; until
-      // then the current week is the one that starts open.
-      const open = openScheduleDates.has(key) || (!openScheduleDates.size && String(period) === String(current));
-      return `<details class="day-card" data-day-card="${escapeHTML(key)}" ${open ? "open" : ""}>
-        <summary>
-          <div><strong>${escapeHTML(periodLabel(period))}</strong><span>${
-            isWindowKey(period)
-              // The week's own range, not the first fixture's date — a week
-              // that opens on a Friday would otherwise look like a Friday.
-              ? escapeHTML(weekDateRange(period))
-              : firstDate ? dateLabel(firstDate, true) : ""}</span></div>
-          <span>${countPhrase(matches.length, matches.length === 1 ? "fixture" : "fixtures")}</span>
-        </summary>
-        <div class="day-body">${matches.map(matchCard).join("")}</div>
-      </details>`;
-    }).join("");
+  return byPeriod(list).map(({ period, matches }) => {
+    const key = `md-${period}`;
+    const firstDate = matches[0]?.date;
+    const open = periodIsOpen(period, current);
+    return `<details class="day-card" data-day-card="${escapeHTML(key)}" ${open ? "open" : ""}>
+      <summary>
+        <div><strong>${escapeHTML(periodLabel(period))}</strong><span>${
+          isWindowKey(period)
+            // The week's own range, not the first fixture's date — a week
+            // that opens on a Friday would otherwise look like a Friday.
+            ? escapeHTML(weekDateRange(period))
+            : firstDate ? dateLabel(firstDate, true) : ""}</span></div>
+        <span>${countPhrase(matches.length, matches.length === 1 ? "fixture" : "fixtures")}</span>
+      </summary>
+      ${dayBody(period, matches, open)}
+    </details>`;
+  }).join("");
+}
+
+/**
+ * A closed week's fixtures are built when it is opened, not before. Thirty-odd
+ * collapsed weeks used to put every card in the document — on a mixed league
+ * that is nine hundred cards and fifty thousand nodes to show the twenty-odd in
+ * the open week, and the tab could not paint until all of it was built.
+ * `<details>` only hides its body; it does not spare you creating it.
+ */
+function dayBody(period, matches, open) {
+  if (!open) return `<div class="day-body" data-lazy-body="${escapeHTML(String(period))}"></div>`;
+  return `<div class="day-body">${matches.map(matchCard).join("")}</div>`;
+}
+
+/** Fills a week's body the first time it is expanded. */
+function fillDayBody(card) {
+  const body = card.querySelector("[data-lazy-body]");
+  if (!body) return;
+  const period = body.dataset.lazyBody;
+  const matches = (currentView === "picks" ? visiblePickedFixtures() : fixtures)
+    .filter((fixture) => String(periodOfFixture(fixture)) === period);
+  body.innerHTML = matches.map(matchCard).join("");
+  body.removeAttribute("data-lazy-body");
 }
 
 // My Picks still groups by matchweek, which is what it has always done.
@@ -1537,14 +1576,20 @@ function todayView() {
  * expandable. Nothing is ever hidden — a week the host has not published yet is
  * still a week the league can see coming.
  */
+const scheduleHead = () =>
+  `<div class="section-head"><div><span class="eyebrow">Full season</span><h2>Prediction schedule</h2></div></div>`;
+
+const scheduleFilters = () =>
+  `<div class="filters filters-week"><button class="filter${matchdayFilter === "all" ? " active" : ""}" data-filter="all">${isMixedActive() ? "All weeks" : "All rounds"}</button></div>
+   ${weekStrip(matchdayFilter, "data-filter")}`;
+
 function scheduleView() {
   const current = leagueState?.currentPeriod ?? currentPeriodKey();
   const filtered = fixtures.filter((fixture) => matchdayFilter === "all" || String(periodOfFixture(fixture)) === String(matchdayFilter));
   const awaiting = leagueCodes.length && current != null && !slateForPeriod(current);
-  return `<div class="section-head"><div><span class="eyebrow">Full season</span><h2>Prediction schedule</h2></div></div>
+  return `${scheduleHead()}
     ${awaiting ? `<div class="launch-card"><p>No picks due yet — fixtures will appear here when your host publishes this week's slate.</p></div>` : ""}
-    <div class="filters filters-week"><button class="filter${matchdayFilter === "all" ? " active" : ""}" data-filter="all">${isMixedActive() ? "All weeks" : "All rounds"}</button></div>
-    ${weekStrip(matchdayFilter, "data-filter")}
+    ${scheduleFilters()}
     ${groupedPeriods(filtered, current)}`;
 }
 
@@ -2667,6 +2712,9 @@ function leagueView() {
     <form class="league-form" data-join-league>
       <span class="eyebrow">Got an invitation?</span><h3>Join a league</h3>
       <input name="leagueCode" maxlength="6" value="${joinDefault}" placeholder="ABC234" required>
+      <label class="field-label" for="joinNick">Your name in this league</label>
+      <input id="joinNick" name="joinNick" maxlength="24" value="${escapeHTML(playerName)}" placeholder="Your name" required>
+      <p class="field-hint">This is what your mates will see on the table.</p>
       <button class="primary wide" type="submit">Join league</button>
     </form>
   </div>`;
@@ -2713,7 +2761,7 @@ function leagueView() {
           <span class="eyebrow">${escapeHTML(leagueSummaryLine(state))}</span>
           <h2>${escapeHTML(state.name)}</h2>
           <div class="league-code"><span>League code</span><strong>${state.code}</strong></div>
-          ${hostSlateControl(state)}
+          <div class="slate-slot">${hostSlateControl(state)}</div>
           ${weeklyCountControl(state)}
           <button class="secondary wide" type="button" data-share-league="${state.code}">Invite mates</button>
           <button class="secondary wide" type="button" data-league-nick="${state.code}">Change my name in this league</button>
@@ -2876,11 +2924,55 @@ function showUpdatePrompt(registration) {
   document.body.append(prompt);
 }
 
+/**
+ * What a view can show before it has done any work. A tab tap must be answered
+ * on the tap: the highlight moves and the shell appears, then the real view
+ * replaces it. Schedule earns this the hard way — a mixed league's full board
+ * is nine hundred cards — but every tab goes through the same door, so no tab
+ * can quietly become the slow one later.
+ */
+const VIEW_SHELLS = {
+  schedule: () => `${scheduleHead()}${scheduleFilters()}${loadingLine("Loading fixtures…")}`,
+  picks: () => `<div class="section-head"><div><span class="eyebrow">${escapeHTML(playerName || "Your profile")}</span><h2>My predictions</h2></div></div>${loadingLine("Loading your predictions…")}`,
+  league: () => `<div class="section-head"><div><span class="eyebrow">Private predictor leagues</span><h2>League table</h2></div></div>${loadingLine("Loading your leagues…")}`,
+  today: () => `${loadingLine("Loading fixtures…")}`,
+  // Static and cheap, but it goes through the same door so the rule has no
+  // exceptions to drift out of.
+  rules: () => `<div class="rules-card"><span class="eyebrow">Scoring</span><h2>How Prem Oracle works</h2>${loadingLine("Loading…")}</div>`,
+};
+
+const loadingLine = (message) => `<p class="view-loading" role="status">${escapeHTML(message)}</p>`;
+
+/** Paints a view's shell immediately, bypassing the tap hold. */
+function paintShell(view) {
+  const shell = VIEW_SHELLS[view];
+  if (!shell) return false;
+  const app = document.getElementById("app");
+  if (!app) return false;
+  app.innerHTML = shell();
+  // The shell is not the view, so the next render must not be deduped away.
+  renderedHTML = null;
+  markActiveTab();
+  return true;
+}
+
+/** The nav highlight, so the tap is acknowledged even before the shell. */
+function markActiveTab() {
+  document.querySelectorAll(".bottom-nav button")
+    .forEach((button) => button.classList.toggle("active", button.dataset.view === currentView));
+}
+
+/** Lets the browser paint what has just been written before more work starts. */
+const nextPaint = () => new Promise((resolve) => requestAnimationFrame(() => setTimeout(resolve, 0)));
+
 async function navigateToView(view) {
   if (!view) return;
   launchRouted = true;   // the viewer is driving now
   currentView = view;
   clearFlash();
+  // Acknowledge the tap first, then build the view in a later task so the
+  // acknowledgement actually reaches the screen.
+  if (paintShell(view)) await nextPaint();
   render({ scrollTop: true });
   if (currentView === "league") {
     await loadLeagueState();
@@ -2990,6 +3082,56 @@ function readWizardInputs() {
 function dismissKeyboard() {
   const active = document.activeElement;
   if (active && typeof active.blur === "function" && active !== document.body) active.blur();
+  restoreViewport();
+}
+
+/**
+ * Puts the page back where it belongs after the software keyboard has been.
+ *
+ * WKWebView scrolls the document to reveal a focused field, and `overflow:
+ * hidden` on the body does not stop it — the scroll happens on the web view's
+ * own scroll view, which surfaces here as a non-zero scrollTop and a displaced
+ * visualViewport. Measured on an iPhone 17 simulator: focusing the profile
+ * field scrolled the document 63px, taking the header up under the status bar.
+ *
+ * WebKit usually puts it back, but not always, and when it doesn't the app is
+ * left with everything painted 63px out — which is why buttons stopped
+ * answering: the fixed bottom nav is positioned against the layout viewport
+ * while the viewer is looking at the displaced visual one, so its hit area is
+ * no longer where it appears.
+ */
+function restoreViewport() {
+  const settle = () => {
+    if (window.scrollY || document.scrollingElement?.scrollTop || document.body.scrollTop) {
+      window.scrollTo(0, 0);
+      if (document.scrollingElement) document.scrollingElement.scrollTop = 0;
+      document.body.scrollTop = 0;
+    }
+  };
+  settle();
+  // The keyboard animates out over a few frames, and WebKit can scroll again
+  // part-way through, so one correction at the start is not enough.
+  requestAnimationFrame(settle);
+  setTimeout(settle, 60);
+  setTimeout(settle, 250);
+  setTimeout(settle, 600);
+}
+
+// The app is exactly one viewport tall and never scrolls the document itself,
+// so any document scroll at all is the keyboard's doing and must be undone.
+window.addEventListener("scroll", () => {
+  if (window.scrollY || document.scrollingElement?.scrollTop) restoreViewport();
+}, { passive: true });
+
+// The keyboard closing shows up here as the visual viewport returning to full
+// height; that is the moment to put the page back.
+if (window.visualViewport) {
+  let tallest = window.visualViewport.height;
+  window.visualViewport.addEventListener("resize", () => {
+    const vv = window.visualViewport;
+    tallest = Math.max(tallest, vv.height);
+    if (vv.height >= tallest - 1) restoreViewport();   // keyboard gone
+  });
 }
 
 async function handleWizardClick(event) {
@@ -3142,7 +3284,15 @@ document.addEventListener("click", async (event) => {
     return;
   }
   const filter = event.target.closest("[data-filter]");
-  if (filter) { matchdayFilter = filter.dataset.filter; render(); return; }
+  if (filter) {
+    matchdayFilter = filter.dataset.filter;
+    // Narrowing to one week is a request to see it. Opening it through the
+    // normal set rather than a special case means the viewer can still close
+    // it, and it keeps one rule for what "open" means.
+    if (matchdayFilter !== "all") openScheduleDates.add(`md-${matchdayFilter}`);
+    render();
+    return;
+  }
   const league = event.target.closest("[data-league]");
   if (league) { setActiveLeague(league.dataset.league); return; }
   const roundTab = event.target.closest("[data-round-tab]");
@@ -3193,28 +3343,13 @@ document.addEventListener("click", async (event) => {
   }
   const nick = event.target.closest("[data-league-nick]");
   if (nick) {
-    const code = nick.dataset.leagueNick;
-    const current = leagueState?.table?.find((row) => row.uid === uid())?.nick || playerName || "";
-    const next = prompt("Your name in this league", current);
-    if (next == null) return;
-    const trimmed = next.trim();
-    if (!trimmed) { setFlash("Name can't be empty", "error"); render(); return; }
-    try {
-      const result = await api("/league/nick", { uid: uid(), code, nick: trimmed });
-      // Write through the cached state and repaint on the spot. The server read
-      // that follows goes via a KV list, which can lag its own write by up to a
-      // minute — long enough for the banner to say the new name while the table
-      // underneath still said "Anon".
-      applyNickLocally(code, uid(), result.nick);
-      setFlash(`Now showing as ${result.nick} in this league`);
-      render();
-      await loadLeagueState();
-    } catch (error) {
-      setFlash(error.message, "error");
-    }
-    render();
+    // Was prompt(), which WKWebView can decline to show — it then returns null,
+    // indistinguishable from the viewer cancelling, so a rename could fail
+    // without ever telling anybody or reaching the server.
+    openNickDialog(nick.dataset.leagueNick);
     return;
   }
+
   const kick = event.target.closest("[data-kick-league]");
   if (kick) {
     const code = kick.dataset.kickLeague;
@@ -3349,9 +3484,19 @@ document.addEventListener("submit", async (event) => {
   if (event.target.matches("[data-join-league], [data-restore]")) dismissKeyboard();
   if (event.target.matches("[data-join-league]")) {
     event.preventDefault();
-    const code = String(new FormData(event.target).get("leagueCode") || "").toUpperCase();
+    const data = new FormData(event.target);
+    const code = String(data.get("leagueCode") || "").toUpperCase();
+    // Required by the form, so this is only ever empty if the markup changed.
+    const nick = String(data.get("joinNick") || "").trim().slice(0, 24);
+    if (!nick) { setFlash("Add the name your mates will see", "error"); render(); return; }
+    // A joiner with no profile name yet gets one, so the next league they join
+    // is prefilled and nothing has to be typed twice.
+    if (!playerName) {
+      playerName = nick;
+      localStorage.setItem(STORAGE.name, playerName);
+    }
     try {
-      const response = await api("/join", { uid: uid(), nickname: playerName, code });
+      const response = await api("/join", { uid: uid(), nickname: playerName || nick, nick, code });
       saveLeague(response.code);
       saveLeagueName(response.code, response.name);
       if (response.recovery) localStorage.setItem(STORAGE.recovery, response.recovery);
@@ -3401,8 +3546,13 @@ document.addEventListener("toggle", (event) => {
   }
   const card = event.target.closest?.("[data-day-card]");
   if (!card) return;
-  if (card.open) openScheduleDates.add(card.dataset.dayCard);
-  else openScheduleDates.delete(card.dataset.dayCard);
+  if (card.open) {
+    // Built on the way open, so the week costs nothing until it is wanted.
+    fillDayBody(card);
+    openScheduleDates.add(card.dataset.dayCard);
+  } else {
+    openScheduleDates.delete(card.dataset.dayCard);
+  }
 }, true);
 
 // --- Per-competition notification preferences -------------------------------
@@ -3474,8 +3624,85 @@ document.getElementById("profileForm").addEventListener("submit", (event) => {
   playerName = document.getElementById("playerName").value.trim().slice(0, 24);
   localStorage.setItem(STORAGE.name, playerName);
   document.getElementById("profileDialog").close();
+  restoreViewport();
+  render();
+  // The name is the viewer's identity in every league that has not been given
+  // one of its own, so it has to reach the server as well as this device.
+  syncProfileName();
+});
+
+/**
+ * Pushes the profile name to the server, which seeds it into any league where
+ * the viewer is still the default "Anon". Leagues with a chosen name are left
+ * alone. Best-effort: the local name is already saved, and the next save or
+ * league rename will carry it if this one cannot.
+ */
+async function syncProfileName() {
+  if (!API || !playerName) return;
+  try {
+    const result = await api("/profile", { uid: uid(), nickname: playerName });
+    for (const code of result.updated || []) applyNickLocally(code, uid(), result.nickname);
+    if (result.updated?.length) {
+      setFlash(`Now showing as ${result.nickname} in ${countPhrase(result.updated.length, "league")}`);
+      render();
+    }
+  } catch {
+    // Nothing to tell the viewer: their name is saved, and it will propagate on
+    // the next attempt rather than being lost.
+  }
+}
+
+// Cancel, Escape and the close button never reach the submit handler, but they
+// dismiss the keyboard just the same, so the viewport has to be put back for
+// all of them.
+// --- Renaming yourself in one league ----------------------------------------
+// A real field rather than prompt(): WKWebView may decline to present a
+// prompt, and it returns null when it does — the same value as "cancelled" —
+// so the rename vanished with no error, no feedback and nothing sent.
+
+let nickDialogCode = "";
+
+function openNickDialog(code) {
+  nickDialogCode = code;
+  const dialog = document.getElementById("nickDialog");
+  const input = document.getElementById("leagueNick");
+  const name = (leagueState?.code === code ? leagueState.name : leagueNames[code]) || code;
+  input.value = leagueState?.table?.find((row) => row.uid === uid())?.nick || playerName || "";
+  document.getElementById("nickHint").textContent = `Only your mates in ${name} see it.`;
+  dialog.showModal();
+  // Selecting rather than just focusing means typing replaces the old name,
+  // which is what renaming usually means.
+  input.select?.();
+}
+
+document.getElementById("nickForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const code = nickDialogCode;
+  const trimmed = document.getElementById("leagueNick").value.trim().slice(0, 24);
+  document.getElementById("nickDialog").close();
+  restoreViewport();
+  if (!code) return;
+  if (!trimmed) { setFlash("Name can't be empty", "error"); render(); return; }
+  try {
+    const result = await api("/league/nick", { uid: uid(), code, nick: trimmed });
+    // Write through the cached state and repaint on the spot. The server read
+    // that follows goes via a KV list, which can lag its own write by up to a
+    // minute — long enough for the banner to say the new name while the table
+    // underneath still said "Anon".
+    applyNickLocally(code, uid(), result.nick);
+    setFlash(`Now showing as ${result.nick} in this league`);
+    render();
+    await loadLeagueState();
+  } catch (error) {
+    // Whatever went wrong, the viewer hears about it — the old silence is the
+    // bug being fixed here.
+    setFlash(error.message, "error");
+  }
   render();
 });
+
+document.getElementById("nickDialog").addEventListener("close", restoreViewport);
+document.getElementById("profileDialog").addEventListener("close", restoreViewport);
 
 function registerServiceWorker() {
   if (!("serviceWorker" in navigator)) return;

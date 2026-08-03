@@ -1180,7 +1180,7 @@ class WeeklyLoopTests(unittest.TestCase):
     def test_the_round_request_does_not_gate_the_season_paint(self):
         loader = self.app[self.app.index("async function loadLeagueState()"):]
         loader = loader[:loader.index("async function loadRoundState()")]
-        self.assertIn("cacheLeagueState(leagueState);", loader)
+        self.assertIn("cacheLeagueState(state);", loader)
         # The season state is painted before the second /state call goes out.
         self.assertIn("render();\n      await loadRoundState();", loader)
 
@@ -1723,6 +1723,141 @@ class MyPredictionsTests(unittest.TestCase):
         loader = loader[:loader.index("function rememberCompetition(codes)")]
         self.assertIn("extraFixtures = next;", loader)
         self.assertNotIn("fixtures =", loader)
+
+
+class LeagueSwitchAndShareTests(unittest.TestCase):
+    """Build 10 field reports: crossed-over nicknames, and a slow share sheet."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = (ROOT / "app.js").read_text()
+
+    # --- the stale-response guard ----------------------------------------
+
+    def test_a_league_fetch_takes_a_ticket(self):
+        self.assertIn("let leagueStateRequest = 0;", self.app)
+        fn = self.app[self.app.index("async function loadLeagueState()"):]
+        fn = fn[:fn.index("\n}")]
+        self.assertIn("const ticket = ++leagueStateRequest;", fn)
+        self.assertIn("const requested = activeLeague;", fn)
+        self.assertIn("ticket !== leagueStateRequest || requested !== activeLeague", fn)
+        # The request names the league it asked for, not whichever is active by
+        # the time the line runs.
+        self.assertIn("/state?code=${encodeURIComponent(requested)}", fn)
+        self.assertNotIn("/state?code=${encodeURIComponent(activeLeague)}", fn)
+
+    def test_a_superseded_answer_is_cached_but_not_painted(self):
+        fn = self.app[self.app.index("async function loadLeagueState()"):]
+        fn = fn[:fn.index("\n}")]
+        # It is still true about its own league, so the cache keeps it...
+        self.assertLess(fn.index("cacheLeagueState(state);"), fn.index("if (superseded()) return;"))
+        # ...but only the newest may become the state on screen.
+        self.assertLess(fn.index("if (superseded()) return;"), fn.index("leagueState = state;"))
+        # Errors are gated the same way: a dead league must not blank a live one.
+        self.assertIn("forgetLeagueState(requested);", fn)
+        self.assertIn("removeStoredLeague(requested);", fn)
+        self.assertEqual(fn.count("if (superseded()) return;"), 3)
+
+    def test_the_round_table_guards_on_its_period_too(self):
+        fn = self.app[self.app.index("async function loadRoundState()"):]
+        fn = fn[:fn.index("\n}")]
+        self.assertIn("const ticket = ++roundStateRequest;", fn)
+        self.assertIn("const period = selectedPeriod;", fn)
+        self.assertIn("String(period) !== String(selectedPeriod)", fn)
+        self.assertIn("requested !== activeLeague", fn)
+
+    def test_a_rename_only_touches_its_own_league(self):
+        fn = self.app[self.app.index("function applyNickLocally(code, memberUid, nick)"):]
+        fn = fn[:fn.index("\n}")]
+        self.assertIn("leagueState.code === code", fn)
+        self.assertIn("roundState.code === code", fn)
+        # Every rename in here is scoped; none reaches an unnamed table.
+        self.assertNotIn("if (roundState && !roundState.error) {", fn)
+
+    def test_the_rename_banner_does_not_outlive_its_league(self):
+        fn = self.app[self.app.index("function setActiveLeague(code, refresh = true)"):]
+        fn = fn[:fn.index("\n}")]
+        self.assertIn("const next = code || \"\";", fn)
+        self.assertIn("if (next !== activeLeague) clearFlash();", fn)
+        # The banner names no league, so it can only be read as the one on screen.
+        self.assertIn("setFlash(`Now showing as ${result.nick} in this league`);", self.app)
+
+    # --- repaints and taps -------------------------------------------------
+
+    def test_a_repaint_that_changes_nothing_is_not_made(self):
+        fn = self.app[self.app.index("function render(options = {})"):]
+        fn = fn[:fn.index("\n}")]
+        self.assertIn("const changed = html !== renderedHTML;", fn)
+        self.assertIn("if (changed) {", fn)
+        self.assertIn("app.innerHTML = html;", fn)
+        self.assertIn("renderedHTML = html;", fn)
+        # A strip nobody rebuilt is not re-centred under a viewer scrolling it.
+        self.assertIn("if (changed) centreWeekStrip();", fn)
+
+    def test_a_repaint_is_held_for_the_length_of_a_tap(self):
+        fn = self.app[self.app.index("function render(options = {})"):]
+        fn = fn[:fn.index("\n}")]
+        self.assertIn("if (tapInProgress) { heldRender = options; return; }", fn)
+        flush = self.app[self.app.index("function flushHeldRender()"):]
+        flush = flush[:flush.index("\n}")]
+        self.assertIn("tapInProgress = false;", flush)
+        self.assertIn("if (held) render(held);", flush)
+
+    def test_every_way_a_tap_can_end_releases_the_repaint(self):
+        for release in (
+            'document.addEventListener("pointercancel", flushHeldRender, true);',
+            'document.addEventListener("pointerup", () => setTimeout(flushHeldRender, 0), true);',
+            'document.addEventListener("click", flushHeldRender);',
+        ):
+            self.assertIn(release, self.app, release)
+        # And a finger simply held down cannot freeze the screen.
+        self.assertIn("setTimeout(flushHeldRender, 500);", self.app)
+        # The click flush is registered after the handler that acts on the tap,
+        # so the button is never replaced before its own click is delivered.
+        self.assertLess(
+            self.app.index('document.addEventListener("click", async (event) => {'),
+            self.app.index('document.addEventListener("click", flushHeldRender);'),
+        )
+
+    # --- the share gesture -------------------------------------------------
+
+    def test_the_share_call_is_synchronous(self):
+        fn = self.app[self.app.index("function shareNow({ title, text, url })"):]
+        fn = fn[:fn.index("\n}")]
+        self.assertNotIn("await", fn, "an await here would end the tap")
+        self.assertNotIn("async", fn)
+        self.assertIn("opening = plugin.share({ title, text, url, dialogTitle: title });", fn)
+        # The waiting happens after, on the promise the tap already started.
+        self.assertIn("opening.catch((error) => {", fn)
+        self.assertIn('if (error?.name === "AbortError"', fn)
+
+    def test_the_invite_text_is_prepared_not_fetched(self):
+        fn = self.app[self.app.index("function leagueInvite(code)"):]
+        fn = fn[:fn.index("\n}")]
+        self.assertNotIn("await", fn)
+        self.assertIn("const url = inviteLinkFor(code);", fn)
+        self.assertIn("Join my Prem Oracle league ${code}", fn)
+
+    def test_share_branches_sit_above_every_await(self):
+        handler = self.app[self.app.index('document.addEventListener("click", async (event) => {'):]
+        head = handler[:handler.index('const leagueCountStep = event.target.closest')]
+        code = re.sub(r"//[^\n]*", "", head)
+        self.assertNotIn("await", code, "the share sheet must be raised inside the tap")
+        self.assertIn('event.target.closest("[data-share-league]")', code)
+        self.assertIn("shareNow(leagueInvite(share.dataset.shareLeague));", code)
+        self.assertIn('event.target.closest("[data-export-league-table]") && shareTableNow()', code)
+
+    def test_the_drawn_share_card_is_the_only_path_that_waits(self):
+        fn = self.app[self.app.index("function shareTableNow()"):]
+        fn = fn[:fn.index("\n}")]
+        self.assertNotIn("await", fn)
+        self.assertIn("shareNow({ title: \"Prem Oracle\", text: roundShareText(leagueState, roundState) });", fn)
+        self.assertIn("isNativeApp() && leagueState?.table?.length", fn)
+        # The remaining branch below is the PNG card, which must be built first.
+        later = self.app[self.app.index('const exportTable = event.target.closest("[data-export-league-table]");'):]
+        later = later[:later.index("const scoreWindow")]
+        self.assertIn("await shareLeagueTableGraphic(leagueState);", later)
+        self.assertNotIn("isNativeApp()", later, "the native paths are handled above")
 
 
 if __name__ == "__main__":

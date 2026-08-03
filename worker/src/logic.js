@@ -724,7 +724,11 @@ export function makeRecovery(bytes) {
 export const normRecovery = (value) =>
   String(value || "").toLowerCase().trim().replace(/[^a-z]+/g, "-").replace(/^-+|-+$/g, "");
 
-export const normNick = (value) => String(value || "").trim().slice(0, 24) || "Anon";
+// Not a name anybody chose: what the server falls back to when it was told
+// nothing. A later profile name may replace it; a chosen one never is.
+export const DEFAULT_NICK = "Anon";
+
+export const normNick = (value) => String(value || "").trim().slice(0, 24) || DEFAULT_NICK;
 
 const icsStamp = (date) => date.toISOString().replace(/[-:]/g, "").slice(0, 15) + "Z";
 

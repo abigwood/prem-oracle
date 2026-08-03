@@ -20,6 +20,7 @@ import {
   matchLocked,
   makeCode,
   makeRecovery,
+  DEFAULT_NICK,
   normNick,
   normRecovery,
   normaliseResult,
@@ -856,8 +857,12 @@ async function joinLeague(env, body) {
   if (!league) return json({ error: "league not found" }, 404, env);
   const user = await ensureUser(env, uid, body.nickname);
   const existing = await kvGet(env, leagueMemberKey(code, uid));
+  // The name the joiner gave for this league wins, then their profile name,
+  // then whatever they already had. "Anon" only remains when nobody has ever
+  // offered a name at all.
+  const offered = String(body.nick || body.nickname || "").trim();
   await kvPut(env, leagueMemberKey(code, uid), {
-    nick: user.nickname || existing?.nick || "Anon",
+    nick: offered ? normNick(offered) : (user.nickname || existing?.nick || DEFAULT_NICK),
     since: existing?.since || league.joinedAt?.[uid] || Date.now(),
   });
   user.leagues = [...new Set([...(user.leagues || []), code])];
@@ -914,6 +919,39 @@ async function kickMember(env, body) {
     user ? kvPut(env, `user:${memberUid}`, user) : Promise.resolve(),
   ]);
   return json({ ok: true, code, removed: memberUid }, 200, env);
+}
+
+/**
+ * The profile display name, and the leagues it should reach.
+ *
+ * A league nick starts as the profile name and can then be overridden per
+ * league. "Anon" is not a name anybody chose — it is what the server falls back
+ * to when it was told nothing — so a later profile name is allowed to replace
+ * it. Anything else was chosen deliberately and is never touched.
+ */
+async function setProfile(env, body) {
+  const uid = String(body.uid || "").trim();
+  if (!uid) return json({ error: "uid required" }, 400, env);
+  if (!String(body.nickname || "").trim()) return json({ error: "nickname required" }, 400, env);
+  const nickname = normNick(body.nickname);
+  const user = (await kvGet(env, `user:${uid}`)) || { nickname: "", leagues: [] };
+  user.nickname = nickname;
+  if (!user.recovery) {
+    user.recovery = await uniqueRecovery(env);
+    await kvPut(env, `recovery:${user.recovery}`, uid);
+  }
+  await kvPut(env, `user:${uid}`, user);
+
+  const updated = [];
+  const kept = [];
+  for (const code of user.leagues || []) {
+    const member = await kvGet(env, leagueMemberKey(code, uid));
+    if (!member) continue;
+    if (member.nick && member.nick !== DEFAULT_NICK) { kept.push(code); continue; }
+    await kvPut(env, leagueMemberKey(code, uid), { ...member, nick: nickname });
+    updated.push(code);
+  }
+  return json({ ok: true, uid, nickname, updated, kept, recovery: user.recovery }, 200, env);
 }
 
 async function updateLeagueNick(env, body) {
@@ -1787,6 +1825,7 @@ async function route(request, env) {
       if (path === "/join") return await joinLeague(env, body);
       if (path === "/league/delete") return await deleteLeague(env, body);
       if (path === "/league/kick") return await kickMember(env, body);
+      if (path === "/profile") return await setProfile(env, body);
       if (path === "/league/nick") return await updateLeagueNick(env, body);
       if (path === "/league/slate") return await setSlate(env, body);
       if (path === "/league/weekly-rule") return await setWeeklyRule(env, body);

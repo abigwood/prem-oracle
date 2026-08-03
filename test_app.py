@@ -2086,17 +2086,33 @@ class NamesAndViewportTests(unittest.TestCase):
         # iOS Full Keyboard Access, which is a worse bug.
         self.assertNotIn("position: fixed;", body)
 
-    def test_the_slate_control_has_a_reserved_slot(self):
-        # It swaps between "Pick fixtures" (48px) and the published lock line
-        # plus "Edit line-up" (96px) when a stale cached card is replaced by
-        # fresh state. Measured: the three buttons below it moved 48px without
-        # the reservation and 2px with it.
+    def test_both_slate_states_are_the_same_height(self):
+        # The slot holds either "Pick fixtures" or the published lock line plus
+        # "Edit line-up", and swaps between them when a stale cached card is
+        # replaced by fresh state. Styling both to one height means the buttons
+        # below never move, and nothing is held open when the slot is empty.
+        # Measured: those three buttons moved 48px stacked, 0px like this.
         view = self.app[self.app.index("function leagueView()"):]
         view = view[:view.index("function rulesView()")]
         self.assertIn('<div class="slate-slot">${hostSlateControl(state)}</div>', view)
-        slot = self.css[self.css.index(".slate-slot {"):]
-        slot = slot[:slot.index("}")]
-        self.assertIn("min-height: 96px;", slot)
+        # No reserved empty space: the slot is a plain wrapper with no rule of
+        # its own, so an empty one costs nothing.
+        self.assertNotIn(".slate-slot {", self.css)
+
+        published = self.css[self.css.index(".slate-notice-published {"):]
+        published = published[:published.index("}")]
+        self.assertIn("display: flex;", published)      # one row, not stacked
+        self.assertIn("align-items: center;", published)
+        self.assertIn("min-height: 50px;", published)   # the button's own height
+        self.assertIn("margin: 0 0 12px;", published)   # the button's own margin
+        banner = self.css[self.css.index(".host-slate-banner {"):]
+        self.assertIn("margin: 0 0 12px;", banner[:banner.index("}")])
+        # The lock line gives way to the button rather than pushing it down.
+        lock = self.css[self.css.index(".lock-line {"):]
+        lock = lock[:lock.index("}")]
+        self.assertIn("flex: 1;", lock)
+        self.assertIn("margin: 0 !important;", lock)
+
         # The slot sits above the action buttons, which is the whole point.
         self.assertLess(view.index("slate-slot"), view.index("data-share-league"))
         self.assertLess(view.index("slate-slot"), view.index("data-league-nick"))

@@ -1430,15 +1430,37 @@ body.picker-open { overflow: hidden; }
    A published line-up stays editable until its first fixture starts, so both
    sides are shown the concrete moment that stops. */
 
-.slate-notice-published { border-color: var(--line); background: var(--white); }
+/* Published: the lock line and "Edit line-up" sit on ONE row, boxed to the
+   same height as the "Pick fixtures" button this replaces. Stacked, it was
+   96px against the button's 48px, and the swap — which happens whenever a
+   stale cached card is replaced by fresh state — shoved Invite mates, Change
+   my name and Delete league down the screen under a finger already moving. */
+.slate-notice-published {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 0 0 12px;
+  padding: 0 14px;
+  min-height: 50px;
+  text-align: left;
+  border-color: var(--line);
+  background: var(--white);
+}
 .lock-line {
-  margin: 0 0 10px !important;
+  flex: 1;
+  margin: 0 !important;
   color: var(--muted);
   font-size: .78rem;
   font-weight: 800;
 }
 .lock-line.is-locked { color: var(--purple); }
-.slate-notice-published .secondary { margin: 0; }
+.slate-notice-published .secondary {
+  flex: none;
+  width: auto;
+  margin: 0;
+  padding: 6px 12px;
+  font-size: .78rem;
+}
 
 /* --- Week picker ---------------------------------------------------------
    Forty-odd weeks is too many to grid. The everyday control is one strip
@@ -1642,11 +1664,6 @@ body.picker-open { overflow: hidden; }
    nothing and shoves Invite mates, Change my name and Delete league 48px down
    the screen — under a finger already on its way to one of them. The slot is
    the control's own height, so the buttons below it never move. */
-.slate-slot {
-  /* Sized to the TALLER of the two things that live here: "Pick fixtures"
-     (48px) before a line-up is published, the lock line plus "Edit line-up"
-     (96px) after. The control swaps between them when a stale cached card is
-     replaced by fresh state, and without the reservation the three buttons
-     below it jump 48px — under a finger already moving towards one of them. */
-  min-height: 96px;
-}
+/* The two things that live in this slot are styled to the same height, so the
+   buttons below never move when one replaces the other — and nothing is held
+   open when the slot is genuinely empty. See .slate-notice-published. */

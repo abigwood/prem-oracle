@@ -1751,10 +1751,13 @@ async function autoSettle(env) {
 }
 
 export default {
-  async scheduled(_event, env, ctx) {
+  async scheduled(event, env, ctx) {
+    // Cron events carry the moment they were meant to fire. Using it rather than
+    // the wall clock keeps a delayed sweep judging the week it was scheduled for.
+    const nowMs = event?.scheduledTime ?? Date.now();
     ctx.waitUntil(notifyKickoffs(env));
     ctx.waitUntil(autoSettle(env));
-    ctx.waitUntil(weeklyLoop(env));
+    ctx.waitUntil(weeklyLoop(env, nowMs));
     ctx.waitUntil(podiumAnnouncements(env));
   },
   async fetch(request, env) {

@@ -138,7 +138,12 @@ test("a fixture in two line-ups is noted as shared, in both directions", () => {
 
 // --- what the worker hands the app -----------------------------------------
 
-const round = (count = 10, firstKickoff = Date.parse("2026-08-21T12:00:00Z")) =>
+// Fixtures sit a clear stretch in the future, not on a fixed date. A league is
+// created at the wall clock, so a fixed date silently turns the host into a
+// member who joined AFTER the week — scoring zero and locking the slate — the
+// moment the real date passes it.
+const AHEAD = 10 * 24 * 60 * 60 * 1000;
+const round = (count = 10, firstKickoff = Date.now() + AHEAD) =>
   Array.from({ length: count }, (_, index) => ({
     id: `pl-2026-27-md1-${String(index + 1).padStart(3, "0")}`,
     matchday: 1, player1: `H${index}`, player2: `A${index}`,

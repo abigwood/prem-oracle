@@ -28,7 +28,12 @@ function memoryKV(store = new Map()) {
 }
 
 // Ten Matchweek-1 fixtures, kicking off an hour apart from `firstKickoff`.
-function roundOf(count = 10, firstKickoff = Date.parse("2026-08-21T12:00:00Z"), matchday = 1) {
+// Fixtures sit a clear stretch in the future, not on a fixed date. A league is
+// created at the wall clock, so a fixed date silently turns the host into a
+// member who joined AFTER the week — scoring zero and locking the slate — the
+// moment the real date passes it.
+const AHEAD = 10 * 24 * 60 * 60 * 1000;
+function roundOf(count = 10, firstKickoff = Date.now() + AHEAD, matchday = 1) {
   return Array.from({ length: count }, (_, index) => ({
     id: `pl-2026-27-md${matchday}-${String(index + 1).padStart(3, "0")}`,
     matchday,
@@ -125,8 +130,8 @@ test("a postponed slate fixture is dropped, never swapped, even before anything 
   // never silently swapped afterwards. Before v1.5 a replacement was dealt in
   // while the slate was still fully unlocked; that is the behaviour this
   // removes — a league plays what it was shown, one fixture shorter.
-  const now = Date.parse("2026-08-21T06:00:00Z");
   const round = roundOf();
+  const now = Date.parse(round[0].startAt) - HOUR; // before anything has kicked off
   round[2] = { ...round[2], status: "postponed" };
   const slate = { status: "published", mode: "custom", fixtureIds: round.slice(0, 6).map((match) => match.id) };
 
@@ -139,8 +144,8 @@ test("a postponed slate fixture is dropped, never swapped, even before anything 
 });
 
 test("a draft is never reconciled — only a published slate is a contract", () => {
-  const now = Date.parse("2026-08-21T06:00:00Z");
   const round = roundOf();
+  const now = Date.parse(round[0].startAt) - HOUR;
   round[2] = { ...round[2], status: "postponed" };
   const draft = { status: "draft", mode: "custom", fixtureIds: round.slice(0, 6).map((match) => match.id) };
   assert.equal(reconcileSlate(draft, round, now), null);
@@ -499,9 +504,10 @@ test("a league with no slate keeps exactly its existing behaviour", async () => 
 
 // --- scheduled maintenance --------------------------------------------------
 
-async function runScheduled(env) {
+async function runScheduled(env, nowMs = undefined) {
   const pending = [];
-  await worker.scheduled({}, env, { waitUntil: (promise) => pending.push(promise) });
+  const event = nowMs === undefined ? {} : { scheduledTime: nowMs };
+  await worker.scheduled(event, env, { waitUntil: (promise) => pending.push(promise) });
   await Promise.all(pending);
 }
 
@@ -513,19 +519,22 @@ async function customMixLeague(env, { customMix = true } = {}) {
 }
 
 test("the inactive-host fallback waits until 24h out, not two hours", async () => {
-  const round = roundOf(10, Date.now() + 25 * HOUR);
+  // Pinned mid-window: 25 hours from a real Monday lands in the NEXT Tue-Mon
+  // week, which has not opened yet, so the nudge would rightly not be sent.
+  const NOW = Date.parse("2026-08-12T10:00:00Z"); // Wednesday, week of Tue 11 Aug
+  const round = roundOf(10, NOW + 25 * HOUR);
   const { env } = endpointEnv(round);
   await withFixtures(round, async () => {
     await primeFixtures(env);
     const code = await customMixLeague(env);
 
     // 25 hours out: the host is reminded, and nothing is unlocked.
-    await runScheduled(env);
+    await runScheduled(env, NOW);
     assert.equal(await env.KV.get(`custom_slate:${code}:1`), null);
     assert.ok(await env.KV.get(`notified:slate-open:${code}:1`));
   });
 
-  const closer = roundOf(10, Date.now() + 23 * HOUR);
+  const closer = roundOf(10, NOW + 23 * HOUR);
   await withFixtures(closer, async () => {
     await primeFixtures(env);
     const code = (await env.KV.get("index:custom_mix"))[0];
@@ -533,7 +542,7 @@ test("the inactive-host fallback waits until 24h out, not two hours", async () =
     // Inside 24 hours with still no slate, the week is dealt for the host.
     // v1.5j: that is a random N on the league's own count — the same deal the
     // picker's dice would have made — rather than the whole card.
-    await runScheduled(env);
+    await runScheduled(env, NOW);
     const slate = await env.KV.get(`custom_slate:${code}:1`);
     assert.equal(slate.status, "published");
     assert.equal(slate.setBy, null, "nobody chose it");

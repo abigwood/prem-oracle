@@ -334,7 +334,12 @@ test("a random mixed week never excludes a competition that has fixtures on", ()
 // 4. Endpoints and the weekly loop
 // ===========================================================================
 
-const round = (count = 10, firstKickoff = Date.parse("2026-08-21T12:00:00Z"), matchday = 1) =>
+// Fixtures sit a clear stretch in the future, not on a fixed date. A league is
+// created at the wall clock, so a fixed date silently turns the host into a
+// member who joined AFTER the week — scoring zero and locking the slate — the
+// moment the real date passes it.
+const AHEAD = 10 * 24 * 60 * 60 * 1000;
+const round = (count = 10, firstKickoff = Date.now() + AHEAD, matchday = 1) =>
   Array.from({ length: count }, (_, index) => ({
     id: `pl-2026-27-md${matchday}-${String(index + 1).padStart(3, "0")}`,
     matchday,
@@ -362,9 +367,10 @@ const post = (env) => (path, body) => worker.fetch(new Request(`https://worker.t
 const get = (env) => (path) => worker.fetch(new Request(`https://worker.test${path}`), env);
 const prime = (env) => get(env)("/fixtures?refresh=1");
 
-async function runScheduled(env) {
+async function runScheduled(env, nowMs = undefined) {
   const pending = [];
-  await worker.scheduled({}, env, { waitUntil: (promise) => pending.push(promise) });
+  const event = nowMs === undefined ? {} : { scheduledTime: nowMs };
+  await worker.scheduled(event, env, { waitUntil: (promise) => pending.push(promise) });
   await Promise.all(pending);
 }
 
@@ -1168,7 +1174,10 @@ test("fallback: running the whole sweep twice publishes exactly once", async () 
 
 test("the fallback measures from the first ELIGIBLE kickoff of the period", async () => {
   // 30 hours out is outside the day's grace; the host is nudged, not overridden.
-  const far = round(10, Date.now() + 30 * HOUR);
+  // Pinned mid-window, so the 30 hours cannot straddle a Tue-Mon boundary and
+  // land the kickoff in a week that has not opened yet.
+  const NOW = Date.parse("2026-08-12T10:00:00Z"); // Wednesday, week of Tue 11 Aug
+  const far = round(10, NOW + 30 * HOUR);
   const { env, store } = endpointEnv();
   await withFixtures(far, async () => {
     await prime(env);
@@ -1176,7 +1185,7 @@ test("the fallback measures from the first ELIGIBLE kickoff of the period", asyn
       uid: "host", competitions: ["PL"], fixtureMode: "limited",
       weeklyRule: { method: "manual", competitionScope: "PL", count: 6 },
     })).json();
-    await runScheduled(env);
+    await runScheduled(env, NOW);
     assert.equal(store.has(`custom_slate:${code}:1`), false);
     assert.ok(store.has(`notified:slate-open:${code}:1`));
   });

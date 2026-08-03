@@ -213,6 +213,45 @@ const feeds = {
   elc: { fixtures: mixedFixtures.filter((f) => f.id.startsWith("elc-")) },
 };
 
+const DAY = 24 * HOUR;
+
+/**
+ * The same shape as mixedFixtures — two windows, the second ELC-only — but
+ * anchored a clear stretch ahead of the wall clock instead of to a fixed date.
+ * The endpoint tests create a league at Date.now(), so a fixed pool turns the
+ * host into a member who joined AFTER the week, and locks the slate, as soon as
+ * the real date passes it. The window keys are derived rather than written out,
+ * because they move with the anchor.
+ */
+function liveMixedFeed() {
+  // Midday on the Tuesday that opens the window ten days out. Offsets are whole
+  // days from there, so every fixture stays inside its intended Tue–Mon window
+  // whatever the hour or the British Summer Time offset.
+  const seed = new Date(Date.now() + 10 * DAY).toISOString();
+  const tuesday = Date.parse(`${windowKeyFor(seed).slice(1)}T12:00:00Z`);
+  const at = (days, hours = 0) => new Date(tuesday + days * DAY + hours * HOUR).toISOString();
+  const fixtures = [
+    // Week one: 2 PL + 3 ELC, Thursday through Sunday.
+    { id: "pl-2026-27-001-a-b", matchday: 1, startAt: at(4, 2), player1: "A", player2: "B" },
+    { id: "pl-2026-27-002-c-d", matchday: 1, startAt: at(4, 4), player1: "C", player2: "D" },
+    { id: "elc-2026-27-001-e-f", matchday: 1, startAt: at(2, 7), player1: "E", player2: "F" },
+    { id: "elc-2026-27-002-g-h", matchday: 1, startAt: at(4, 3), player1: "G", player2: "H" },
+    { id: "elc-2026-27-003-i-j", matchday: 1, startAt: at(5, 1), player1: "I", player2: "J" },
+    // Week two: ELC only — a week where one competition is dark.
+    { id: "elc-2026-27-004-k-l", matchday: 2, startAt: at(11, 3), player1: "K", player2: "L" },
+  ];
+  return { fixtures, week1: windowKeyFor(at(4, 2)), week2: windowKeyFor(at(11, 3)) };
+}
+
+/** withFeeds over a supplied pool rather than the fixed one. */
+async function withPool(fixtures, run) {
+  const originalFetch = globalThis.fetch;
+  const split = (prefix) => ({ fixtures: fixtures.filter((f) => f.id.startsWith(prefix)) });
+  globalThis.fetch = async (url) =>
+    new Response(JSON.stringify(String(url).includes("elc") ? split("elc-") : split("pl-")), { status: 200 });
+  try { return await run(); } finally { globalThis.fetch = originalFetch; }
+}
+
 async function withFeeds(run) {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (url) =>
@@ -271,7 +310,9 @@ test("zero competitions is refused, as is an unknown one or a bad limit", async 
 
 test("a mixed league slates, locks and scores on its own week window", async () => {
   const { env: e, store } = env();
-  await withFeeds(async () => {
+  // Anchored to the clock: the window keys are whatever the pool says they are.
+  const { fixtures, week1, week2 } = liveMixedFeed();
+  await withPool(fixtures, async () => {
     await get(e)("/fixtures?competition=PL&refresh=1");
     await get(e)("/fixtures?competition=ELC&refresh=1");
     const send = post(e);
@@ -285,24 +326,26 @@ test("a mixed league slates, locks and scores on its own week window", async () 
     const season = await (await get(e)(`/state?code=${code}`)).json();
     assert.deepEqual(season.competitions, ["PL", "ELC"]);
     assert.equal(season.mixed, true);
-    assert.equal(season.currentPeriod, "w2026-08-11");
-    assert.equal(season.currentWindowLabel, "Tue 11 – Mon 17 Aug");
+    assert.equal(season.currentPeriod, week1);
+    // The exact wording of a window label is pinned by its own unit test above;
+    // here the point is only that the state carries the matching one.
+    assert.equal(season.currentWindowLabel, windowLabel(week1));
     assert.equal(season.currentPoolSize, 5);
     assert.equal(season.currentFixtureCount.default, 4, "opens on the league default");
     assert.equal(season.currentFixtureCount.max, 5, "but the whole pool is available");
 
     // Slate keys on the window.
     const ids = ["elc-2026-27-001-e-f", "pl-2026-27-001-a-b", "elc-2026-27-002-g-h", "pl-2026-27-002-c-d"];
-    const set = await send("/league/slate", { uid: "host", code, period: "w2026-08-11", mode: "custom", fixtureIds: ids });
+    const set = await send("/league/slate", { uid: "host", code, period: week1, mode: "custom", fixtureIds: ids });
     assert.equal(set.status, 200);
-    assert.ok(store.has(`custom_slate:${code}:w2026-08-11`), "keyed on the window, not a matchweek");
+    assert.ok(store.has(`custom_slate:${code}:${week1}`), "keyed on the window, not a matchweek");
 
     // The same league may take a different count next week — nothing per-week
     // is stored, the slate's own length is the count.
     // A different week can take a different count, and a one-fixture week is a
     // one-fixture slate — the floor collapses onto the pool rather than failing.
     const nextWeek = await send("/league/slate", {
-      uid: "host", code, period: "w2026-08-18", mode: "custom",
+      uid: "host", code, period: week2, mode: "custom",
       fixtureIds: ["elc-2026-27-004-k-l"],
     });
     assert.equal(nextWeek.status, 200, "the pool is the only ceiling, and the floor gives way to it");
@@ -310,7 +353,7 @@ test("a mixed league slates, locks and scores on its own week window", async () 
 
     // v1.5k: re-publishing the same line-up before lock is a no-op rather than
     // a rewrite — and a different one would append a version, never replace.
-    const rewrite = await send("/league/slate", { uid: "host", code, period: "w2026-08-11", mode: "custom", fixtureIds: ids });
+    const rewrite = await send("/league/slate", { uid: "host", code, period: week1, mode: "custom", fixtureIds: ids });
     assert.equal(rewrite.status, 200);
     assert.equal((await rewrite.json()).unchanged, true);
 
@@ -334,7 +377,7 @@ test("a mixed league slates, locks and scores on its own week window", async () 
     await get(e)("/fixtures?competition=PL&refresh=1");
     await get(e)("/fixtures?competition=ELC&refresh=1");
 
-    const round = await (await get(e)(`/state?code=${code}&period=w2026-08-11`)).json();
+    const round = await (await get(e)(`/state?code=${code}&period=${week1}`)).json();
     assert.equal(round.complete, true, "every slate fixture settled, across both competitions");
     // Three exact (15) plus one wrong outcome (0).
     assert.equal(round.table[0].pts, 15);
@@ -344,11 +387,11 @@ test("a mixed league slates, locks and scores on its own week window", async () 
     // fixture while the gold was won across both competitions.
     assert.deepEqual(round.podium.map((p) => p.place), ["gold", "silver"]);
     assert.equal(round.table[1].pts, 2);
-    assert.equal(round.windowLabel, "Tue 11 – Mon 17 Aug");
+    assert.equal(round.windowLabel, windowLabel(week1));
 
     const cabinet = await (await get(e)(`/state?code=${code}&uid=host`)).json();
     assert.equal(cabinet.cabinet.gold, 1);
-    assert.equal(cabinet.cabinet.weeks[0].period, "w2026-08-11");
+    assert.equal(cabinet.cabinet.weeks[0].period, week1);
     assert.equal(cabinet.cabinet.weeks[0].matchweek, null, "a window has no matchweek number");
   });
 });

@@ -1,6 +1,6 @@
 const SEASON_START = new Date("2026-08-21T20:00:00+01:00");
 const SEASON_START_DATE = "2026-08-21";
-const APP_BUILD = "20260803a";
+const APP_BUILD = "20260803b";
 const API = window.PREM_API || null;
 // Canonical public home of the web app. Inside the Capacitor shell the page is
 // served from premoracle://localhost, so location.origin can never be used to
@@ -20,6 +20,7 @@ const STORAGE = {
   mutedCompetitions: "prem_oracle_muted_competitions",
   leagueStates: "prem_oracle_league_states",
   pickSections: "prem_oracle_pick_sections",
+  syncedName: "prem_oracle_synced_name",
 };
 
 function isNativeApp() {
@@ -3641,6 +3642,7 @@ async function syncProfileName() {
   if (!API || !playerName) return;
   try {
     const result = await api("/profile", { uid: uid(), nickname: playerName });
+    try { localStorage.setItem(STORAGE.syncedName, playerName); } catch { /* quota */ }
     for (const code of result.updated || []) applyNickLocally(code, uid(), result.nickname);
     if (result.updated?.length) {
       setFlash(`Now showing as ${result.nickname} in ${countPhrase(result.updated.length, "league")}`);
@@ -3795,6 +3797,11 @@ Promise.all([loadFixtures(), hydrateIdentity()]).then(() => {
   else applyLaunchBranch();
   render();
   registerServiceWorker();
+  // A name this device has held since before the server could store one still
+  // needs to get there — otherwise everyone already carrying a display name
+  // stays "Anon" in their leagues until they happen to open the profile and
+  // save it again. Sent once per name, not on every launch.
+  if (playerName && localStorage.getItem(STORAGE.syncedName) !== playerName) syncProfileName();
   setupNativePushNotifications();
   setupNativeUniversalLinks();
   if (currentView === "league") {

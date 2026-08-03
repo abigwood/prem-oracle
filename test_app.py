@@ -1990,6 +1990,20 @@ class NamesAndViewportTests(unittest.TestCase):
         # Only the leagues the server says it changed are repainted.
         self.assertIn("for (const code of result.updated || []) applyNickLocally(code, uid(), result.nickname);", fn)
 
+    def test_a_name_held_from_before_still_reaches_the_server(self):
+        # Everyone already carrying a display name would otherwise stay "Anon"
+        # in their leagues until they happened to re-save it.
+        self.assertIn(
+            "if (playerName && localStorage.getItem(STORAGE.syncedName) !== playerName) syncProfileName();",
+            self.app,
+        )
+        self.assertIn('syncedName: "prem_oracle_synced_name",', self.app)
+        # Once per name, not once per launch.
+        fn = self.app[self.app.index("async function syncProfileName()"):]
+        fn = fn[:fn.index("\n}")]
+        self.assertIn("localStorage.setItem(STORAGE.syncedName, playerName);", fn)
+        self.assertLess(fn.index('api("/profile"'), fn.index("STORAGE.syncedName"))
+
     def test_the_profile_dialog_explains_the_split(self):
         self.assertIn("Used in your leagues unless you set a league name.", self.html)
         self.assertIn(".field-hint", self.css)

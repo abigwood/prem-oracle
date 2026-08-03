@@ -13,7 +13,7 @@
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" href="icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
-  <link rel="stylesheet" href="styles.css?v=20260803a">
+  <link rel="stylesheet" href="styles.css?v=20260803b">
 </head>
 <body>
   <header class="app-header">
@@ -54,6 +54,7 @@
       </div>
       <label for="playerName">Display name</label>
       <input id="playerName" maxlength="24" autocomplete="nickname" placeholder="Adam">
+      <p class="field-hint">Used in your leagues unless you set a league name.</p>
       <div id="notificationPrefs" class="notif-prefs" hidden>
         <span class="eyebrow">Notifications</span>
         <p class="notif-hint">Kick-off reminders, per competition.</p>
@@ -63,11 +64,27 @@
     </form>
   </dialog>
 
+  <dialog id="nickDialog">
+    <form method="dialog" id="nickForm">
+      <div class="dialog-head">
+        <div>
+          <span class="eyebrow">League name</span>
+          <h2>Your name in this league</h2>
+        </div>
+        <button class="icon-button" value="cancel" aria-label="Close" data-nick-cancel>×</button>
+      </div>
+      <label for="leagueNick">Display name</label>
+      <input id="leagueNick" name="leagueNick" maxlength="24" autocomplete="nickname" placeholder="Your name" required>
+      <p class="field-hint" id="nickHint">Only your mates in this league see it.</p>
+      <button class="primary wide" value="save">Save league name</button>
+    </form>
+  </dialog>
+
   <script>window.PREM_API = "https://prem-oracle-window.abigwood.workers.dev";</script>
   <script src="vendor/capacitor/capacitor.js" defer></script>
   <script src="vendor/capacitor/push-notifications.js" defer></script>
   <script src="vendor/capacitor/app.js" defer></script>
   <script src="vendor/capacitor/share.js" defer></script>
-  <script src="app.js?v=20260803a" defer></script>
+  <script src="app.js?v=20260803b" defer></script>
 </body>
 </html>

@@ -20,9 +20,17 @@ class PremOracleTests(unittest.TestCase):
         sw = (ROOT / "sw.js").read_text()
         self.assertIn("Prem Oracle", html)
         self.assertIn("Prem Oracle", manifest)
-        self.assertIn("styles.css?v=20260802e", html)
-        self.assertIn("app.js?v=20260802e", html)
-        self.assertIn("prem-oracle-v1-20260802e", sw)
+        # The cache version is asserted as an invariant rather than a literal:
+        # what matters at a bump is that all four move together, and a literal
+        # here only ever means one more file to edit and one more chance to
+        # ship a shell pointing at a stale asset.
+        app = (ROOT / "app.js").read_text()
+        version = re.search(r'styles\.css\?v=(\d{8}[a-z]?)', html).group(1)
+        self.assertIn(f"app.js?v={version}", html)
+        self.assertIn(f"prem-oracle-v1-{version}", sw)
+        self.assertIn(f'styles.css?v={version}', sw)
+        self.assertIn(f'app.js?v={version}', sw)
+        self.assertIn(f'const APP_BUILD = "{version}";', app)
         self.assertIn("https://prem-oracle-window.abigwood.workers.dev", html)
         self.assertIn("vendor/capacitor/push-notifications.js", html)
         self.assertIn("vendor/capacitor/share.js", html)

@@ -1,6 +1,6 @@
 const SEASON_START = new Date("2026-08-21T20:00:00+01:00");
 const SEASON_START_DATE = "2026-08-21";
-const APP_BUILD = "20260802e";
+const APP_BUILD = "20260803a";
 const API = window.PREM_API || null;
 // Canonical public home of the web app. Inside the Capacitor shell the page is
 // served from premoracle://localhost, so location.origin can never be used to
@@ -621,27 +621,44 @@ function rememberCompetition(codes) {
   return list.join("+") !== loadedCompetition;
 }
 
+// Every league-state fetch takes a ticket. Only the newest may write to
+// `leagueState` — two taps in a row race, and on a phone the FIRST response can
+// land last, which is how the card ended up showing one league while the pill
+// said another (and, with it, one league's nickname under another's name).
+let leagueStateRequest = 0;
+
 async function loadLeagueState() {
   if (!activeLeague || !API) { leagueState = null; roundState = null; return; }
+  const ticket = ++leagueStateRequest;
+  const requested = activeLeague;
+  // True when a later switch has overtaken this request; its answer is about a
+  // league the viewer has already left, so it must not be painted.
+  const superseded = () => ticket !== leagueStateRequest || requested !== activeLeague;
   try {
     // `uid` asks the worker for this viewer's own Trophy Cabinet alongside the
     // table; older workers simply ignore it.
-    leagueState = await api(`/state?code=${encodeURIComponent(activeLeague)}&uid=${encodeURIComponent(uid())}`);
+    const state = await api(`/state?code=${encodeURIComponent(requested)}&uid=${encodeURIComponent(uid())}`);
+    // Cache it either way — the answer is true about the league it names, even
+    // if the viewer has moved on. Only the paint is abandoned.
+    saveLeagueName(state.code, state.name);
+    cacheLeagueState(state);
+    if (superseded()) return;
+    leagueState = state;
     if (rememberCompetition(leagueState.competitions || leagueState.competition)) await loadFixtures();
-    saveLeagueName(leagueState.code, leagueState.name);
-    cacheLeagueState(leagueState);
   } catch (error) {
+    if (superseded()) return;
     roundState = null;
     if (/league not found/i.test(error.message)) {
-      forgetLeagueState(activeLeague);
-      removeStoredLeague(activeLeague);
+      forgetLeagueState(requested);
+      removeStoredLeague(requested);
       if (activeLeague) return loadLeagueState();
       leagueState = null;
       return;
     }
-    leagueState = { error: error.message, code: activeLeague };
+    leagueState = { error: error.message, code: requested };
     return;
   }
+  if (superseded()) return;
   if (leagueSupportsRounds(leagueState)) {
     if (selectedPeriod == null) selectedPeriod = leagueState.currentPeriod ?? currentPeriodKey();
     // The round table is a SECOND /state call. Paint the season state we already
@@ -655,11 +672,22 @@ async function loadLeagueState() {
   }
 }
 
+// The round table races the same way, and additionally races the period picker.
+let roundStateRequest = 0;
+
 async function loadRoundState() {
   if (!activeLeague || !API || selectedPeriod == null) { roundState = null; return; }
+  const ticket = ++roundStateRequest;
+  const requested = activeLeague;
+  const period = selectedPeriod;
+  const superseded = () =>
+    ticket !== roundStateRequest || requested !== activeLeague || String(period) !== String(selectedPeriod);
   try {
-    roundState = await api(`/state?code=${encodeURIComponent(activeLeague)}&period=${encodeURIComponent(selectedPeriod)}`);
+    const state = await api(`/state?code=${encodeURIComponent(requested)}&period=${encodeURIComponent(period)}`);
+    if (superseded()) return;
+    roundState = state;
   } catch (error) {
+    if (superseded()) return;
     roundState = { error: error.message };
   }
 }
@@ -720,7 +748,9 @@ function applyNickLocally(code, memberUid, nick) {
     };
     cacheLeagueState(leagueState);
   }
-  if (roundState && !roundState.error) {
+  // Only if that round table is this league's. It usually is, but "usually" is
+  // how one league's nickname ends up printed under another's.
+  if (roundState && !roundState.error && roundState.code === code) {
     roundState = { ...roundState, table: rename(roundState.table), podium: rename(roundState.podium) };
   }
   const cached = leagueStates[code];
@@ -776,7 +806,13 @@ function removeStoredLeague(code) {
  * state, and only for as long as its first /state takes.
  */
 function setActiveLeague(code, refresh = true) {
-  activeLeague = code || "";
+  const next = code || "";
+  // A confirmation about the league you just left — "Now showing as Biggers in
+  // this league" — must not follow you onto the next one, where it reads as
+  // that league's name. Only on a real switch, so a flash set for the league
+  // you are already on survives.
+  if (next !== activeLeague) clearFlash();
+  activeLeague = next;
   selectedPeriod = null;
   roundState = null;
   if (activeLeague) localStorage.setItem(STORAGE.activeLeague, activeLeague);
@@ -1906,6 +1942,53 @@ async function shareOrWhatsApp({ title, text, url }) {
   location.href = whatsappUrlFor(text);
 }
 
+/**
+ * The same thing, but with NOTHING awaited before the share call.
+ *
+ * iOS only lets a web page raise the share sheet from inside the tap that asked
+ * for it. An `await` — even on an already-resolved promise — ends that tap as
+ * far as WKWebView is concerned, and the sheet is silently refused. So this
+ * takes its arguments ready-made, reaches the plugin synchronously, and does all
+ * of its waiting afterwards, on the promise the tap already started.
+ */
+function shareNow({ title, text, url }) {
+  const plugin = isNativeApp() ? window.Capacitor?.Plugins?.Share : null;
+  let opening = null;
+  if (plugin) opening = plugin.share({ title, text, url, dialogTitle: title });
+  else if (navigator.share) opening = navigator.share(url ? { title, text, url } : { title, text });
+  if (!opening) { location.href = whatsappUrlFor(text); return; }
+  opening.catch((error) => {
+    // Dismissing the sheet is an answer, not a failure.
+    if (error?.name === "AbortError" || /cancel/i.test(error?.message || "")) return;
+    location.href = whatsappUrlFor(text);
+  });
+}
+
+/**
+ * The league table's text share, when it is one of the paths that needs no
+ * preparation. False means the web PNG card is the right answer, and that one
+ * genuinely has to be drawn before it can be shared.
+ */
+function shareTableNow() {
+  if (leagueTab === "matchday" && roundState && !roundState.error && roundState.table?.length) {
+    shareNow({ title: "Prem Oracle", text: roundShareText(leagueState, roundState) });
+    return true;
+  }
+  // The PNG share card rides on navigator.share({files}), which the native
+  // WKWebView has no answer for. Natively we share the same text instead.
+  if (isNativeApp() && leagueState?.table?.length) {
+    shareNow({ title: `${leagueState.name} league table`, text: leagueTableShareText(leagueState) });
+    return true;
+  }
+  return false;
+}
+
+/** The invite text for a league. Pure, so it can be built inside the tap. */
+function leagueInvite(code) {
+  const url = inviteLinkFor(code);
+  return { title: "Prem Oracle", url, text: `Join my Prem Oracle league ${code} on the web or in the app: ${url}` };
+}
+
 function roundedRect(ctx, x, y, width, height, radius) {
   const r = Math.min(radius, width / 2, height / 2);
   ctx.beginPath();
@@ -2723,14 +2806,53 @@ function centreWeekStrip() {
   });
 }
 
+// The last HTML written to #app. Replacing the view wholesale destroys whatever
+// element a finger is currently down on, and a tap whose target disappears
+// produces no click at all — which is why Invite mates needed several goes: the
+// league view repaints three or four times in the seconds after it opens, as the
+// cached paint, the season state and the round table each land. Most of those
+// repaints change nothing, so the cheapest correct answer is not to make them.
+let renderedHTML = null;
+
+// The repaints that DO change something are still dangerous mid-tap, so a render
+// asked for while a finger is down is held until the tap has been delivered.
+// Several independent paths flush it, because a held render that never lands
+// would leave the screen stale — a worse fault than the one being fixed.
+let tapInProgress = false;
+let heldRender = null;
+
+function flushHeldRender() {
+  if (!tapInProgress) return;
+  tapInProgress = false;
+  const held = heldRender;
+  heldRender = null;
+  if (held) render(held);
+}
+
+document.addEventListener("pointerdown", () => {
+  tapInProgress = true;
+  setTimeout(flushHeldRender, 500); // a finger held down is not a reason to freeze
+}, true);
+document.addEventListener("pointercancel", flushHeldRender, true);
+document.addEventListener("pointerup", () => setTimeout(flushHeldRender, 0), true);
+
 function render(options = {}) {
+  // Held, not dropped: the newest request wins and lands when the tap is done.
+  if (tapInProgress) { heldRender = options; return; }
   const app = document.getElementById("app");
   const views = { today: todayView, schedule: scheduleView, picks: picksView, league: leagueView, rules: rulesView };
-  app.innerHTML = (views[currentView] || todayView)();
+  const html = (views[currentView] || todayView)();
+  const changed = html !== renderedHTML;
+  if (changed) {
+    app.innerHTML = html;
+    renderedHTML = html;
+  }
   renderPickerLayer();
   document.getElementById("profileInitial").textContent = playerInitial();
   document.querySelectorAll(".bottom-nav button").forEach((button) => button.classList.toggle("active", button.dataset.view === currentView));
-  centreWeekStrip();
+  // Re-centring a strip nobody rebuilt would only fight a viewer who has
+  // scrolled it themselves.
+  if (changed) centreWeekStrip();
   if (options.anchorMatchId) {
     requestAnimationFrame(() => document.querySelector(`[data-match-card="${CSS.escape(options.anchorMatchId)}"]`)?.scrollIntoView({ block: "center" }));
   } else if (options.scrollTop) {
@@ -2974,6 +3096,17 @@ async function handlePickerClick(event) {
 }
 
 document.addEventListener("click", async (event) => {
+  // Invite mates comes FIRST, before this handler awaits anything. The branches
+  // below it await async handlers, and anything after the first `await` has left
+  // the tap behind — which is why the sheet used to need several goes.
+  const share = event.target.closest("[data-share-league]");
+  if (share) {
+    shareNow(leagueInvite(share.dataset.shareLeague));
+    return;
+  }
+  // Sharing the table has the same two text paths, with the same need to stay
+  // inside the tap. Only the drawn card falls through to the branch below.
+  if (event.target.closest("[data-export-league-table]") && shareTableNow()) return;
   const leagueCountStep = event.target.closest("[data-league-count-step]");
   if (leagueCountStep) {
     if (!countBusy) await changeWeeklyCount(Number(leagueCountStep.dataset.leagueCountStep));
@@ -3040,13 +3173,6 @@ document.addEventListener("click", async (event) => {
     render();
     return;
   }
-  const share = event.target.closest("[data-share-league]");
-  if (share) {
-    const url = inviteLinkFor(share.dataset.shareLeague);
-    const text = `Join my Prem Oracle league ${share.dataset.shareLeague} on the web or in the app: ${url}`;
-    await shareOrWhatsApp({ title: "Prem Oracle", text, url });
-    return;
-  }
   const del = event.target.closest("[data-delete-league]");
   if (del) {
     const code = del.dataset.deleteLeague;
@@ -3108,19 +3234,8 @@ document.addEventListener("click", async (event) => {
   }
   const exportTable = event.target.closest("[data-export-league-table]");
   if (exportTable) {
-    if (leagueTab === "matchday" && roundState && !roundState.error && roundState.table?.length) {
-      const text = roundShareText(leagueState, roundState);
-      await shareOrWhatsApp({ title: "Prem Oracle", text });
-      return;
-    }
+    // Only reached when shareTableNow() declined: the web PNG card.
     if (leagueState?.table?.length) {
-      // The PNG share card rides on navigator.share({files}), which the native
-      // WKWebView has no answer for. Natively we share the same text + invite
-      // link through the Share plugin instead.
-      if (isNativeApp()) {
-        await shareOrWhatsApp({ title: `${leagueState.name} league table`, text: leagueTableShareText(leagueState) });
-        return;
-      }
       setFlash("Building share card.");
       render();
       try {
@@ -3224,6 +3339,10 @@ async function savePick(matchId, p1, p2) {
     render({ anchorMatchId: matchId });
   }
 }
+
+// Registered after the click handler above, so a tap is always acted on before
+// any repaint it triggered is allowed to replace the button it landed on.
+document.addEventListener("click", flushHeldRender);
 
 document.addEventListener("submit", async (event) => {
   // Every submit path dismisses the keyboard first; see dismissKeyboard().

@@ -1712,3 +1712,11 @@ body.picker-open { overflow: hidden; }
 .fixture-row-body:empty { display: none; }
 .fixture-row.is-open { background: var(--white); }
 .muted-count { color: var(--muted, #6b7280); font-weight: 700; }
+
+/* The acknowledgement pulse: a tap plainly registered, even before there is
+   anything to show. Stops entirely for anyone who has asked for less motion. */
+.view-loading.is-pulsing { animation: view-pulse 1.1s ease-in-out infinite; }
+@keyframes view-pulse { 0%, 100% { opacity: .45; } 50% { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) {
+  .view-loading.is-pulsing { animation: none; opacity: .8; }
+}

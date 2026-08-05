@@ -371,7 +371,12 @@ async function hydrateIdentity() {
       pruneStoredLeagueNames();
       if (!leagueCodes.includes(activeLeague)) setActiveLeague(leagueCodes[0] || "", false);
     }
-    if (activeLeague) await loadLeagueState();
+    // Startup's ONE refresh owner. /me has just told us which league is
+    // actually active, so this is the first moment the right question can be
+    // asked — and asking it here means the tail does not ask it again. The two
+    // were sequential, so coalescing could not merge them: a launch made two
+    // season and two round requests.
+    if (activeLeague) await refreshLeague();
     // Now that the league and its period are known, the launch tree can answer
     // properly — a cold install had nothing to go on the first time round.
     applyLaunchBranch();
@@ -705,13 +710,28 @@ const roundStatePath = (code, period) => `/state?code=${encodeURIComponent(code)
 
 let leagueStateRequest = 0;
 
-async function loadLeagueState() {
+/**
+ * @param roundStarted  The caller has ALREADY started the round request for
+ *   this week, so this must not start a second one. Only refreshLeague() ever
+ *   says so, and only when it genuinely did.
+ *
+ *   Inferring it from `selectedPeriod != null` was wrong: a known week does not
+ *   mean anybody asked about it. Every standalone caller — publishing, an
+ *   amendment, closing the picker, joining, renaming, a kick, startup — has a
+ *   known week and none of them start a round read, so the inference silently
+ *   stopped the visible Matchweek refreshing after the very actions that
+ *   change it.
+ */
+async function loadLeagueState(generation = navGeneration, { roundStarted = false } = {}) {
   if (!activeLeague || !API) { leagueState = null; roundState = null; return; }
   const ticket = ++leagueStateRequest;
   const requested = activeLeague;
-  // True when a later switch has overtaken this request; its answer is about a
-  // league the viewer has already left, so it must not be painted.
-  const superseded = () => ticket !== leagueStateRequest || requested !== activeLeague;
+  const view = currentView;
+  // True when a later switch or a later navigation has overtaken this request.
+  // Its answer is about a league — or a screen — the viewer has already left,
+  // so it may be cached but must not be painted.
+  const superseded = () =>
+    ticket !== leagueStateRequest || requested !== activeLeague || generation !== navGeneration || view !== currentView;
   try {
     // `uid` asks the worker for this viewer's own Trophy Cabinet alongside the
     // table; older workers simply ignore it.
@@ -725,7 +745,10 @@ async function loadLeagueState() {
     if (rememberCompetition(leagueState.competitions || leagueState.competition)) await loadFixtures();
   } catch (error) {
     if (superseded()) return;
-    roundState = null;
+    // A failed SEASON read must not throw away a valid cached week. The round
+    // table has its own cache and its own request; blanking it here replaced
+    // content the viewer could still use with "Loading matchweek…".
+    if (!cachedRoundState(requested, selectedPeriod)) roundState = null;
     if (/league not found/i.test(error.message)) {
       forgetLeagueState(requested);
       removeStoredLeague(requested);
@@ -739,27 +762,45 @@ async function loadLeagueState() {
   if (superseded()) return;
   if (leagueSupportsRounds(leagueState)) {
     if (selectedPeriod == null) selectedPeriod = leagueState.currentPeriod ?? currentPeriodKey();
-    // The round table is a SECOND /state call. Paint the season state we already
-    // hold rather than holding the whole screen back for it.
-    if (leagueTab === "matchday") {
+    if (leagueTab === "matchday" && !roundStarted) {
+      // Nobody else has asked about this week, so this call owns it.
       render();
-      await loadRoundState();
+      await loadRoundState(generation);
     }
   } else {
     leagueTab = "season"; // Old worker cache: fall back to the season-only UI.
   }
 }
 
+/**
+ * Revalidate a league, in one request per question.
+ *
+ * Known week: the season and round reads start together, because they do not
+ * depend on each other. Unknown week: the season read discovers it and then
+ * loadLeagueState starts exactly one round read. Either way the cached content
+ * already on screen stays there until real answers replace it.
+ */
+async function refreshLeague(generation = navGeneration) {
+  const knownPeriod = selectedPeriod != null && leagueTab === "matchday";
+  await Promise.all([
+    // Told explicitly, because this is the only place that knows.
+    loadLeagueState(generation, { roundStarted: knownPeriod }),
+    knownPeriod ? loadRoundState(generation) : Promise.resolve(),
+  ]);
+}
+
 // The round table races the same way, and additionally races the period picker.
 let roundStateRequest = 0;
 
-async function loadRoundState() {
+async function loadRoundState(generation = navGeneration) {
   if (!activeLeague || !API || selectedPeriod == null) { roundState = null; return; }
   const ticket = ++roundStateRequest;
   const requested = activeLeague;
   const period = selectedPeriod;
+  const view = currentView;
   const superseded = () =>
-    ticket !== roundStateRequest || requested !== activeLeague || String(period) !== String(selectedPeriod);
+    ticket !== roundStateRequest || requested !== activeLeague || String(period) !== String(selectedPeriod)
+    || generation !== navGeneration || view !== currentView;
 
   // Show last week's answer for this week immediately; the request below
   // replaces it when it lands. Without this the screen sits on "Loading
@@ -769,8 +810,10 @@ async function loadRoundState() {
   const cached = cachedRoundState(requested, period);
   if (cached && (!roundState || showingAnotherWeek)) {
     roundState = cached;
-    render();
-  } else if (showingAnotherWeek) {
+    if (!superseded()) render();
+  } else if (showingAnotherWeek && !cached) {
+    // Only blanked when there is nothing cached to show instead. A valid
+    // cached week is never replaced by "Loading matchweek…".
     roundState = null;
   }
 
@@ -932,13 +975,13 @@ function setActiveLeague(code, refresh = true) {
   roundState = null;
   if (activeLeague) localStorage.setItem(STORAGE.activeLeague, activeLeague);
   else localStorage.removeItem(STORAGE.activeLeague);
-  // Paint from cache first — this is the whole point.
-  leagueState = activeLeague ? (leagueStates[activeLeague] || null) : null;
-  if (leagueState && leagueSupportsRounds(leagueState)) {
-    selectedPeriod = leagueState.currentPeriod ?? currentPeriodKey();
-  }
+  // Season, week and that week's table restored together, BEFORE the paint.
+  // Restoring the season alone left selectedPeriod null and the round table
+  // with no key to look itself up by, so a switch to a league this device knows
+  // perfectly well still showed "Loading matchweek…".
+  hydrateCachedLeague();
   render();
-  if (refresh) loadLeagueState().then(render);
+  if (refresh) refreshLeague().then(render);
 }
 
 function saveLeague(code) {
@@ -3267,10 +3310,15 @@ function showUpdatePrompt(registration) {
  * can quietly become the slow one later.
  */
 const VIEW_SHELLS = {
-  schedule: () => `${scheduleHead()}${scheduleFilters()}${loadingLine("Loading fixtures…")}`,
-  picks: () => `<div class="section-head"><div><span class="eyebrow">${escapeHTML(playerName || "Your profile")}</span><h2>My predictions</h2></div></div>${loadingLine("Loading your predictions…")}`,
-  league: () => `<div class="section-head"><div><span class="eyebrow">Private predictor leagues</span><h2>League table</h2></div></div>${loadingLine("Loading your leagues…")}`,
-  today: () => `${loadingLine("Loading fixtures…")}`,
+  // LITERAL markup only. The old Schedule shell called scheduleFilters(), which
+  // calls weekStrip(), which calls periodsInOrder() — so "the cheap thing we
+  // paint first" was walking the whole fixture list. On Adam's phone the shell
+  // itself did not reach the DOM until 2908ms. A shell that has to compute
+  // anything is not a shell.
+  schedule: () => `<div class="section-head"><div><span class="eyebrow">Full season</span><h2>Prediction schedule</h2></div></div>${pulsingStatus("Loading schedule…")}`,
+  picks: () => `<div class="section-head"><div><span class="eyebrow">Your profile</span><h2>My predictions</h2></div></div>${pulsingStatus("Loading your predictions…")}`,
+  league: () => `<div class="section-head"><div><span class="eyebrow">Private predictor leagues</span><h2>League table</h2></div></div>${pulsingStatus("Loading your leagues…")}`,
+  today: () => pulsingStatus("Loading fixtures…"),
   // Static and cheap, but it goes through the same door so the rule has no
   // exceptions to drift out of.
   rules: () => `<div class="rules-card"><span class="eyebrow">Scoring</span><h2>How Prem Oracle works</h2>${loadingLine("Loading…")}</div>`,
@@ -3278,13 +3326,24 @@ const VIEW_SHELLS = {
 
 const loadingLine = (message) => `<p class="view-loading" role="status">${escapeHTML(message)}</p>`;
 
+/**
+ * An acknowledgement with a pulse on it, so a tap plainly registered even
+ * before there is anything to show. Announced politely to assistive tech, and
+ * the pulse stops for anyone who has asked for reduced motion.
+ */
+const pulsingStatus = (message) =>
+  `<p class="view-loading is-pulsing" role="status" aria-live="polite">${escapeHTML(message)}</p>`;
+
 /** Paints a view's shell immediately, bypassing the tap hold. */
 function paintShell(view) {
   const shell = VIEW_SHELLS[view];
   if (!shell) return false;
   const app = document.getElementById("app");
   if (!app) return false;
-  app.innerHTML = shell();
+  traceTap("shell-build-start", { view });
+  const html = shell();
+  traceTap("shell-build-end", { view, chars: html.length });
+  app.innerHTML = html;
   traceTap("shell-inserted", { view });
   // The shell is not the view, so the next render must not be deduped away.
   renderedHTML = null;
@@ -3304,9 +3363,22 @@ const nextPaint = () => new Promise((resolve) => requestAnimationFrame(() => set
   resolve();
 }, 0)));
 
+/**
+ * Which navigation is current.
+ *
+ * Every async continuation captures the generation it started under and checks
+ * it before touching the screen. A League response that arrives after the
+ * viewer has moved to Schedule may still be CACHED — it is true about the
+ * league it names — but it must not repaint, or it rebuilds a screen nobody is
+ * looking at while the one they are looking at is trying to paint.
+ */
+let navGeneration = 0;
+const navCurrent = (generation, view) => generation === navGeneration && view === currentView;
+
 async function navigateToView(view) {
   if (!view) return;
   launchRouted = true;   // the viewer is driving now
+  const generation = ++navGeneration;
   if (view === "schedule" && currentView !== "schedule") {
     // Arriving fresh: the current week, no heavy card mounted, and the
     // scroller put back to the top BEFORE any content is added — otherwise the
@@ -3317,12 +3389,24 @@ async function navigateToView(view) {
   }
   currentView = view;
   clearFlash();
-  // Acknowledge the tap first, then build the view in a later task so the
-  // acknowledgement actually reaches the screen.
+  traceTap("nav-enter", { view });
+
+  // The acknowledgement, and nothing else, in this task.
   if (paintShell(view)) await nextPaint();
+  if (!navCurrent(generation, view)) return;
+
+  // The board is built in a later task, so the shell has genuinely reached the
+  // glass before any of the work that used to bury it.
+  traceTap("board-build-start", { view });
   render({ scrollTop: true });
+  traceTap("board-build-end", { view });
+
   if (currentView === "league") {
-    await loadLeagueState();
+    // Whatever this device already knows goes up before a request is made.
+    hydrateCachedLeague();
+    if (leagueState) { render(); traceTap("cached-league-painted", {}); }
+    await refreshLeague(generation);
+    if (!navCurrent(generation, view)) return;
     render();
     // Warm every other league now, so the first pill tap is a cache hit.
     prefetchLeagueStates();
@@ -3333,6 +3417,7 @@ async function navigateToView(view) {
     // does not itself play.
     await prefetchLeagueStates();
     await loadFixturesForLeagues();
+    if (!navCurrent(generation, view)) return;
     render();
   }
 }
@@ -3687,6 +3772,16 @@ document.addEventListener("click", async (event) => {
     render({ scrollTop: true });
     return;
   }
+  // Navigation answers on the tap. It used to sit behind two awaited handlers,
+  // and an await is only free when the main thread is idle — which, on the tap
+  // that opens the heaviest screen in the app, is exactly when it is not.
+  const nav = event.target.closest("[data-view]");
+  if (nav) {
+    // The onboarding CTA lands on the League tab with the wizard already open.
+    if (nav.hasAttribute("data-launch-create")) openWizard();
+    navigateToView(nav.dataset.view);
+    return;
+  }
   // Sharing the table has the same two text paths, with the same need to stay
   // inside the tap. Only the drawn card falls through to the branch below.
   if (event.target.closest("[data-export-league-table]") && shareTableNow()) return;
@@ -3717,13 +3812,6 @@ document.addEventListener("click", async (event) => {
   }
   if (await handleWizardClick(event)) return;
   if (await handlePickerClick(event)) return;
-  const nav = event.target.closest("[data-view]");
-  if (nav) {
-    // The onboarding CTA lands on the League tab with the wizard already open.
-    if (nav.hasAttribute("data-launch-create")) openWizard();
-    await navigateToView(nav.dataset.view);
-    return;
-  }
   const filter = event.target.closest("[data-filter]");
   if (filter) {
     matchdayFilter = filter.dataset.filter;
@@ -4229,15 +4317,41 @@ async function setupNativeUniversalLinks() {
   }
 }
 
-// Paint the shell before any network work. Identity and league state take a few
+// The last league this device looked at — season, week and that week's table —
+// restored BEFORE the first paint. Hydrating after it meant the very first
+// League render had no selectedPeriod and so drew "Loading matchweek…" over a
+// perfectly good cached table.
+hydrateCachedLeague();
+
+// Then paint, before any network work. Identity and league state take a few
 // seconds to settle — longer for a Championship league, whose fixture list is
 // half again as large — and until this call existed the app showed an empty
 // content area for the whole of it.
 render();
 
-// The last league this device looked at, straight from cache, so the first
-// paint already has a table in it rather than a loading state.
-if (activeLeague && leagueStates[activeLeague]) leagueState = leagueStates[activeLeague];
+/**
+ * Restores the league, the week it was on, and that week's table TOGETHER.
+ *
+ * Restoring the league alone left selectedPeriod null, so the round table had
+ * nothing to look itself up by and the screen fell back to "Loading
+ * matchweek…" while a six-second request ran — with a perfectly good cached
+ * table sitting in storage the whole time.
+ */
+function hydrateCachedLeague() {
+  if (!activeLeague) { leagueState = null; roundState = null; return; }
+  const cached = leagueStates[activeLeague];
+  if (!cached || cached.error) {
+    // Nothing known about this one: show it as loading rather than leaving the
+    // league we just came from on screen under its name.
+    leagueState = null;
+    roundState = null;
+    return;
+  }
+  leagueState = cached;
+  if (selectedPeriod == null) selectedPeriod = cached.currentPeriod ?? currentPeriodKey();
+  const round = cachedRoundState(activeLeague, selectedPeriod);
+  if (round) roundState = round;
+}
 
 Promise.all([loadFixtures(), hydrateIdentity()]).then(() => {
   // The launch decision tree (§9.7). An invite in the URL always wins — the
@@ -4253,9 +4367,9 @@ Promise.all([loadFixtures(), hydrateIdentity()]).then(() => {
   if (playerName && localStorage.getItem(STORAGE.syncedName) !== playerName) syncProfileName();
   setupNativePushNotifications();
   setupNativeUniversalLinks();
-  if (currentView === "league") {
-    loadLeagueState().then(render);
-  }
+  // No league refresh here: hydrateIdentity() owns startup's single refresh and
+  // has already run by this point. A second one would be a duplicate, not a
+  // safety net.
 });
 
 /**

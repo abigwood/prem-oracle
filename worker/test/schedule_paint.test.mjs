@@ -258,8 +258,12 @@ test("every tab has a shell it can show before doing any work", () => {
     assert.match(shells, new RegExp(`\\b${view}:`), `${view} has no shell`);
   }
   // The Schedule shell is the header and filters — no fixture cards.
-  assert.match(shells, /schedule: \(\) => `\$\{scheduleHead\(\)\}\$\{scheduleFilters\(\)\}\$\{loadingLine\("Loading fixtures…"\)\}`/);
-  assert.doesNotMatch(shells, /groupedPeriods/);
+  // Literal markup only: the shell that called scheduleFilters() -> weekStrip()
+  // -> periodsInOrder() took 2908ms to reach the DOM on a real phone.
+  assert.match(shells, /pulsingStatus\("Loading schedule…"\)/);
+  for (const computed of ["scheduleFilters(", "weekStrip(", "periodsInOrder(", "groupedPeriods(", "fixtureRow("]) {
+    assert.ok(!shells.replace(/\/\/[^\n]*/g, "").includes(computed), `shell must not call ${computed}`);
+  }
 });
 
 test("the shell is painted, and the highlight moved, before the view is built", () => {
@@ -272,7 +276,7 @@ test("the shell is painted, and the highlight moved, before the view is built", 
   assert.ok(nav.indexOf("await nextPaint()") < renderAt);
 
   const paint = lift("function paintShell(view)");
-  assert.match(paint, /app\.innerHTML = shell\(\);/);
+  assert.match(paint, /app\.innerHTML = html;/);
   assert.match(paint, /markActiveTab\(\);/);
   // The shell is not the view, so the render that follows must not be deduped.
   assert.match(paint, /renderedHTML = null;/);
@@ -295,6 +299,109 @@ test("the tap-hold from build 11 cannot swallow the shell", () => {
   const paint = lift("function paintShell(view)");
   assert.doesNotMatch(paint, /\brender\(/);
   assert.match(paint, /const app = document\.getElementById\("app"\);/);
+});
+
+// --- build 16: acknowledgement before work ----------------------------------
+
+test("navigation is handled before any unrelated awaited branch", () => {
+  const listener = APP.slice(APP.indexOf('document.addEventListener("click", async (event) => {'));
+  const head = listener.slice(0, listener.indexOf('const nav = event.target.closest("[data-view]")'));
+  const code = head.replace(/\/\/[^\n]*/g, "");
+  assert.equal(/\bawait\b/.test(code), false, "an await before nav delays the tap that opens the heaviest screen");
+  // The gesture-sensitive branches that genuinely must be first are still first.
+  assert.match(code, /data-share-league/);
+  assert.match(code, /data-expand-fixture/);
+});
+
+test("the tab is marked and the shell inserted before the board is built", () => {
+  const nav = lift("async function navigateToView(view)");
+  const shell = nav.indexOf("paintShell(view)");
+  const board = nav.indexOf('traceTap("board-build-start"');
+  assert.ok(shell > 0 && board > shell, "the board must come after the shell");
+  // And a real yield between them, or the shell never reaches the glass.
+  assert.ok(nav.indexOf("await nextPaint()") > shell);
+  assert.ok(nav.indexOf("await nextPaint()") < board);
+  const paint = lift("function paintShell(view)");
+  assert.match(paint, /markActiveTab\(\);/);
+});
+
+test("arriving at Schedule resets the scroller before the shell", () => {
+  const nav = lift("async function navigateToView(view)");
+  assert.ok(nav.indexOf("appScroller()?.scrollTo({ top: 0 })") < nav.indexOf("paintShell(view)"));
+});
+
+// --- build 16: the stale-render race ----------------------------------------
+
+test("every navigation takes a generation", () => {
+  const nav = lift("async function navigateToView(view)");
+  assert.match(nav, /const generation = \+\+navGeneration;/);
+  assert.match(APP, /const navCurrent = \(generation, view\) => generation === navGeneration && view === currentView;/);
+  // Checked after every await, not just the first.
+  assert.ok((nav.match(/navCurrent\(generation, view\)/g) || []).length >= 3);
+});
+
+test("a superseded response may cache but must not paint", () => {
+  const loader = lift("async function loadLeagueState(generation = navGeneration, { roundStarted = false } = {})");
+  assert.match(loader, /generation !== navGeneration \|\| view !== currentView/);
+  // Cached first, painted only if still current.
+  assert.ok(loader.indexOf("cacheLeagueState(state);") < loader.indexOf("if (superseded()) return;\n    leagueState = state;"));
+});
+
+test("a late round response cannot repaint a screen that has moved on", () => {
+  const loader = lift("async function loadRoundState(generation = navGeneration)");
+  assert.match(loader, /generation !== navGeneration \|\| view !== currentView/);
+  assert.match(loader, /if \(!superseded\(\)\) render\(\);/);
+});
+
+// --- build 16: the cached matchweek -----------------------------------------
+
+test("startup restores league, period and round together", () => {
+  const fn = lift("function hydrateCachedLeague()");
+  assert.match(fn, /leagueState = cached;/);
+  assert.match(fn, /selectedPeriod = cached\.currentPeriod \?\? currentPeriodKey\(\);/);
+  assert.match(fn, /const round = cachedRoundState\(activeLeague, selectedPeriod\);/);
+  assert.match(fn, /if \(round\) roundState = round;/);
+  assert.match(APP, /^hydrateCachedLeague\(\);$/m, "and it runs at startup");
+});
+
+test("League navigation paints from cache before it asks for anything", () => {
+  const nav = lift("async function navigateToView(view)");
+  const branch = nav.slice(nav.indexOf('if (currentView === "league")'));
+  assert.ok(branch.indexOf("hydrateCachedLeague();") < branch.indexOf("refreshLeague(generation)"));
+  assert.match(branch, /if \(leagueState\) \{ render\(\); traceTap\("cached-league-painted", \{\}\); \}/);
+});
+
+test("a valid cached week is never replaced by a loading state", () => {
+  const loader = lift("async function loadRoundState(generation = navGeneration)");
+  assert.match(loader, /\} else if \(showingAnotherWeek && !cached\) \{/);
+  // A failed refresh leaves what is on screen alone.
+  assert.match(loader, /if \(!cached\) roundState = \{ error: error\.message \};/);
+});
+
+test("season and round revalidate in parallel when the week is known", () => {
+  const nav = lift("async function navigateToView(view)");
+  // One place decides parallel vs serial, shared by navigation, startup and
+  // the league-pill switch.
+  const refresh = lift("async function refreshLeague(generation = navGeneration)");
+  assert.match(refresh, /const knownPeriod = selectedPeriod != null && leagueTab === "matchday";/);
+  assert.match(refresh, /await Promise\.all\(\[/);
+  assert.match(refresh, /loadLeagueState\(generation, \{ roundStarted: knownPeriod \}\),/);
+  assert.match(refresh, /knownPeriod \? loadRoundState\(generation\) : Promise\.resolve\(\),/);
+  // The claim is explicit. Inferring it from a known week was wrong: every
+  // standalone caller has a known week and none of them start a round read.
+  const from = APP.indexOf("async function loadLeagueState(generation = navGeneration, { roundStarted = false } = {})");
+  const loader = APP.slice(from, APP.indexOf("async function refreshLeague", from));
+  assert.match(loader, /if \(leagueTab === "matchday" && !roundStarted\) \{/);
+  assert.doesNotMatch(loader, /periodKnownAtStart/);
+});
+
+test("the separated timings are all traced", () => {
+  for (const point of [
+    "nav-enter", "shell-build-start", "shell-build-end", "shell-inserted",
+    "shell-painted", "board-build-start", "board-build-end", "cached-league-painted",
+  ]) {
+    assert.ok(APP.includes(`traceTap("${point}"`), `missing trace point: ${point}`);
+  }
 });
 
 // --- nothing else changed ---------------------------------------------------

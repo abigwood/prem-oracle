@@ -1177,9 +1177,11 @@ class WeeklyLoopTests(unittest.TestCase):
         switch = switch[:switch.index("function saveLeague(code)")]
         # The cached state is applied and rendered on the same tick as the tap;
         # the refresh is what happens afterwards, not what gates the paint.
-        self.assertIn("leagueState = activeLeague ? (leagueStates[activeLeague] || null) : null;", switch)
+        # Season, week and that week's table restored together, before the paint.
+        self.assertIn("hydrateCachedLeague();", switch)
+        self.assertLess(switch.index("hydrateCachedLeague();"), switch.index("render();"))
         self.assertIn("render();", switch)
-        self.assertLess(switch.index("render();"), switch.index("loadLeagueState()"))
+        self.assertLess(switch.index("render();"), switch.index("refreshLeague()"))
 
     def test_the_league_cache_is_memory_plus_localstorage(self):
         self.assertIn('leagueStates: "prem_oracle_league_states",', self.app)
@@ -1198,11 +1200,12 @@ class WeeklyLoopTests(unittest.TestCase):
         self.assertIn("prefetchLeagueStates();", opener)
 
     def test_the_round_request_does_not_gate_the_season_paint(self):
-        loader = self.app[self.app.index("async function loadLeagueState()"):]
-        loader = loader[:loader.index("async function loadRoundState()")]
+        loader = self.app[self.app.index("async function loadLeagueState(generation = navGeneration, { roundStarted = false } = {})"):]
+        loader = loader[:loader.index("async function loadRoundState(generation = navGeneration)")]
         self.assertIn("cacheLeagueState(state);", loader)
         # The season state is painted before the second /state call goes out.
-        self.assertIn("render();\n      await loadRoundState();", loader)
+        self.assertIn("await loadRoundState(generation);", loader)
+        self.assertLess(loader.index("render();"), loader.index("await loadRoundState(generation);"))
 
     def test_the_bottom_nav_is_pinned_to_the_safe_area(self):
         nav = self.css[self.css.index(".bottom-nav {"):]
@@ -1758,7 +1761,7 @@ class LeagueSwitchAndShareTests(unittest.TestCase):
 
     def test_a_league_fetch_takes_a_ticket(self):
         self.assertIn("let leagueStateRequest = 0;", self.app)
-        fn = self.app[self.app.index("async function loadLeagueState()"):]
+        fn = self.app[self.app.index("async function loadLeagueState(generation = navGeneration, { roundStarted = false } = {})"):]
         fn = fn[:fn.index("\n}")]
         self.assertIn("const ticket = ++leagueStateRequest;", fn)
         self.assertIn("const requested = activeLeague;", fn)
@@ -1770,7 +1773,7 @@ class LeagueSwitchAndShareTests(unittest.TestCase):
         self.assertNotIn("/state?code=${encodeURIComponent(activeLeague)}", fn)
 
     def test_a_superseded_answer_is_cached_but_not_painted(self):
-        fn = self.app[self.app.index("async function loadLeagueState()"):]
+        fn = self.app[self.app.index("async function loadLeagueState(generation = navGeneration, { roundStarted = false } = {})"):]
         fn = fn[:fn.index("\n}")]
         # It is still true about its own league, so the cache keeps it...
         self.assertLess(fn.index("cacheLeagueState(state);"), fn.index("if (superseded()) return;"))
@@ -1782,7 +1785,7 @@ class LeagueSwitchAndShareTests(unittest.TestCase):
         self.assertEqual(fn.count("if (superseded()) return;"), 3)
 
     def test_the_round_table_guards_on_its_period_too(self):
-        fn = self.app[self.app.index("async function loadRoundState()"):]
+        fn = self.app[self.app.index("async function loadRoundState(generation = navGeneration)"):]
         fn = fn[:fn.index("\n}")]
         self.assertIn("const ticket = ++roundStateRequest;", fn)
         self.assertIn("const period = selectedPeriod;", fn)
@@ -1904,22 +1907,34 @@ class ScheduleTabTests(unittest.TestCase):
         for view in ("schedule", "picks", "league", "today", "rules"):
             self.assertIn(f"{view}:", shells, view)
 
-    def test_the_schedule_shell_is_the_header_and_filters_only(self):
+    def test_the_schedule_shell_is_literal_and_data_independent(self):
+        # The old shell called scheduleFilters() -> weekStrip() ->
+        # periodsInOrder(), so "the cheap thing we paint first" walked the
+        # fixture list. On Adam's phone it did not reach the DOM until 2908ms.
         shells = self.app[self.app.index("const VIEW_SHELLS = {"):self.app.index("const loadingLine =")]
-        self.assertIn("scheduleHead()", shells)
-        self.assertIn("scheduleFilters()", shells)
-        self.assertIn('loadingLine("Loading fixtures…")', shells)
-        # Nothing heavy: no fixture cards, no week bodies.
-        self.assertNotIn("groupedPeriods", shells)
-        self.assertNotIn("matchCard", shells)
+        shells = re.sub(r"//[^\n]*", "", shells)   # the comment names what it replaced
+        for computed in (
+            "scheduleFilters(", "weekStrip(", "periodsInOrder(", "scheduleWindow(",
+            "scheduleView(", "groupedPeriods(", "matchCard(", "fixtureRow(",
+            "leagueState", "fixtures.", "fixtures[",
+        ):
+            self.assertNotIn(computed, shells, computed)
+        self.assertIn("Prediction schedule", shells)
+        self.assertIn('pulsingStatus("Loading schedule…")', shells)
         self.assertIn(".view-loading", self.css)
+
+    def test_the_acknowledgement_pulses_and_respects_reduced_motion(self):
+        self.assertIn('role="status" aria-live="polite"', self.app)
+        self.assertIn(".view-loading.is-pulsing { animation: view-pulse", self.css)
+        block = self.css[self.css.index("@media (prefers-reduced-motion: reduce) {"):]
+        self.assertIn("animation: none", block[:block.index("}", block.index(".view-loading.is-pulsing"))])
 
     def test_the_shell_bypasses_the_tap_hold_and_the_dedupe(self):
         paint = self.app[self.app.index("function paintShell(view)"):]
         paint = paint[:paint.index("\n}")]
         # render() is held for the length of a tap, and a tab tap is a tap.
         self.assertNotIn("render(", paint)
-        self.assertIn("app.innerHTML = shell();", paint)
+        self.assertIn("app.innerHTML = html;", paint)
         self.assertIn("renderedHTML = null;", paint)
         self.assertIn("markActiveTab();", paint)
 
@@ -2111,7 +2126,7 @@ class NamesAndViewportTests(unittest.TestCase):
         nav = self.app[self.app.index("async function navigateToView(view)"):]
         nav = nav[:nav.index("\n}")]
         self.assertIn('if (currentView === "league") {', nav)
-        self.assertIn("await loadLeagueState();", nav)
+        self.assertIn("refreshLeague(generation)", nav)
 
     def test_viewport_scale_is_reported_not_silently_absorbed(self):
         # Scale and offset look alike in a screenshot and are nothing alike

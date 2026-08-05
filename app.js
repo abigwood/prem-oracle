@@ -3205,7 +3205,57 @@ function dismissKeyboard() {
  * while the viewer is looking at the displaced visual one, so its hit area is
  * no longer where it appears.
  */
+/**
+ * What the visual viewport is doing, for the record.
+ *
+ * A displaced viewport and a SCALED one look similar in a screenshot but have
+ * nothing in common underneath: scrolling can be corrected, zoom cannot. Tom's
+ * 1.6.2 screenshots show roughly 1.5-2x text with three of five nav tabs
+ * visible, which is the signature of scale, not offset — so the numbers behind
+ * it are recorded here rather than inferred from the picture.
+ */
+function viewportReport() {
+  const vv = window.visualViewport;
+  return {
+    scale: vv ? +vv.scale.toFixed(3) : null,
+    vvWidth: vv ? Math.round(vv.width) : null,
+    offsetTop: vv ? Math.round(vv.offsetTop) : null,
+    innerWidth: window.innerWidth,
+    screenWidth: window.screen?.width ?? null,
+    dpr: window.devicePixelRatio,
+    rootFontPx: parseFloat(getComputedStyle(document.documentElement).fontSize),
+    native: isNativeApp(),
+  };
+}
+
+// Kept on the object so a support session can read it without a debugger.
+window.premOracleViewport = viewportReport;
+
+/**
+ * Diagnostics the viewer copies and sends themselves, if they want to.
+ *
+ * Nothing here leaves the device on its own, and nothing in it identifies
+ * anybody: no uid, no device id, no league codes, no names. Our App Privacy
+ * label declares no diagnostic collection, and this keeps that true — remote
+ * telemetry would be a separate feature with its own disclosure.
+ */
+function diagnosticsText() {
+  const report = viewportReport();
+  return [
+    `Prem Oracle ${APP_BUILD}`,
+    `scale ${report.scale}  viewport ${report.vvWidth}  offsetTop ${report.offsetTop}`,
+    `innerWidth ${report.innerWidth}  screenWidth ${report.screenWidth}  dpr ${report.dpr}`,
+    `rootFont ${report.rootFontPx}px  native ${report.native}`,
+  ].join("\n");
+}
+
 function restoreViewport() {
+  const report = viewportReport();
+  // Scale is not something restoreViewport can put back — page zoom survives
+  // any scroll correction — so it is surfaced rather than silently absorbed.
+  if (report.scale !== null && Math.abs(report.scale - 1) > 0.01) {
+    console.warn("Prem Oracle: viewport is scaled", report);
+  }
   const settle = () => {
     if (window.scrollY || document.scrollingElement?.scrollTop || document.body.scrollTop) {
       window.scrollTo(0, 0);
@@ -3808,6 +3858,15 @@ document.getElementById("nickForm").addEventListener("submit", async (event) => 
 });
 
 document.getElementById("nickDialog").addEventListener("close", restoreViewport);
+
+document.addEventListener("click", (event) => {
+  if (!event.target.closest("[data-copy-diagnostics]")) return;
+  const text = diagnosticsText();
+  navigator.clipboard?.writeText(text)
+    .then(() => setFlash("Diagnostics copied — paste them to Adam"))
+    .catch(() => setFlash(text, "error"))
+    .finally(render);
+});
 document.getElementById("profileDialog").addEventListener("close", restoreViewport);
 
 function registerServiceWorker() {

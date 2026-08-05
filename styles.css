@@ -1667,3 +1667,16 @@ body.picker-open { overflow: hidden; }
 /* The two things that live in this slot are styled to the same height, so the
    buttons below never move when one replaces the other — and nothing is held
    open when the slot is genuinely empty. See .slate-notice-published. */
+
+/* A quiet, secondary action — present when wanted, never competing. */
+.link-quiet {
+  display: block;
+  width: 100%;
+  margin-top: 12px;
+  padding: 6px;
+  border: 0;
+  background: none;
+  color: var(--muted, #6b7280);
+  font-size: 13px;
+  text-decoration: underline;
+}

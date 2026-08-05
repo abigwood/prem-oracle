@@ -2079,6 +2079,46 @@ class NamesAndViewportTests(unittest.TestCase):
         # The visual viewport returning to full height is the keyboard leaving.
         self.assertIn("if (vv.height >= tallest - 1) restoreViewport();", self.app)
 
+    def test_viewport_scale_is_reported_not_silently_absorbed(self):
+        # Scale and offset look alike in a screenshot and are nothing alike
+        # underneath: a scroll correction cannot undo page zoom. The numbers
+        # are recorded so a scale fault is visible in the next report.
+        fn = self.app[self.app.index("function viewportReport()"):]
+        fn = fn[:fn.index("\n}")]
+        for field in ("scale:", "vvWidth:", "offsetTop:", "innerWidth:", "screenWidth:", "dpr:", "rootFontPx:"):
+            self.assertIn(field, fn, field)
+        restore = self.app[self.app.index("function restoreViewport()"):]
+        restore = restore[:restore.index("\n}\n")]
+        self.assertIn('console.warn("Prem Oracle: viewport is scaled", report);', restore)
+        self.assertIn("Math.abs(report.scale - 1) > 0.01", restore)
+        # Reachable from a support session without a debugger attached.
+        self.assertIn("window.premOracleViewport = viewportReport;", self.app)
+
+    def test_diagnostics_are_local_only_and_carry_no_identity(self):
+        # The App Privacy label declares no diagnostic collection, and this
+        # keeps that true: the viewer copies it and sends it themselves.
+        fn = self.app[self.app.index("function diagnosticsText()"):]
+        fn = fn[:fn.index("\n}")]
+        for identifier in ("uid(", "STORAGE.uid", "activeLeague", "playerName", "leagueCodes", "recovery"):
+            self.assertNotIn(identifier, fn, identifier)
+        # And nothing transmits it.
+        handler = self.app[self.app.index('if (!event.target.closest("[data-copy-diagnostics]")) return;'):]
+        handler = handler[:handler.index("});")]
+        self.assertIn("navigator.clipboard?.writeText(text)", handler)
+        for transmit in ("fetch(", "api(", "XMLHttpRequest", "sendBeacon"):
+            self.assertNotIn(transmit, handler, transmit)
+        self.assertIn("data-copy-diagnostics", self.html)
+
+    def test_zoom_is_not_disabled(self):
+        # Locking scale would be an accessibility regression, and nothing has
+        # yet shown it would even address the cause.
+        meta = self.html[self.html.index('name="viewport"'):]
+        meta = meta[:meta.index(">")]
+        self.assertIn("width=device-width", meta)
+        self.assertIn("viewport-fit=cover", meta)
+        self.assertNotIn("maximum-scale", meta)
+        self.assertNotIn("user-scalable", meta)
+
     def test_the_body_stays_one_viewport_tall_and_unscrolled(self):
         # Pinning the documentElement as well was tried and dropped: the
         # simulator showed it changed nothing, and restoreViewport() is what

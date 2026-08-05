@@ -2622,10 +2622,38 @@ function roundTableHtml(round) {
     }).join("")}</tbody></table>`;
 }
 
+/**
+ * A member's medals, from the worker when it sends them and from `wins` when it
+ * does not — an older worker only ever knew about gold, so its `wins` IS the
+ * gold count and the other two are honestly zero rather than absent.
+ */
+function podiumCounts(row) {
+  const podiums = row?.podiums;
+  if (podiums && typeof podiums === "object") {
+    return { gold: podiums.gold || 0, silver: podiums.silver || 0, bronze: podiums.bronze || 0 };
+  }
+  return { gold: row?.wins || 0, silver: 0, bronze: 0 };
+}
+
+/**
+ * All three medals, always, with the empty ones muted rather than hidden — a
+ * row that shows only what somebody has won reads as a different shape per
+ * player and makes the column impossible to scan.
+ */
+function medalLine(row) {
+  const { gold, silver, bronze } = podiumCounts(row);
+  const cell = (emoji, count) =>
+    `<span class="medal${count ? "" : " is-none"}">${emoji} ${count}</span>`;
+  return `<span class="medals" aria-label="${gold} gold, ${silver} silver, ${bronze} bronze">${
+    cell("🏆", gold)}<i aria-hidden="true">·</i>${cell("🥈", silver)}<i aria-hidden="true">·</i>${cell("🥉", bronze)}</span>`;
+}
+
 function seasonTableHtml(state, isOwner, withWins) {
-  return `<table class="table league-table"><thead><tr><th>Player</th><th></th><th>Pts</th><th>Exact</th>${withWins ? `<th class="wins-col" aria-label="Weekly wins">🏆</th>` : ""}${isOwner ? "<th></th>" : ""}</tr></thead>
+  // The trophy column is gone: the medals live under each name, where all
+  // three fit at 402px without a fifth column pushing Pts and Exact off.
+  return `<table class="table league-table"><thead><tr><th>Player</th><th></th><th>Pts</th><th>Exact</th>${isOwner ? "<th></th>" : ""}</tr></thead>
     <tbody>${(state.table || []).map((row, index) =>
-      `<tr><td>${row.rank || index + 1}. ${escapeHTML(row.nick)}</td><td>${movementBadge(row)}</td><td>${row.pts}</td><td>${row.exact}</td>${withWins ? `<td class="wins-col">${row.wins || 0}</td>` : ""}${isOwner ? `<td class="kick-cell">${row.uid && row.uid !== state.owner ? `<button class="kick-btn" type="button" data-kick-league="${state.code}" data-kick-uid="${escapeHTML(row.uid)}" aria-label="Remove ${escapeHTML(row.nick)}">×</button>` : ""}</td>` : ""}</tr>`
+      `<tr><td class="player-cell"><span class="player-name">${row.rank || index + 1}. ${escapeHTML(row.nick)}</span>${withWins ? medalLine(row) : ""}</td><td>${movementBadge(row)}</td><td>${row.pts}</td><td>${row.exact}</td>${isOwner ? `<td class="kick-cell">${row.uid && row.uid !== state.owner ? `<button class="kick-btn" type="button" data-kick-league="${state.code}" data-kick-uid="${escapeHTML(row.uid)}" aria-label="Remove ${escapeHTML(row.nick)}">×</button>` : ""}</td>` : ""}</tr>`
     ).join("")}</tbody></table>`;
 }
 

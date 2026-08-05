@@ -2291,5 +2291,76 @@ class NamesAndViewportTests(unittest.TestCase):
         self.assertIn("opacity: 1;", active)
 
 
+class SeasonPodiumTests(unittest.TestCase):
+    """Medals under every name, and the old field still meaning what it did."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = (ROOT / "app.js").read_text()
+        cls.css = (ROOT / "styles.css").read_text()
+        cls.worker = (ROOT / "worker/src/worker.js").read_text()
+
+    def test_an_old_response_with_only_wins_still_renders(self):
+        # A worker that predates this only ever knew about gold, so its `wins`
+        # IS the gold count — the other two are honestly zero, not missing.
+        fn = self.app[self.app.index("function podiumCounts(row)"):]
+        fn = fn[:fn.index("\n}")]
+        self.assertIn("return { gold: row?.wins || 0, silver: 0, bronze: 0 };", fn)
+        self.assertIn("gold: podiums.gold || 0", fn)
+
+    def test_all_three_medals_always_show_with_zeros_muted(self):
+        fn = self.app[self.app.index("function medalLine(row)"):]
+        fn = fn[:fn.index("\n}")]
+        for emoji in ("🏆", "🥈", "🥉"):
+            self.assertIn(emoji, fn, emoji)
+        # Muted, not hidden: a row that shows only what somebody won reads as a
+        # different shape per player and cannot be scanned.
+        self.assertIn('`<span class="medal${count ? "" : " is-none"}">${emoji} ${count}</span>`', fn)
+        self.assertIn(".medal.is-none", self.css)
+
+    def test_the_accessible_label_reads_as_words(self):
+        fn = self.app[self.app.index("function medalLine(row)"):]
+        fn = fn[:fn.index("\n}")]
+        self.assertIn('aria-label="${gold} gold, ${silver} silver, ${bronze} bronze"', fn)
+        # The separators are decoration and are not read out.
+        self.assertIn('<i aria-hidden="true">·</i>', fn)
+
+    def test_the_trophy_column_is_gone_and_pts_exact_remain(self):
+        fn = self.app[self.app.index("function seasonTableHtml(state, isOwner, withWins)"):]
+        fn = fn[:fn.index("\n}")]
+        self.assertIn("<th>Player</th>", fn)
+        self.assertIn("<th>Pts</th>", fn)
+        self.assertIn("<th>Exact</th>", fn)
+        # The fifth column is what pushed the table into a horizontal scroll.
+        self.assertNotIn("wins-col", fn)
+        self.assertIn("medalLine(row)", fn)
+        self.assertIn('class="player-cell"', fn)
+
+    def test_the_medals_sit_under_the_name_not_beside_it(self):
+        block = self.css[self.css.index(".medals {"):]
+        block = block[:block.index("}")]
+        self.assertIn("display: block;", block)
+        self.assertIn("white-space: nowrap;", block, "three medals must not wrap mid-row")
+        # Scoped: .player-name is also a match-card class, so an unscoped rule
+        # would restyle every fixture card on the Schedule.
+        self.assertIn(".player-cell .player-name { display: block; }", self.css)
+
+    def test_the_worker_derives_both_fields_from_one_pass(self):
+        # `wins` has always been the gold count, so it is read off the medal
+        # totals rather than walked a second time — running both aggregations
+        # was the same season twice for the same answer.
+        self.assertIn("const medals = computePodiumTotals(memberList, matchList, picks, slates, keyOf);", self.worker)
+        self.assertIn("wins: medals[row.uid]?.gold || 0,", self.worker)
+        state = self.worker[self.worker.index("async function state(env, url"):self.worker.index("async function settle(")]
+        self.assertNotIn("computeRoundWins", state)
+        self.assertIn("podiums: medals[row.uid] || { gold: 0, silver: 0, bronze: 0 },", self.worker)
+        # One league-level pass, no per-member reads.
+        logic = (ROOT / "worker/src/logic.js").read_text()
+        fn = logic[logic.index("export function computePodiumTotals"):]
+        fn = fn[:fn.index("\n}")]
+        self.assertIn("for (const [period, all] of groupByPeriod(fixtures, keyOf))", fn)
+        self.assertNotIn("kvGet", fn)
+
+
 if __name__ == "__main__":
     unittest.main()

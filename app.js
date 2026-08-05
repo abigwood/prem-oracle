@@ -474,8 +474,9 @@ const periodOfFixture = (fixture) =>
 /** Sequential week number for a window period, or null if it isn't one. */
 function weekNumberFor(period) {
   if (!isWindowKey(period)) return null;
-  const index = periodsInOrder().indexOf(String(period));
-  return index < 0 ? null : index + 1;
+  // A map lookup against the prepared index, not a rescan of every fixture.
+  const at = periodIndex().index.get(String(period));
+  return at === undefined ? null : at + 1;
 }
 
 const MONTHS_SHORT = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -560,40 +561,6 @@ function weekStrip(selected, attribute, only = null) {
     </div>`;
 }
 
-/**
- * The season view: every week of the season, each month named once and the
- * chips reduced to the day range under it.
- */
-function weekSeasonPicker(selected, attribute) {
-  const periods = periodsInOrder().filter(isWindowKey);
-  if (!periods.length) return "";
-  const current = leagueState?.currentPeriod ?? currentPeriodKey();
-  const months = [];
-  for (const period of periods) {
-    const key = weekMonthKey(period);
-    if (!months.length || months[months.length - 1].key !== key) {
-      months.push({ key, label: weekMonthLabel(period), weeks: [] });
-    }
-    months[months.length - 1].weeks.push(period);
-  }
-  return `${WEEK_CONVENTION}
-    <div class="week-months">
-      ${months.map((month) => `<div class="week-month">
-        <span class="week-month-label">${escapeHTML(month.label)}</span>
-        <div class="week-month-row" role="group" aria-label="${escapeHTML(month.label)}">
-          ${month.weeks.map((period) => {
-            const isSelected = String(period) === String(selected);
-            const isCurrent = String(period) === String(current);
-            const past = comparePeriods(period, current) < 0;
-            return `<button type="button"
-              class="week-day-chip${isCurrent ? " is-current" : ""}${isSelected ? " is-selected" : ""}${past ? " is-past" : ""}"
-              ${attribute}="${escapeHTML(period)}"
-              aria-label="Week ${weekNumberFor(period)}, ${escapeHTML(weekDateRange(period))}">${escapeHTML(weekDayRange(period))}</button>`;
-          }).join("")}
-        </div>
-      </div>`).join("")}
-    </div>`;
-}
 
 /**
  * How a period is named everywhere in the app.
@@ -626,8 +593,32 @@ const comparePeriods = (a, b) => {
 };
 
 /** Every period in the loaded fixture list, in order. */
+/**
+ * The ordered period list and a period-to-index map, prepared once per fixture
+ * list.
+ *
+ * This used to map, de-duplicate and sort the whole fixture list on EVERY call,
+ * and weekNumberFor() called it per chip — so drawing a 38-week strip rescanned
+ * nine hundred fixtures thirty-eight times and sorted thirty-eight times. That
+ * is where the calendar's 3.6 seconds came from. Keyed on the fixtures array
+ * itself, which is replaced wholesale whenever the feed loads, so a changed
+ * revision invalidates this for free.
+ */
+let periodIndexCache = { source: null, list: [], index: new Map() };
+
+function periodIndex() {
+  if (periodIndexCache.source === fixtures) return periodIndexCache;
+  const list = [...new Set(fixtures.map(periodOfFixture).filter((key) => key != null))].sort(comparePeriods);
+  periodIndexCache = {
+    source: fixtures,
+    list,
+    index: new Map(list.map((period, at) => [String(period), at])),
+  };
+  return periodIndexCache;
+}
+
 function periodsInOrder() {
-  return [...new Set(fixtures.map(periodOfFixture).filter((key) => key != null))].sort(comparePeriods);
+  return periodIndex().list;
 }
 
 /** The earliest period that has not finished kicking off. */
@@ -2075,6 +2066,18 @@ const RETAINED_PANEL_LIMIT = 8;
 let retainedPanels = new Map();
 let panelGeneration = 0;
 let mountedKey = null;
+/**
+ * What the mounted panel is ABOUT — league, tab, week — held apart from the
+ * truth stamp in its key. Newer truth for the same context is a refresh and the
+ * panel stays up; a different tab or week is a different question, and the old
+ * answer must not sit under the new one.
+ */
+let mountedContext = null;
+const sameContext = (code, tab, period) =>
+  mountedContext
+  && mountedContext.code === code
+  && mountedContext.tab === tab
+  && String(mountedContext.period) === String(period);
 
 /**
  * Per-league truth stamps. A single global stamp meant refreshing AAA changed
@@ -2115,7 +2118,9 @@ function seasonStages(state, isOwner) {
     ["banner", () => seasonBanner(state)],
     ["cabinet", () => trophyCabinet(state)],
     ["standings", () => seasonTableHtml(state, isOwner, true)],
-    ["weeks", () => (isMixedActive() ? weekSeasonPicker(selectedPeriod, "data-round-md") : "")],
+    // No month calendar. It cost 8,185 characters and 3.5 seconds of
+    // synchronous build to duplicate navigation the Weekly League dropdown
+    // already owns. No data is lost — every week is still reachable there.
     ["reveals", () => leagueRevealsHtml(state)],
   ];
 }
@@ -2193,14 +2198,25 @@ async function showResultsPanel({ status } = {}) {
     // browser has already measured.
     node.replaceChildren(retained);
     mountedKey = key;
+    mountedContext = { code, tab, period };
     syncShareLabel();
     traceTap("panel-retained-hit", { tab });
     return;
   }
   traceTap("panel-retained-miss", { tab });
 
-  node.replaceChildren(pulsingNode(status ?? (tab === "season" ? "Loading season…" : `Loading ${weekLabelFor(period)}…`)));
-  traceTap("results-shell-inserted", { tab });
+  const showing = node.firstElementChild;
+  // Valid ONLY if it answers the same question. A panel for another week is
+  // not stale content to hold on to; it is the wrong table.
+  const valid = showing
+    && !showing.classList?.contains("view-loading")
+    && sameContext(code, tab, period);
+  if (!valid) {
+    node.replaceChildren(pulsingNode(status ?? (tab === "season" ? "Loading season…" : `Loading ${weekLabelFor(period)}…`)));
+    traceTap("results-shell-inserted", { tab });
+  } else {
+    traceTap("results-kept-visible", { tab });
+  }
   await nextPaint();
   traceTap("results-shell-painted", { tab });
   if (stale()) { traceTap("panel-discarded", { tab, reason: "after-shell" }); return; }
@@ -2208,10 +2224,12 @@ async function showResultsPanel({ status } = {}) {
   const state = leagueState;
   const panel = document.createElement("div");
   panel.className = "results-panel";
-  // Inserted empty, so each stage lands in front of the viewer rather than
-  // arriving as one block at the end.
-  node.replaceChildren(panel);
-  traceTap("panel-build-start", { tab });
+  // If something valid is already on screen it STAYS there while the
+  // replacement is built offscreen — a refresh must never blank a table the
+  // viewer is reading, and rebuilding in place makes the content height bounce.
+  const holding = valid;
+  if (!holding) node.replaceChildren(panel);
+  traceTap("panel-build-start", { tab, holding: !!holding });
   const complete = await fillPanelProgressively(panel, {
     state, isOwner: state && !state.error && state.owner === uid(), tab, period, stale,
   });
@@ -2219,7 +2237,14 @@ async function showResultsPanel({ status } = {}) {
   if (!complete || stale()) return;
 
   retainPanel(key, panel);
+  // One atomic swap when the whole panel is ready, so nothing disappears and
+  // reappears in between.
+  if (holding) {
+    node.replaceChildren(panel);
+    traceTap("panel-swapped", { tab });
+  }
   mountedKey = key;
+  mountedContext = { code, tab, period };
   syncShareLabel();
   traceTap("panel-painted", { tab });
 }
@@ -2293,6 +2318,7 @@ async function switchLeaguePill(code) {
 
   // Identity moves with the pill, so nothing can paint one league's data under
   // another's name — including the panel job started below.
+  closeWeeklyPicker();
   activeLeague = code;
   selectedPeriod = null;
   roundState = null;
@@ -2358,18 +2384,149 @@ function roundToggle() {
   const week = weekNumberFor(period);
   const label = week == null ? periodLabel(period) : `Week ${week}`;
   return `<div class="round-toggle" role="tablist">
-    <button type="button" role="tab" class="round-seg${leagueTab === "matchday" ? " active" : ""}" aria-selected="${leagueTab === "matchday"}" data-round-tab="matchday">${escapeHTML(label)} ▾</button>
-    <button type="button" role="tab" class="round-seg${leagueTab === "season" ? " active" : ""}" aria-selected="${leagueTab === "season"}" data-round-tab="season">Season</button>
+    <button type="button" role="tab" class="round-seg${leagueTab === "matchday" ? " active" : ""}"
+      aria-selected="${leagueTab === "matchday"}" aria-expanded="${matchdayPickerOpen}"
+      data-round-tab="matchday" title="${escapeHTML(label)}">Weekly League ▾</button>
+    <button type="button" role="tab" class="round-seg${leagueTab === "season" ? " active" : ""}" aria-selected="${leagueTab === "season"}" data-round-tab="season">Season League</button>
   </div>`;
 }
 
-function matchdayPicker() {
-  if (!matchdayPickerOpen) return "";
-  const current = selectedPeriod ?? currentPeriodKey();
-  // One control for both league shapes: the strip labels itself from the
-  // period, so a matchweek league reads "Matchweek 11" and a window league
-  // "Week 11 / 3–9 Nov".
-  return weekStrip(current, "data-round-md");
+/**
+ * The Weekly League dropdown, opened and closed against its own container.
+ *
+ * It used to live in the rendered string, so opening it meant a global render —
+ * the whole League screen rebuilt to reveal a list of weeks. The container is
+ * always in the DOM and always stable; only its contents move.
+ *
+ * The built picker is retained as a real node keyed by league and fixture
+ * revision, so reopening reattaches the same element rather than rebuilding it.
+ */
+let retainedPickers = new Map();
+let pickerGeneration = 0;
+
+// The current week is highlighted inside the picker, so it belongs in the key —
+// otherwise the highlight goes stale as the week rolls over while the fixture
+// revision stays the same.
+const pickerKey = () =>
+  [
+    activeLeague,
+    Object.values(fixtureRevisions).join(","),
+    selectedPeriod ?? currentPeriodKey(),
+    // The CURRENT week is highlighted separately from the SELECTED one, so a
+    // rollover must invalidate the picker even when the selection has not moved.
+    leagueState?.currentPeriod ?? "",
+  ].join("|");
+
+function pickerIsland() {
+  return document.querySelector("[data-picker-island]");
+}
+
+function markPickerExpanded(open) {
+  const seg = document.querySelector('[data-round-tab="matchday"]');
+  if (seg) seg.setAttribute("aria-expanded", open ? "true" : "false");
+}
+
+/**
+ * Opens or closes the dropdown in the tap's own task. No global render, no
+ * request, and the scroller is not touched.
+ */
+async function toggleWeeklyPicker() {
+  const generation = ++pickerGeneration;
+  matchdayPickerOpen = !matchdayPickerOpen;
+  markPickerExpanded(matchdayPickerOpen);
+  traceTap("picker-toggled", { open: matchdayPickerOpen });
+
+  const island = pickerIsland();
+  if (!island) return;
+  if (!matchdayPickerOpen) {
+    island.replaceChildren();
+    return;
+  }
+
+  const key = pickerKey();
+  const retained = retainedPickers.get(key);
+  if (retained) {
+    island.replaceChildren(retained);
+    traceTap("picker-retained-hit", {});
+    return;
+  }
+
+  // Nothing to reveal yet: acknowledge, paint, then build.
+  island.replaceChildren(pulsingNode("Loading weeks…"));
+  traceTap("picker-shell-inserted", {});
+  await nextPaint();
+  // A close, a reopen, a league switch or a new week all void this job.
+  if (generation !== pickerGeneration || !matchdayPickerOpen || key !== pickerKey()) {
+    traceTap("picker-discarded", {});
+    return;
+  }
+
+  const built = document.createElement("div");
+  built.className = "picker-weeks";
+  built.innerHTML = weekStrip(selectedPeriod ?? currentPeriodKey(), "data-round-md");
+  retainedPickers.set(key, built);
+  if (retainedPickers.size > 4) retainedPickers.delete(retainedPickers.keys().next().value);
+  const target = pickerIsland();
+  if (!target || !matchdayPickerOpen || generation !== pickerGeneration) {
+    traceTap("picker-discarded", {});
+    return;
+  }
+  target.replaceChildren(built);
+  traceTap("picker-built", { chars: built.innerHTML.length });
+}
+
+let weekSelectionGeneration = 0;
+
+/**
+ * Choosing a week from the Weekly League dropdown.
+ *
+ * The chip is marked and the picker shut in the caller's own task; the table
+ * comes from that week's cache if there is one and from a pulsing
+ * acknowledgement if there is not. Either way exactly one refresh runs — a
+ * cache hit still revalidates, because the whole point of showing cached data
+ * instantly is that something checks it afterwards.
+ */
+async function selectWeeklyPeriod(week) {
+  const generation = ++weekSelectionGeneration;
+  const code = activeLeague;
+  selectedPeriod = week;
+  leagueTab = "matchday";
+
+  for (const chip of document.querySelectorAll("[data-round-md]")) {
+    const chosen = chip.dataset.roundMd === week;
+    chip.classList.toggle("is-selected", chosen);
+    chip.setAttribute("aria-current", chosen ? "date" : "false");
+  }
+  closeWeeklyPicker();
+  markSegment("matchday");
+
+  // That week's own cached table, or nothing at all. Leaving the previous
+  // week's roundState would paint last week's table under this week's heading.
+  const cached = cachedRoundState(code, week);
+  roundState = cached && !cached.error ? cached : null;
+  traceTap("week-selected", { week, cached: !!cached });
+  await showResultsPanel();
+
+  await loadRoundState();
+  // Only the week still selected, in the league still active, on the tab still
+  // showing, from the newest selection, may touch the screen.
+  if (generation !== weekSelectionGeneration
+    || code !== activeLeague
+    || leagueTab !== "matchday"
+    || String(week) !== String(selectedPeriod)) {
+    traceTap("week-selection-discarded", { week });
+    return;
+  }
+  await showResultsPanel();
+  syncShareLabel();
+}
+
+function closeWeeklyPicker() {
+  if (!matchdayPickerOpen) return;
+  pickerGeneration++;
+  matchdayPickerOpen = false;
+  markPickerExpanded(false);
+  pickerIsland()?.replaceChildren();
 }
 
 function fixtureHasResult(match) {
@@ -3286,7 +3443,7 @@ function leagueView() {
           <button class="secondary wide" type="button" data-share-league="${state.code}">Invite mates</button>
           <button class="secondary wide" type="button" data-league-nick="${state.code}">Change my name in this league</button>
           ${isOwner ? `<button class="link-danger" type="button" data-delete-league="${state.code}">Delete league</button>` : ""}
-          ${supportsRounds ? `${roundToggle()}${matchdayPicker()}` : ""}
+          ${supportsRounds ? `${roundToggle()}<div class="picker-island" data-picker-island></div>` : ""}
           ${inner}
           <button class="whatsapp-share wide" type="button" data-export-league-table="${state.code}">${shareLabel}</button>
         </section>`;
@@ -3558,6 +3715,7 @@ function render(options = {}) {
     // The island's contents are not part of the rendered string, so a rebuilt
     // shell has an empty placeholder and the mounted panel must be put back.
     mountedKey = null;
+    mountedContext = null;
     traceTap("render", { view: currentView, chars: html.length });
   }
   // Cheap when a retained node exists; progressive when it does not. Either
@@ -3677,6 +3835,7 @@ async function navigateToView(view) {
     expandedFixtureId = null;
     appScroller()?.scrollTo({ top: 0 });
   }
+  if (currentView === "league" && view !== "league") closeWeeklyPicker();
   currentView = view;
   clearFlash();
   traceTap("nav-enter", { view });
@@ -4122,14 +4281,17 @@ document.addEventListener("click", async (event) => {
     const wanted = roundTab.dataset.roundTab;
     // Reopening the week that is already showing is the picker, not a swap.
     if (wanted === "matchday" && leagueTab === "matchday") {
-      matchdayPickerOpen = !matchdayPickerOpen;
-      render();
+      // Opening the dropdown is not a screen change. No global render, no
+      // request, no scroll reset — just its own container.
+      toggleWeeklyPicker();
       return;
     }
     // The segment moves in the SAME task as the tap. Everything after this is
     // allowed to take its time; this is not.
     leagueTab = wanted;
-    matchdayPickerOpen = false;
+    // The real close path, not just a flag: it voids any pending picker build,
+    // clears the island and corrects aria-expanded.
+    closeWeeklyPicker();
     markSegment(wanted);
     traceTap("segment-acknowledged", { tab: wanted });
     const needsRound = wanted === "matchday"
@@ -4146,12 +4308,7 @@ document.addEventListener("click", async (event) => {
   }
   const roundMd = event.target.closest("[data-round-md]");
   if (roundMd) {
-    selectedPeriod = roundMd.dataset.roundMd;
-    leagueTab = "matchday";
-    matchdayPickerOpen = false;
-    render();
-    await loadRoundState();
-    render();
+    selectWeeklyPeriod(roundMd.dataset.roundMd);
     return;
   }
   const del = event.target.closest("[data-delete-league]");

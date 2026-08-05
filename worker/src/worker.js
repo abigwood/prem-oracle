@@ -8,7 +8,7 @@ import {
   computeCabinet,
   computePodium,
   computeRoundTable,
-  computeRoundWins,
+  computePodiumTotals,
   computeTable,
   computeTableWithMovement,
   fixturesByMatchweek,
@@ -1292,7 +1292,10 @@ async function state(env, url) {
   const slates = slateAware(league) ? await readSlates(env, code) : {};
   const scopedFixtures = applySlates(matchList.map((match) => ({ ...match, period: keyOf(match) })), slates);
   const scopedCompleted = applySlates(completed, slates);
-  const wins = computeRoundWins(memberList, matchList, picks, slates, keyOf);
+  // ONE aggregation pass. `wins` has always been the gold count, so it is
+  // derived from these totals rather than walked for a second time — running
+  // both was the same season twice for the same answer.
+  const medals = computePodiumTotals(memberList, matchList, picks, slates, keyOf);
   const unplayed = scopedFixtures.filter((match) => match.period != null && !normaliseResult(match) && !isVoided(match));
   // "Current" is the earliest period still to be played. Window keys sort
   // chronologically as strings; matchweek numbers need numeric comparison —
@@ -1354,7 +1357,11 @@ async function state(env, url) {
     awaitingPublish: currentPeriod != null && !currentPublished,
     lineupFixtureIds: lineup,
     droppedFixtureIds: dropped,
-    table: computeTableWithMovement(memberList, scopedCompleted, picks).map((row) => ({ ...row, wins: wins[row.uid] || 0 })),
+    table: computeTableWithMovement(memberList, scopedCompleted, picks).map((row) => ({
+      ...row,
+      wins: medals[row.uid]?.gold || 0,
+      podiums: medals[row.uid] || { gold: 0, silver: 0, bronze: 0 },
+    })),
     reveals: buildReveals(memberList, scopedFixtures, picks, Date.now()).slice(0, 20),
     cabinet: viewer ? computeCabinet(viewer, memberList, matchList, picks, slates, keyOf) : null,
   }, 200, env);

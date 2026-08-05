@@ -622,6 +622,29 @@ export function computeCabinet(uid, members, fixtures, picksByMatch, slatesByPer
 }
 
 // Per-uid tally of matchday wins across every complete round.
+/**
+ * Every member's gold, silver and bronze across the season, in ONE pass over the
+ * completed rounds — the same pass shape as computeRoundWins, so a medal tally
+ * costs a league-level walk rather than a read per member.
+ *
+ * The rules are the existing ones and are not restated here: computePodium
+ * decides places, which means shared places, the two-player guard (a league of
+ * two has a gold and a silver and no bronze), dead weeks awarding nothing, and
+ * a mid-season joiner having no claim on weeks that kicked off before they
+ * arrived all hold exactly as they do everywhere else.
+ */
+export function computePodiumTotals(members, fixtures, picksByMatch, slatesByPeriod = {}, keyOf = periodOf) {
+  const totals = Object.fromEntries(members.map((member) => [member.uid, { gold: 0, silver: 0, bronze: 0 }]));
+  for (const [period, all] of groupByPeriod(fixtures, keyOf)) {
+    const roundFixtures = slateFixtures(slatesByPeriod[period] || null, all);
+    for (const entry of computePodium(members, roundFixtures, picksByMatch)) {
+      const row = totals[entry.uid];
+      if (row && entry.place in row) row[entry.place] += 1;
+    }
+  }
+  return totals;
+}
+
 export function computeRoundWins(members, fixtures, picksByMatch, slatesByPeriod = {}, keyOf = periodOf) {
   const wins = Object.fromEntries(members.map((member) => [member.uid, 0]));
   for (const [period, all] of groupByPeriod(fixtures, keyOf)) {

@@ -11,6 +11,9 @@ import {
   computeRoundWins,
   computeTable,
   computeTableWithMovement,
+  groupByPeriod,
+  matchToCompleted,
+  podiumFromTable,
   fixturesByMatchweek,
   fixturesNeedingNotification,
   isDraftSlate,
@@ -122,8 +125,32 @@ const applyCors = (response, env, request) => {
   }
   return response;
 };
-const json = (body, status, env) =>
-  new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", ...cors(env) } });
+const json = (body, status, env, extraHeaders = {}) =>
+  new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", ...cors(env), ...extraHeaders } });
+
+/**
+ * A revision for a fixture list: it changes when anything a client would draw
+ * changes, and not otherwise. Clients put it in the URL so a changed feed busts
+ * every cache immediately rather than waiting out max-age, while an unchanged
+ * one stays a cache hit forever.
+ */
+function fixtureRevision(list) {
+  let hash = 2166136261;
+  const bite = (text) => {
+    for (let i = 0; i < text.length; i++) {
+      hash ^= text.charCodeAt(i);
+      hash = Math.imul(hash, 16777619);
+    }
+  };
+  bite(String(list.length));
+  for (const match of list) {
+    bite(String(match.id));
+    bite(String(match.status || ""));
+    bite(String(match.startAt || ""));
+    bite(String(match.result ? match.result.join("-") : ""));
+  }
+  return (hash >>> 0).toString(36);
+}
 const appleAppSiteAssociation = () =>
   new Response(JSON.stringify({
     applinks: {
@@ -318,17 +345,27 @@ async function getFixtures(env, request) {
   const requested = url.searchParams.get("competition");
   if (requested && !isCompetition(requested)) return json({ error: "unknown competition" }, 400, env);
   const competition = normaliseCompetition(requested);
-  const list = await fixtures(env, competition, url.searchParams.get("refresh") === "1");
+  const fresh = url.searchParams.get("refresh") === "1";
+  const list = await fixtures(env, competition, fresh);
   const cache = cacheFor(competition);
+  const revision = fixtureRevision(list);
+  // 467KB per launch was being re-downloaded because the client cache-busted
+  // the URL and the response carried no caching policy at all. Five minutes of
+  // freshness with a day of stale-while-revalidate means a launch is a cache
+  // hit, and a changed feed still lands promptly via the revision in the URL.
+  const headers = fresh
+    ? { "cache-control": "no-store" }
+    : { "cache-control": "public, max-age=300, stale-while-revalidate=86400", etag: `W/"${revision}"` };
   return json({
     ok: true,
     competition,
     competitionName: COMPETITIONS[competition].name,
+    revision,
     fixtures: list,
     teams: cache.intel.teams,
     modelVersion: cache.intel.modelVersion,
     settlement: "manual",
-  }, 200, env);
+  }, 200, env, headers);
 }
 
 // GET /ics/<matchId>[?pick=2-1] — one fixture as a calendar event.
@@ -462,6 +499,9 @@ async function createLeague(env, body) {
   await kvPut(env, leagueMemberKey(code, uid), { nick: user.nickname || "Anon", since: now });
   user.leagues = [...new Set([...(user.leagues || []), code])];
   await kvPut(env, `user:${uid}`, user);
+  // A league is born with a snapshot, so a missing one is near-impossible.
+  await indexLeague(env, code, true);
+  await writeSnapshot(env, { ...setup.record, code, name }, "creation");
   return json({
     ok: true, code, name,
     ...setup.record,
@@ -496,6 +536,7 @@ async function setWeeklyRule(env, body) {
   league.fixtureLimit = league.fixtureMode === "limited" ? validated.rule.count : null;
   await kvPut(env, `league:${code}`, league);
   await updateCustomMixIndex(env, code, league.fixtureMode === "limited");
+  await writeSnapshot(env, league, "weekly-rule");
   return json({ ok: true, code, weeklyRule: validated.rule }, 200, env);
 }
 
@@ -613,6 +654,7 @@ function readPeriod(league, body) {
  * carries the record the caller read, and a mismatch means somebody else got
  * there first.
  */
+// Publishing changes what the league is asking for, so the snapshot follows.
 async function publishSlate(env, league, period, { fixtureIds, mode, ruleSource, setBy, pool, weekNo = null, announce = true }) {
   const code = league.code;
   const existing = await kvGet(env, slateKey(code, period));
@@ -644,6 +686,7 @@ async function publishSlate(env, league, period, { fixtureIds, mode, ruleSource,
     league.hadSlates = true;
     await kvPut(env, `league:${code}`, league);
   }
+  await writeSnapshot(env, league, "publish");
   if (!announce) return { published: true, slate };
   const memberList = await members(env, league);
   const audience = memberList.filter((member) => member.uid !== setBy).map((member) => member.uid);
@@ -699,6 +742,7 @@ async function amendSlate(env, league, period, { fixtureIds, mode, setBy, pool, 
     memberList.filter((member) => member.uid !== setBy).map((member) => member.uid),
     { title: "Line-up updated", body: `${league.name}: ${describeDelta(delta)} — update your picks before kick-off.` }
   );
+  await writeSnapshot(env, league, "amendment");
   return { amended: true, slate: next, delta, lockAt: slateLockAt(next, pool), weekNo };
 }
 
@@ -822,10 +866,15 @@ async function deleteAccount(env, body) {
     if (!league) continue;
     const remaining = (await members(env, league)).filter((member) => member.uid !== uid);
     await env.KV.delete(leagueMemberKey(code, uid));
-    if (league.owner !== uid) continue;
+    if (league.owner !== uid) {
+      await writeSnapshot(env, league, "leave");
+      continue;
+    }
     if (!remaining.length) {
       await env.KV.delete(`league:${code}`);
       await updateCustomMixIndex(env, code, false);
+      await clearSnapshot(env, code);
+      await indexLeague(env, code, false);
       closed.push(code);
       continue;
     }
@@ -839,6 +888,8 @@ async function deleteAccount(env, body) {
   await env.KV.delete(`push:${uid}`);
   await env.KV.delete(`user:${uid}`);
   for (const entry of succession) {
+    const league = await kvGet(env, `league:${entry.code || entry.league || ""}`);
+    if (league) await writeSnapshot(env, league, "host-succession");
     await pushToUids(env, [entry.uid], `You're now the host of ${entry.name} — you pick the fixtures each matchweek.`);
   }
   return json({
@@ -867,6 +918,7 @@ async function joinLeague(env, body) {
   });
   user.leagues = [...new Set([...(user.leagues || []), code])];
   await kvPut(env, `user:${uid}`, user);
+  await writeSnapshot(env, league, "join");
   return json({ ok: true, code, name: league.name, recovery: user.recovery }, 200, env);
 }
 
@@ -885,6 +937,8 @@ async function deleteLeague(env, body) {
     await kvPut(env, `user:${memberUid}`, user);
   }));
   await Promise.all(memberList.map(({ uid: memberUid }) => env.KV.delete(leagueMemberKey(code, memberUid))));
+  await clearSnapshot(env, code);
+  await indexLeague(env, code, false);
   if (env.KV.list) {
     const slateKeys = await listAllKeys(env, `custom_slate:${code}:`);
     await Promise.all(slateKeys.map((key) => env.KV.delete(key)));
@@ -918,6 +972,7 @@ async function kickMember(env, body) {
     env.KV.delete(leagueMemberKey(code, memberUid)),
     user ? kvPut(env, `user:${memberUid}`, user) : Promise.resolve(),
   ]);
+  await writeSnapshot(env, league, "leave");
   return json({ ok: true, code, removed: memberUid }, 200, env);
 }
 
@@ -951,6 +1006,12 @@ async function setProfile(env, body) {
     await kvPut(env, leagueMemberKey(code, uid), { ...member, nick: nickname });
     updated.push(code);
   }
+  // Named separately from `rename`: the launch-time self-heal shipped in 1.6.2
+  // can change a nick in leagues whose snapshot was built before it ran.
+  for (const code of updated) {
+    const league = await kvGet(env, `league:${code}`);
+    if (league) await writeSnapshot(env, { ...league, code }, "profile-propagation");
+  }
   return json({ ok: true, uid, nickname, updated, kept, recovery: user.recovery }, 200, env);
 }
 
@@ -972,6 +1033,7 @@ async function updateLeagueNick(env, body) {
     delete league.names[uid];
     await kvPut(env, `league:${code}`, league);
   }
+  await writeSnapshot(env, league, "rename");
   return json({ ok: true, code, uid, nick }, 200, env);
 }
 
@@ -1166,7 +1228,265 @@ async function pickerPreload(env, league, period, pool, stored) {
   };
 }
 
-async function state(env, url) {
+// --- League snapshots -------------------------------------------------------
+// One KV value per league, holding everything the season screen draws. A tap
+// used to pay a full season assembly — ~940 KV reads on a mixed league, most of
+// a 1,000-subrequest budget — to render a table that only changes when
+// something actually happens. Snapshots move that cost to the moments truth
+// changes, where it is paid once for every member rather than once per tap.
+
+const SNAPSHOT_VERSION = 1;
+const snapshotKey = (code) => `snapshot:${String(code).toUpperCase()}`;
+const snapshotMetaKey = (code) => `snapmeta:${String(code).toUpperCase()}`;
+const SNAPSHOT_SERVING_KEY = "config:snapshot_serving";
+
+/** Every moment that changes what a snapshot should say. */
+const SNAPSHOT_TRIGGERS = [
+  "settlement",
+  "publish",
+  "amendment",
+  "join",
+  "leave",
+  "host-succession",
+  "rename",
+  "profile-propagation",
+  "weekly-rule",
+  "creation",
+];
+
+/**
+ * The league's settled history, in the shape computeCabinet() derives its
+ * answer from — ALL member rows per completed week, not just the podium, so a
+ * client can reproduce a viewer's cabinet exactly: their non-podium weeks, and
+ * the join-date filter that hides weeks played before they arrived.
+ *
+ * `lastKickoffMs` is what the join-date filter needs: computeCabinet keeps a
+ * week when ANY of its fixtures kicked off at or after the member joined, which
+ * is true exactly when the LAST one did.
+ */
+function settledHistory(memberList, matchList, picks, slates, keyOf) {
+  const history = [];
+  const grouped = groupByPeriod(matchList, keyOf);
+  const ordered = [...grouped.entries()].sort((a, b) => {
+    const numeric = Number(a[0]) - Number(b[0]);
+    return Number.isNaN(numeric) ? String(b[0]).localeCompare(String(a[0])) : -numeric;
+  });
+  for (const [period, all] of ordered) {
+    const slate = slates[period] || null;
+    const roundFixtures = slateFixtures(slate, all);
+    if (!roundComplete(roundFixtures)) continue;
+    const completed = roundFixtures.map(matchToCompleted);
+    const table = computeTable(memberList, completed, picks);
+    const awards = podiumFromTable(table, memberList.length);
+    const placeOf = new Map(awards.map((entry) => [entry.uid, entry.place]));
+    history.push({
+      period,
+      matchweek: Number.isNaN(Number(period)) ? null : Number(period),
+      slateType: slateType(slate),
+      fixtures: roundFixtures.length,
+      lastKickoffMs: Math.max(0, ...completed.map((match) => match.startMs || 0)),
+      rows: table.map((row) => ({
+        uid: row.uid,
+        pts: row.pts,
+        rank: table.filter((other) => other.pts > row.pts).length + 1,
+        place: placeOf.get(row.uid) || null,
+      })),
+    });
+  }
+  return history;
+}
+
+/**
+ * The whole season screen, assembled once. This is the ONLY place live
+ * assembly still happens; it runs on a rebuild trigger, never on a tap.
+ */
+async function buildSnapshot(env, league, trigger, nowMs = Date.now()) {
+  const code = String(league.code).toUpperCase();
+  const keyOf = leaguePeriodOf(league);
+
+  // The season payload is taken from the live path itself rather than
+  // reassembled here. Two implementations of the same answer would drift, and
+  // the one nobody reads while the flag is off would drift silently.
+  const seasonUrl = new URL(`https://snapshot.local/state?code=${encodeURIComponent(code)}`);
+  const payload = await (await state(env, seasonUrl, { live: true })).json();
+  if (payload.error) return null;
+  // Viewer-specific and host-specific fields are never frozen: the cabinet is
+  // derived per request, and a draft is read fresh.
+  const { cabinet: _cabinet, currentDraft: _draft, ...season } = payload;
+
+  const matchList = await leagueFixtures(env, league);
+  const memberList = await members(env, league);
+  const picks = await allPicks(env, matchList.map((match) => match.id));
+  const slates = slateAware(league) ? await readSlates(env, code) : {};
+
+  return {
+    version: SNAPSHOT_VERSION,
+    code,
+    season,
+    members: memberList.map((row) => ({ uid: row.uid, nick: row.nick, since: row.since || 0 })),
+    history: settledHistory(memberList, matchList, picks, slates, keyOf),
+    computedAt: nowMs,
+    trigger,
+  };
+}
+
+/** Writes the snapshot and its verification record. Idempotent by construction. */
+async function writeSnapshot(env, league, trigger, nowMs = Date.now()) {
+  if (!league?.code) return null;
+  // A snapshot is an optimisation. It must never be able to fail the operation
+  // that triggered it: a join that works but leaves a stale table is a
+  // performance bug, whereas a join that 500s is a broken product.
+  let snapshot = null;
+  try {
+    snapshot = await buildSnapshot(env, league, trigger, nowMs);
+  } catch {
+    return null;
+  }
+  if (!snapshot) return null;
+  await kvPut(env, snapshotKey(league.code), snapshot);
+  await kvPut(env, snapshotMetaKey(league.code), {
+    version: SNAPSHOT_VERSION,
+    computedAt: snapshot.computedAt,
+    trigger,
+    members: snapshot.members.length,
+    historyWeeks: snapshot.history.length,
+    verified: false,
+  });
+  return snapshot;
+}
+
+/**
+ * Rebuild without making anyone wait for it. Sol's rule: a tap never pays for
+ * an assembly, so a stale snapshot is served and the rebuild runs behind it.
+ */
+function rebuildSnapshot(env, ctx, league, trigger) {
+  const work = writeSnapshot(env, league, trigger).catch(() => null);
+  if (ctx?.waitUntil) ctx.waitUntil(work);
+  return work;
+}
+
+/**
+ * The viewer's Trophy Cabinet, filtered out of the league-level history in
+ * memory. The /state contract does not change: installed clients receive the
+ * same viewer-specific `cabinet` object they always did, and it costs no extra
+ * KV read. Must agree with computeCabinet() exactly — parity is tested.
+ */
+function cabinetFromSnapshot(snapshot, viewerUid) {
+  const member = (snapshot.members || []).find((row) => row.uid === viewerUid);
+  if (!member) return null;
+  const totals = { gold: 0, silver: 0, bronze: 0 };
+  const weeks = [];
+  for (const week of snapshot.history || []) {
+    // A member who joined mid-season has no claim on weeks already played.
+    if (member.since && !(week.lastKickoffMs >= member.since)) continue;
+    const row = (week.rows || []).find((entry) => entry.uid === viewerUid);
+    if (!row) continue;
+    if (row.place) totals[row.place] += 1;
+    weeks.push({
+      period: week.period,
+      matchweek: week.matchweek,
+      place: row.place || null,
+      rank: row.rank,
+      pts: row.pts,
+      slateType: week.slateType,
+      fixtures: week.fixtures,
+    });
+  }
+  return {
+    uid: viewerUid,
+    nick: member.nick,
+    ...totals,
+    podiums: totals.gold + totals.silver + totals.bronze,
+    weeks,
+  };
+}
+
+/**
+ * Removes a league's snapshot with direct deletes. Deliberately NOT a KV.list
+ * sweep: listing lags its own writes by up to a minute, which is exactly how
+ * orphaned slate keys have survived deletions before.
+ */
+async function clearSnapshot(env, code) {
+  await env.KV.delete(snapshotKey(code));
+  await env.KV.delete(snapshotMetaKey(code));
+}
+
+/**
+ * Settlement is the trigger that matters. A whistle changes every table that
+ * scored that fixture, so every affected league's snapshot is rebuilt — this is
+ * what makes "a mates' league table reflects full-time" true without anybody
+ * paying an assembly for it.
+ *
+ * Leagues are found from the Custom Mix index and the fixture ids that changed,
+ * not by listing, so a lagging KV.list cannot silently skip one.
+ */
+async function rebuildAfterSettlement(env, ctx) {
+  const codes = new Set();
+  for (const key of ["index:custom_mix", "index:leagues"]) {
+    for (const code of (await kvGet(env, key)) || []) codes.add(String(code).toUpperCase());
+  }
+  const work = (async () => {
+    for (const code of codes) {
+      const league = await kvGet(env, `league:${code}`);
+      if (league) await writeSnapshot(env, { ...league, code }, "settlement").catch(() => null);
+    }
+    return codes.size;
+  })();
+  if (ctx?.waitUntil) ctx.waitUntil(work);
+  return work;
+}
+
+/**
+ * Every league code, kept as an explicit list. Settlement has to reach every
+ * league, and KV.list lags its own writes by up to a minute — a league created
+ * moments before a whistle would be missed. Maintained by direct writes only.
+ */
+async function indexLeague(env, code, present) {
+  const current = new Set(((await kvGet(env, "index:leagues")) || []).map((entry) => String(entry).toUpperCase()));
+  const key = String(code).toUpperCase();
+  if (present === current.has(key)) return;
+  if (present) current.add(key); else current.delete(key);
+  await kvPut(env, "index:leagues", [...current]);
+}
+
+/**
+ * The season response, from the snapshot.
+ *
+ * Sol's rule: a tap NEVER waits for a live assembly. A missing snapshot returns
+ * null here so the caller falls through to the assembled path this once, and a
+ * rebuild is queued behind the response — it is not awaited.
+ *
+ * The response shape is unchanged. The viewer's cabinet is filtered out of the
+ * league-level history in memory, costing no extra read, so clients from build
+ * 12 and earlier cannot tell the difference.
+ */
+async function serveFromSnapshot(env, url, league, code) {
+  const snapshot = await kvGet(env, snapshotKey(code));
+  if (!snapshot || snapshot.version !== SNAPSHOT_VERSION || !snapshot.season) return null;
+
+  const viewer = url.searchParams.get("uid") || "";
+  // A draft belongs to the host and changes without any trigger firing, so it
+  // is read fresh rather than frozen — one small extra read, for hosts only.
+  const period = snapshot.season.currentPeriod;
+  const draftStored = viewer && viewer === league.owner && period != null && slateAware(league)
+    ? await kvGet(env, slateKey(code, period))
+    : null;
+
+  return json({
+    ...snapshot.season,
+    currentDraft: period == null ? null : publicDraft(draftStored, period),
+    cabinet: viewer ? cabinetFromSnapshot(snapshot, viewer) : null,
+    snapshotAt: snapshot.computedAt,
+  }, 200, env);
+}
+
+/** Is snapshot SERVING switched on? Rebuilds run regardless. */
+async function snapshotServingOn(env) {
+  const flag = await kvGet(env, SNAPSHOT_SERVING_KEY);
+  return flag?.enabled === true;
+}
+
+async function state(env, url, { live = false } = {}) {
   const code = String(url.searchParams.get("code") || "").toUpperCase();
   const league = await kvGet(env, `league:${code}`);
   if (!league) return json({ error: "league not found" }, 404, env);
@@ -1176,10 +1496,21 @@ async function state(env, url) {
   const keyOf = leaguePeriodOf(league);
   // Each competition's fixtures already carry their own results, so the union
   // below is a union of results:PL and results:ELC by construction.
+  const periodParam = url.searchParams.get("period") ?? url.searchParams.get("md");
+  const roundOnly = periodParam != null && String(periodParam).trim() !== "";
+
+  // The season screen from one KV read, when serving is switched on. A round
+  // request is already narrow (item 4) and keeps its own path.
+  if (!roundOnly && !live && await snapshotServingOn(env)) {
+    const served = await serveFromSnapshot(env, url, league, code);
+    if (served) return served;
+  }
+
   const matchList = await leagueFixtures(env, league);
   const memberList = await members(env, league);
-  const picks = await allPicks(env, matchList.map((match) => match.id));
-  const completed = matchList
+  const byPeriod = poolByPeriod(matchList, league);
+
+  const asCompleted = (list) => list
     .map((match) => ({
       id: match.id,
       startMs: Date.parse(match.lockAt || match.startAt) || 0,
@@ -1189,6 +1520,25 @@ async function state(env, url) {
       period: keyOf(match),
     }))
     .filter((match) => match.result || match.voided);
+
+  // A request for one week reads one week. It used to read a pick record for
+  // every fixture in the season — 932 on a mixed league — to answer a question
+  // about six of them, which is most of a 1,000-subrequest budget spent on
+  // rows that get thrown away.
+  const roundPeriod = roundOnly ? String(periodParam).trim() : null;
+  const roundStored = roundOnly && slateAware(league)
+    ? await kvGet(env, slateKey(code, roundPeriod))
+    : null;
+  const roundSlate = isPublishedSlate(roundStored) ? roundStored : null;
+  const roundPool = roundOnly ? (byPeriod.get(roundPeriod) || []) : [];
+  const roundFixtures = roundOnly ? slateFixtures(roundSlate, roundPool) : [];
+
+  const scoredList = roundOnly ? roundPool : matchList;
+  const pickIds = roundOnly
+    ? [...new Set([...roundFixtures, ...roundPool].map((match) => match.id))]
+    : matchList.map((match) => match.id);
+  const picks = await allPicks(env, pickIds);
+  const completed = asCompleted(scoredList);
 
   const rule = leagueWeeklyRule(league);
   const identity = {
@@ -1206,14 +1556,11 @@ async function state(env, url) {
     customMix: plan.mode === "limited",
   };
 
-  const byPeriod = poolByPeriod(matchList, league);
-  const periodParam = url.searchParams.get("period") ?? url.searchParams.get("md");
-  if (periodParam != null && String(periodParam).trim()) {
-    const period = String(periodParam).trim();
-    const stored = slateAware(league) ? await kvGet(env, slateKey(code, period)) : null;
-    const slate = isPublishedSlate(stored) ? stored : null;
-    const pool = byPeriod.get(period) || [];
-    const roundFixtures = slateFixtures(slate, pool);
+  if (roundOnly) {
+    const period = roundPeriod;
+    const stored = roundStored;
+    const slate = roundSlate;
+    const pool = roundPool;
     const scoped = applySlates(completed.filter((match) => match.period === period),
       slate ? { [period]: slate } : {});
     const table = computeTable(memberList, scoped, picks).map((row, index) => ({ ...row, rank: index + 1 }));
@@ -1348,11 +1695,13 @@ async function settle(env, body) {
     clearFixtureCache(competition);
     written[resultsKey(competition)] = Object.keys(next).length;
   }
+  const rebuilt = await rebuildAfterSettlement(env, null);
   return json({
     ok: true,
     competitions: [...touched],
     written,
     matches: Object.values(stores).reduce((total, store) => total + Object.keys(store).length, 0),
+    leaguesRebuilt: rebuilt,
     settlement: "manual",
   }, 200, env);
 }

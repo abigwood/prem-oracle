@@ -23,6 +23,13 @@ function lift(startsWith) {
   return APP.slice(start, end + 2);
 }
 
+/** One line, verbatim — for the single-expression const arrows. */
+function liftLine(startsWith) {
+  const start = APP.indexOf(startsWith);
+  if (start < 0) throw new Error(`not found in app.js: ${startsWith}`);
+  return APP.slice(start, APP.indexOf("\n", start));
+}
+
 // --- 1. the league loaders --------------------------------------------------
 
 const NICKS = { AAA: "Adam", BBB: "Biggers" };
@@ -31,9 +38,9 @@ const NICKS = { AAA: "Adam", BBB: "Biggers" };
  * app.js's two loaders over a stub API, with a per-league delay so responses can
  * be made to arrive in the wrong order.
  */
-function loaders({ delays = {} } = {}) {
+function loaders({ delays = {}, fail = false } = {}) {
   const paints = [];
-  const build = new Function("delays", "paints", `
+  const build = new Function("delays", "paints", "shouldFail", `
     "use strict";
     let activeLeague = null, leagueState = null, roundState = null;
     let selectedPeriod = null, leagueTab = "matchday", leagueStates = {};
@@ -43,17 +50,22 @@ function loaders({ delays = {} } = {}) {
 
     const codeOf = (path) => /code=([A-Z]+)/.exec(path)[1];
     const periodOf = (path) => (/period=([^&]+)/.exec(path) || [])[1] ?? null;
-    const api = (path) => new Promise((resolve) => {
+    const api = (path) => new Promise((resolve, reject) => {
       const code = codeOf(path);
       const body = {
         code, name: code + " League", competitions: ["PL"], currentPeriod: 1,
         period: periodOf(path), rounds: true,
         table: [{ uid: "u1", nick: NICKS[code] }], podium: [], reveals: [], cabinet: [],
       };
-      setTimeout(() => resolve(body), delays[code] ?? 0);
+      setTimeout(() => (shouldFail ? reject(new Error("network down")) : resolve(body)), delays[code] ?? 0);
     });
 
     const uid = () => "u1";
+    let seasonFlights = 0, roundFlights = 0;
+    const countingApi = (path) => {
+      if (path.includes("period=")) roundFlights++; else seasonFlights++;
+      return api(path);
+    };
     const rememberCompetition = () => false;
     const loadFixtures = async () => {};
     const saveLeagueName = () => {};
@@ -62,13 +74,29 @@ function loaders({ delays = {} } = {}) {
     const removeStoredLeague = () => {};
     const leagueSupportsRounds = () => true;
     const currentPeriodKey = () => 1;
+    let roundStates = {};
+    const leagueCodes = ["AAA", "BBB"];
+    const localStorage = { setItem() {}, getItem: () => null };
+    const STORAGE = { roundStates: "k" };
+    ${liftLine("const roundCacheKey =")}
+    ${lift("function cacheRoundState(code, period, state)")}
+    ${lift("function cachedRoundState(code, period)")}
     const render = () => paints.push({ card: leagueState?.code ?? null, table: roundState?.code ?? null });
 
+    const stateFlights = new Map();
+    ${lift("function fetchState(path)").replace("api(path)", "countingApi(path)")}
+    ${liftLine("const seasonStatePath =")}
+    ${liftLine("const roundStatePath =")}
     ${lift("async function loadLeagueState()")}
     ${lift("async function loadRoundState()")}
 
     return {
       switchTo: (code) => { activeLeague = code; return loadLeagueState(); },
+      loadRound: () => { activeLeague = activeLeague || "AAA"; selectedPeriod = 1; return loadRoundState(); },
+      flights: () => seasonFlights + roundFlights,
+      seasonFlights: () => seasonFlights,
+      roundFlights: () => roundFlights,
+      inFlight: () => stateFlights.size,
       settled: () => ({
         pill: activeLeague,
         card: leagueState?.code ?? null,
@@ -77,7 +105,7 @@ function loaders({ delays = {} } = {}) {
       }),
     };
   `);
-  return { ...build(delays, paints), paints };
+  return { ...build(delays, paints, fail), paints };
 }
 
 test("the slower of two league switches never paints over the newer one", async () => {
@@ -117,6 +145,52 @@ test("an unraced switch still loads normally", async () => {
   assert.deepEqual(app.settled(), { pill: "AAA", card: "AAA", nick: "Adam", table: "AAA" });
   await app.switchTo("BBB");
   assert.deepEqual(app.settled(), { pill: "BBB", card: "BBB", nick: "Biggers", table: "BBB" });
+});
+
+// --- 1b. coalescing ---------------------------------------------------------
+
+test("opening a league twice at once makes ONE season request", async () => {
+  // The launch path, the tab navigation and the league switch all used to ask
+  // independently, and each paid the full server assembly.
+  const app = loaders({ delays: { AAA: 40 } });
+  await Promise.all([app.switchTo("AAA"), app.switchTo("AAA"), app.switchTo("AAA")]);
+  assert.equal(app.seasonFlights(), 1, "three opens, one season request");
+  assert.ok(app.roundFlights() <= 1, `and at most one round request, got ${app.roundFlights()}`);
+  assert.deepEqual(app.settled(), { pill: "AAA", card: "AAA", nick: "Adam", table: "AAA" });
+});
+
+test("the ROUND request coalesces too, not just the season one", async () => {
+  // It runs the same assembly server-side, so a duplicate costs just as much.
+  const app = loaders({ delays: { AAA: 30 } });
+  await Promise.all([app.loadRound(), app.loadRound(), app.loadRound()]);
+  assert.equal(app.roundFlights(), 1, "three round loads, one request");
+});
+
+test("a season and a round request are different flights", async () => {
+  const app = loaders({ delays: { AAA: 20 } });
+  await Promise.all([app.switchTo("AAA"), app.loadRound()]);
+  assert.equal(app.seasonFlights(), 1, "the season asked once");
+  assert.equal(app.roundFlights(), 1, "the round asked once, separately");
+});
+
+test("two different leagues are not coalesced into one", async () => {
+  const app = loaders({ delays: { AAA: 20, BBB: 20 } });
+  await Promise.all([app.switchTo("AAA"), app.switchTo("BBB")]);
+  assert.equal(app.seasonFlights(), 2, "one each, not shared");
+});
+
+test("a flight is released when it settles, so the next open refetches", async () => {
+  const app = loaders({ delays: { AAA: 5 } });
+  await app.switchTo("AAA");
+  assert.equal(app.inFlight(), 0, "nothing left holding the map");
+  await app.switchTo("AAA");
+  assert.equal(app.seasonFlights(), 2, "a later open is a real request, not a stale promise");
+});
+
+test("a failed request is not cached as a flight", async () => {
+  const app = loaders({ delays: { AAA: 5 }, fail: true });
+  await app.switchTo("AAA");
+  assert.equal(app.inFlight(), 0, "a failure must be retryable");
 });
 
 // --- 2. renaming in one league ----------------------------------------------

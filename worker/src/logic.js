@@ -75,7 +75,7 @@ export function computeTableWithMovement(members, completed, picksByMatch) {
   });
 }
 
-function matchToCompleted(match) {
+export function matchToCompleted(match) {
   return {
     id: match.id,
     startMs: Date.parse(match.lockAt || match.startAt) || 0,

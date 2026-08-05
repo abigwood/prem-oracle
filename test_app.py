@@ -2079,6 +2079,31 @@ class NamesAndViewportTests(unittest.TestCase):
         # The visual viewport returning to full height is the keyboard leaving.
         self.assertIn("if (vv.height >= tallest - 1) restoreViewport();", self.app)
 
+    def test_the_background_loop_does_not_poll_the_season_state(self):
+        # One /state is a ~940-read assembly costing 2.5-3.4s of worker time on
+        # a mixed league. Paying that every three minutes, for every open app,
+        # to refresh a table nobody may be looking at, is a cost with no
+        # matching benefit — the League screen refreshes it when it is read.
+        loop = self.app[self.app.index("setInterval(async () => {"):]
+        loop = loop[:loop.index("}, 180000);")]
+        self.assertNotIn("loadLeagueState", loop)
+        self.assertNotIn("loadRoundState", loop)
+        # The fixture feed is still refreshed, but only once it is stale.
+        self.assertIn("if (Date.now() - fixturesLoadedAt >= FIXTURES_FRESH_MS) {", loop)
+        self.assertIn("await loadFixtures();", loop)
+        # And the comment must not claim a snapshot read that does not exist.
+        preamble = self.app[self.app.index(" * The background refresh, and what it deliberately does NOT do."):]
+        preamble = preamble[:preamble.index("setInterval")]
+        self.assertIn("no longer polled at all", preamble)
+        self.assertNotIn("the league refresh is a snapshot read", self.app)
+
+    def test_opening_the_league_still_refreshes_it(self):
+        # Removing the poll is only safe because navigation still refreshes.
+        nav = self.app[self.app.index("async function navigateToView(view)"):]
+        nav = nav[:nav.index("\n}")]
+        self.assertIn('if (currentView === "league") {', nav)
+        self.assertIn("await loadLeagueState();", nav)
+
     def test_viewport_scale_is_reported_not_silently_absorbed(self):
         # Scale and offset look alike in a screenshot and are nothing alike
         # underneath: a scroll correction cannot undo page zoom. The numbers

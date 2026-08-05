@@ -1,6 +1,6 @@
 const SEASON_START = new Date("2026-08-21T20:00:00+01:00");
 const SEASON_START_DATE = "2026-08-21";
-const APP_BUILD = "20260805a";
+const APP_BUILD = "20260805b";
 const API = window.PREM_API || null;
 // Canonical public home of the web app. Inside the Capacitor shell the page is
 // served from premoracle://localhost, so location.origin can never be used to
@@ -3972,16 +3972,28 @@ Promise.all([loadFixtures(), hydrateIdentity()]).then(() => {
   }
 });
 
-// The background refresh used to re-download every fixture in both
-// competitions and re-run the whole season assembly, every three minutes,
-// whether or not anything had changed. The fixture feed is now left alone
-// while what we hold is still within its freshness window, and the league
-// refresh is a snapshot read.
+/**
+ * The background refresh, and what it deliberately does NOT do.
+ *
+ * It used to re-download every fixture in both competitions AND re-run the
+ * whole season assembly every three minutes, whether or not anything had
+ * changed. The feed is now left alone while what we hold is still inside its
+ * freshness window.
+ *
+ * The season state is no longer polled at all. One /state call is a ~940-read
+ * assembly costing 2.5-3.4s of worker time on a mixed league, and paying that
+ * every three minutes for every open app — to refresh a table the viewer may
+ * not even be looking at — is a cost with no matching benefit. Opening the
+ * League screen still refreshes it, which is when it is actually read.
+ *
+ * When the snapshot layer lands, a league refresh becomes a single cheap read
+ * and polling can come back. It has not landed, so this does not pretend it
+ * has.
+ */
 setInterval(async () => {
   if (Date.now() - fixturesLoadedAt >= FIXTURES_FRESH_MS) {
     await loadFixtures();
     fixturesLoadedAt = Date.now();
+    render();
   }
-  if (activeLeague) await loadLeagueState();
-  render();
 }, 180000);

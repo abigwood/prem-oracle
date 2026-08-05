@@ -21,6 +21,8 @@ const STORAGE = {
   leagueStates: "prem_oracle_league_states",
   pickSections: "prem_oracle_pick_sections",
   syncedName: "prem_oracle_synced_name",
+  fixtureRevisions: "prem_oracle_fixture_revisions",
+  roundStates: "prem_oracle_round_states",
 };
 
 function isNativeApp() {
@@ -201,6 +203,11 @@ let leagueState = null;
 // localStorage at boot, which is what makes the FIRST switch of a session fast
 // too. Never a source of truth: every read is followed by a background refresh.
 let leagueStates = readJSON(STORAGE.leagueStates, {});
+// Round tables, keyed league:period, on the same pattern as the season states
+// above: paint what we last saw the instant the week is opened, then let the
+// refresh land underneath. A round read is the second of the two calls a
+// League open makes, and the one that used to leave "Loading Matchweek" up.
+let roundStates = readJSON(STORAGE.roundStates, {});
 let leagueTab = "matchday";
 // The period the round view is showing. A matchweek number for a single-
 // competition league, a window key for a mixed one — the same period abstraction
@@ -274,17 +281,51 @@ async function registerPushToken(token) {
   }
 }
 
+/**
+ * The last revision each competition's feed was seen at. Putting it in the URL
+ * is what lets the browser, the service worker and WKWebView all cache the
+ * response: the address only changes when the fixtures actually do. The old
+ * `t=${Date.now()}` changed on every call, so 467KB was re-downloaded at every
+ * launch and every three-minute tick, on every platform.
+ */
+let fixtureRevisions = readJSON(STORAGE.fixtureRevisions, {});
+
+// How long a loaded fixture list is treated as fresh, matching the max-age the
+// worker sends. Declared here because loadFixtures() stamps it during startup,
+// long before the background loop that reads it is installed.
+const FIXTURES_FRESH_MS = 300000;
+let fixturesLoadedAt = 0;
+
+function rememberRevision(code, revision) {
+  if (!revision || fixtureRevisions[code] === revision) return;
+  fixtureRevisions = { ...fixtureRevisions, [code]: revision };
+  try {
+    localStorage.setItem(STORAGE.fixtureRevisions, JSON.stringify(fixtureRevisions));
+  } catch {
+    // A full quota costs a cache hit, not correctness.
+  }
+}
+
+function fixturesUrl(code, refresh) {
+  const revision = fixtureRevisions[code];
+  const query = [`competition=${code}`];
+  if (refresh) query.push("refresh=1");
+  else if (revision) query.push(`rev=${encodeURIComponent(revision)}`);
+  return `${API}/fixtures?${query.join("&")}`;
+}
+
 async function loadOneCompetition(code, refresh) {
   let response = null;
   if (API) {
-    response = await fetch(
-      `${API}/fixtures?competition=${code}&${refresh ? "refresh=1&" : ""}t=${Date.now()}`,
-      { cache: "no-store" }
-    ).catch(() => null);
+    // No cache-buster and no `no-store`: the response says how long it may be
+    // reused, and the revision in the URL supersedes it the moment it changes.
+    response = await fetch(fixturesUrl(code, refresh), refresh ? { cache: "reload" } : {}).catch(() => null);
   }
-  if (!response?.ok) response = await fetch(`${competitionMeta(code).data}?t=${Date.now()}`, { cache: "no-store" });
+  if (!response?.ok) response = await fetch(competitionMeta(code).data);
   if (!response.ok) throw new Error(`fixtures ${code}`);
-  return response.json();
+  const data = await response.json();
+  rememberRevision(code, data.revision);
+  return data;
 }
 
 async function loadFixtures(refresh = false) {
@@ -299,6 +340,7 @@ async function loadFixtures(refresh = false) {
     teamIntel = Object.assign({}, ...payloads.map((data) =>
       (data.teams && typeof data.teams === "object") ? data.teams : {}));
     loadedCompetition = competitions.join("+");
+    fixturesLoadedAt = Date.now();
   } catch {
     fixtures = [];
     teamIntel = {};
@@ -626,6 +668,31 @@ function rememberCompetition(codes) {
 // `leagueState` — two taps in a row race, and on a phone the FIRST response can
 // land last, which is how the card ended up showing one league while the pill
 // said another (and, with it, one league's nickname under another's name).
+/**
+ * Requests for the same thing share one flight.
+ *
+ * Opening the League screen used to fire the season read three or four times —
+ * the launch path, the tab navigation and the league switch each asked
+ * independently, and every one of them paid the full server assembly. Repeats
+ * now join the promise already running. Keyed by the exact request, so a
+ * different league or a different week is a different flight.
+ */
+const stateFlights = new Map();
+
+function fetchState(path) {
+  const running = stateFlights.get(path);
+  if (running) return running;
+  const flight = api(path).finally(() => {
+    // Cleared on settle, not on success: a failed read must be retryable.
+    if (stateFlights.get(path) === flight) stateFlights.delete(path);
+  });
+  stateFlights.set(path, flight);
+  return flight;
+}
+
+const seasonStatePath = (code) => `/state?code=${encodeURIComponent(code)}&uid=${encodeURIComponent(uid())}`;
+const roundStatePath = (code, period) => `/state?code=${encodeURIComponent(code)}&period=${encodeURIComponent(period)}`;
+
 let leagueStateRequest = 0;
 
 async function loadLeagueState() {
@@ -638,7 +705,7 @@ async function loadLeagueState() {
   try {
     // `uid` asks the worker for this viewer's own Trophy Cabinet alongside the
     // table; older workers simply ignore it.
-    const state = await api(`/state?code=${encodeURIComponent(requested)}&uid=${encodeURIComponent(uid())}`);
+    const state = await fetchState(seasonStatePath(requested));
     // Cache it either way — the answer is true about the league it names, even
     // if the viewer has moved on. Only the paint is abandoned.
     saveLeagueName(state.code, state.name);
@@ -683,13 +750,29 @@ async function loadRoundState() {
   const period = selectedPeriod;
   const superseded = () =>
     ticket !== roundStateRequest || requested !== activeLeague || String(period) !== String(selectedPeriod);
+
+  // Show last week's answer for this week immediately; the request below
+  // replaces it when it lands. Without this the screen sits on "Loading
+  // Matchweek" for the whole round read.
+  // Anything on screen for a different week is not this week's answer.
+  const showingAnotherWeek = roundState && String(roundState.period) !== String(period);
+  const cached = cachedRoundState(requested, period);
+  if (cached && (!roundState || showingAnotherWeek)) {
+    roundState = cached;
+    render();
+  } else if (showingAnotherWeek) {
+    roundState = null;
+  }
+
   try {
-    const state = await api(`/state?code=${encodeURIComponent(requested)}&period=${encodeURIComponent(period)}`);
+    const state = await fetchState(roundStatePath(requested, period));
+    cacheRoundState(requested, period, state);
     if (superseded()) return;
     roundState = state;
   } catch (error) {
     if (superseded()) return;
-    roundState = { error: error.message };
+    // A cached week already on screen is better than an error over the top.
+    if (!cached) roundState = { error: error.message };
   }
 }
 
@@ -711,6 +794,27 @@ async function loadKnownLeagueNames() {
  * Caches one league's season state. Trimmed to the leagues this device is
  * actually in, so a left or deleted league cannot linger in storage.
  */
+const roundCacheKey = (code, period) => `${code}:${period}`;
+
+function cacheRoundState(code, period, state) {
+  if (!code || period == null || !state || state.error) return;
+  const next = { ...roundStates, [roundCacheKey(code, period)]: state };
+  // Only weeks of leagues this device still belongs to are worth keeping.
+  const kept = Object.fromEntries(
+    Object.entries(next).filter(([key]) => leagueCodes.includes(key.split(":")[0])),
+  );
+  roundStates = kept;
+  try {
+    localStorage.setItem(STORAGE.roundStates, JSON.stringify(kept));
+  } catch {
+    // A full quota costs the instant paint, not correctness.
+  }
+}
+
+function cachedRoundState(code, period) {
+  return roundStates[roundCacheKey(code, period)] || null;
+}
+
 function cacheLeagueState(state) {
   if (!state?.code || state.error) return;
   leagueStates = { ...leagueStates, [state.code]: state };
@@ -3809,8 +3913,16 @@ Promise.all([loadFixtures(), hydrateIdentity()]).then(() => {
   }
 });
 
+// The background refresh used to re-download every fixture in both
+// competitions and re-run the whole season assembly, every three minutes,
+// whether or not anything had changed. The fixture feed is now left alone
+// while what we hold is still within its freshness window, and the league
+// refresh is a snapshot read.
 setInterval(async () => {
-  await loadFixtures();
+  if (Date.now() - fixturesLoadedAt >= FIXTURES_FRESH_MS) {
+    await loadFixtures();
+    fixturesLoadedAt = Date.now();
+  }
   if (activeLeague) await loadLeagueState();
   render();
 }, 180000);

@@ -122,8 +122,31 @@ const applyCors = (response, env, request) => {
   }
   return response;
 };
-const json = (body, status, env) =>
-  new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", ...cors(env) } });
+const json = (body, status, env, extraHeaders = {}) =>
+  new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", ...cors(env), ...extraHeaders } });
+
+/**
+ * A revision for a fixture list: it changes when anything a client would draw
+ * changes, and not otherwise. Clients put it in the URL, so a changed feed
+ * busts every cache at once while an unchanged one stays a hit.
+ */
+function fixtureRevision(list) {
+  let hash = 2166136261;
+  const bite = (text) => {
+    for (let i = 0; i < text.length; i++) {
+      hash ^= text.charCodeAt(i);
+      hash = Math.imul(hash, 16777619);
+    }
+  };
+  bite(String(list.length));
+  for (const match of list) {
+    bite(String(match.id));
+    bite(String(match.status || ""));
+    bite(String(match.startAt || ""));
+    bite(String(match.result ? match.result.join("-") : ""));
+  }
+  return (hash >>> 0).toString(36);
+}
 const appleAppSiteAssociation = () =>
   new Response(JSON.stringify({
     applinks: {
@@ -318,17 +341,28 @@ async function getFixtures(env, request) {
   const requested = url.searchParams.get("competition");
   if (requested && !isCompetition(requested)) return json({ error: "unknown competition" }, 400, env);
   const competition = normaliseCompetition(requested);
-  const list = await fixtures(env, competition, url.searchParams.get("refresh") === "1");
+  const fresh = url.searchParams.get("refresh") === "1";
+  const list = await fixtures(env, competition, fresh);
   const cache = cacheFor(competition);
+  const revision = fixtureRevision(list);
+  // 467KB was re-downloaded on every launch and every three-minute tick,
+  // because the client cache-busted the URL and the response carried no
+  // caching policy at all. Five minutes of freshness with a day of
+  // stale-while-revalidate makes a launch a cache hit; the revision in the URL
+  // is what lands a changed feed promptly rather than waiting out max-age.
+  const headers = fresh
+    ? { "cache-control": "no-store" }
+    : { "cache-control": "public, max-age=300, stale-while-revalidate=86400", etag: `W/"${revision}"` };
   return json({
     ok: true,
     competition,
     competitionName: COMPETITIONS[competition].name,
+    revision,
     fixtures: list,
     teams: cache.intel.teams,
     modelVersion: cache.intel.modelVersion,
     settlement: "manual",
-  }, 200, env);
+  }, 200, env, headers);
 }
 
 // GET /ics/<matchId>[?pick=2-1] — one fixture as a calendar event.
@@ -1178,8 +1212,11 @@ async function state(env, url) {
   // below is a union of results:PL and results:ELC by construction.
   const matchList = await leagueFixtures(env, league);
   const memberList = await members(env, league);
-  const picks = await allPicks(env, matchList.map((match) => match.id));
-  const completed = matchList
+  const byPeriod = poolByPeriod(matchList, league);
+  const periodParam = url.searchParams.get("period") ?? url.searchParams.get("md");
+  const roundOnly = periodParam != null && String(periodParam).trim() !== "";
+
+  const asCompleted = (list) => list
     .map((match) => ({
       id: match.id,
       startMs: Date.parse(match.lockAt || match.startAt) || 0,
@@ -1189,6 +1226,24 @@ async function state(env, url) {
       period: keyOf(match),
     }))
     .filter((match) => match.result || match.voided);
+
+  // A request for one week reads one week. It used to read a pick record for
+  // every fixture in the season — 932 on a mixed league — to answer a question
+  // about six of them, which is most of a 1,000-subrequest budget spent on
+  // rows that get thrown away.
+  const roundPeriod = roundOnly ? String(periodParam).trim() : null;
+  const roundStored = roundOnly && slateAware(league)
+    ? await kvGet(env, slateKey(code, roundPeriod))
+    : null;
+  const roundSlate = isPublishedSlate(roundStored) ? roundStored : null;
+  const roundPool = roundOnly ? (byPeriod.get(roundPeriod) || []) : [];
+  const roundFixtures = roundOnly ? slateFixtures(roundSlate, roundPool) : [];
+
+  const pickIds = roundOnly
+    ? [...new Set([...roundFixtures, ...roundPool].map((match) => match.id))]
+    : matchList.map((match) => match.id);
+  const picks = await allPicks(env, pickIds);
+  const completed = asCompleted(roundOnly ? roundPool : matchList);
 
   const rule = leagueWeeklyRule(league);
   const identity = {
@@ -1206,14 +1261,11 @@ async function state(env, url) {
     customMix: plan.mode === "limited",
   };
 
-  const byPeriod = poolByPeriod(matchList, league);
-  const periodParam = url.searchParams.get("period") ?? url.searchParams.get("md");
-  if (periodParam != null && String(periodParam).trim()) {
-    const period = String(periodParam).trim();
-    const stored = slateAware(league) ? await kvGet(env, slateKey(code, period)) : null;
-    const slate = isPublishedSlate(stored) ? stored : null;
-    const pool = byPeriod.get(period) || [];
-    const roundFixtures = slateFixtures(slate, pool);
+  if (roundOnly) {
+    const period = roundPeriod;
+    const stored = roundStored;
+    const slate = roundSlate;
+    const pool = roundPool;
     const scoped = applySlates(completed.filter((match) => match.period === period),
       slate ? { [period]: slate } : {});
     const table = computeTable(memberList, scoped, picks).map((row, index) => ({ ...row, rank: index + 1 }));

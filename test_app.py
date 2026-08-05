@@ -628,7 +628,10 @@ class CompetitionAppTests(unittest.TestCase):
         self.assertNotIn("of 38", self.app)
 
     def test_the_app_loads_every_selected_competition(self):
-        self.assertIn("`${API}/fixtures?competition=${code}&", self.app)
+        # The URL is versioned by the feed's revision now, not the clock, so
+        # every layer of cache can actually hold it.
+        self.assertIn("const query = [`competition=${code}`];", self.app)
+        self.assertIn('query.push(`rev=${encodeURIComponent(revision)}`)', self.app)
         self.assertIn("competitionMeta(code).data", self.app)
         self.assertIn('data: "data/fixtures-elc.json"', self.app)
         # One request per selected competition, merged into one fixture list.
@@ -1762,7 +1765,8 @@ class LeagueSwitchAndShareTests(unittest.TestCase):
         self.assertIn("ticket !== leagueStateRequest || requested !== activeLeague", fn)
         # The request names the league it asked for, not whichever is active by
         # the time the line runs.
-        self.assertIn("/state?code=${encodeURIComponent(requested)}", fn)
+        self.assertIn("fetchState(seasonStatePath(requested))", fn)
+        self.assertIn("const seasonStatePath = (code) =>", self.app)
         self.assertNotIn("/state?code=${encodeURIComponent(activeLeague)}", fn)
 
     def test_a_superseded_answer_is_cached_but_not_painted(self):

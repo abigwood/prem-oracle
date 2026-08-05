@@ -29,6 +29,13 @@ function liftConst(name) {
   return APP.slice(start, end);
 }
 
+/** One line, verbatim — for single-expression const arrows. */
+function liftLine(startsWith) {
+  const start = APP.indexOf(startsWith);
+  if (start < 0) throw new Error(`not found in app.js: ${startsWith}`);
+  return APP.slice(start, APP.indexOf("\n", start));
+}
+
 const WEEKS = 38;
 const PER_WEEK = 10;
 const fixtures = Array.from({ length: WEEKS * PER_WEEK }, (_, i) => {
@@ -248,6 +255,435 @@ test("a nav tap's trace survives the taps used to report it", () => {
   assert.match(fn, /navTaps\.push\(\{ view: navView, steps: tapTrace \}\);/);
   const diag = lift("function diagnosticsText()");
   assert.match(diag, /nav → \$\{entry\.view\}/);
+});
+
+// --- build 17: the League results island ------------------------------------
+
+/**
+ * A small, faithful element shim.
+ *
+ * The island now works in real DOM — createElement, replaceChildren,
+ * insertAdjacentHTML, node identity — so a stub exposing only an innerHTML
+ * setter cannot drive it, and weakening the assertions to suit a weaker stub
+ * would test the stub rather than the app.
+ */
+function makeDom() {
+  let innerHTMLWrites = 0;
+  class El {
+    constructor(tag) {
+      this.tagName = String(tag).toUpperCase();
+      this.children = [];
+      this.parent = null;
+      this.attrs = {};
+      this._text = "";
+      this._class = "";
+      this.classList = {
+        toggle: (name, on) => { this._class = on ? name : ""; },
+        add: (name) => { this._class = name; },
+        remove: () => { this._class = ""; },
+        contains: (name) => this._class.includes(name),
+      };
+    }
+    get className() { return this._class; }
+    set className(v) { this._class = v; }
+    get textContent() { return this._text || this.children.map((c) => c.textContent).join(""); }
+    set textContent(v) { this._text = String(v); this.children = []; }
+    setAttribute(k, v) { this.attrs[k] = String(v); }
+    getAttribute(k) { return this.attrs[k] ?? null; }
+    get firstElementChild() { return this.children[0] ?? null; }
+    append(...nodes) { for (const n of nodes) { n.parent = this; this.children.push(n); } }
+    replaceChildren(...nodes) {
+      for (const c of this.children) c.parent = null;
+      this.children = [];
+      this.append(...nodes);
+    }
+    // Parsed as one opaque element per call — enough to count and to serialise.
+    insertAdjacentHTML(_where, html) {
+      const el = new El("section");
+      el._text = String(html);
+      el.parent = this;
+      this.children.push(el);
+    }
+    set innerHTML(v) { innerHTMLWrites++; this._text = String(v); this.children = []; }
+    get innerHTML() { return this.children.map((c) => c.outerHTML).join("") || this._text; }
+    get outerHTML() {
+      const tag = this.tagName.toLowerCase();
+      const cls = this._class ? ` class="${this._class}"` : "";
+      return `<${tag}${cls}>${this._text}${this.children.map((c) => c.outerHTML).join("")}</${tag}>`;
+    }
+  }
+  return { El, writes: () => innerHTMLWrites };
+}
+
+/** app.js's results island over that shim, running the production helpers. */
+function island({ buildMs = 0 } = {}) {
+  const dom = makeDom();
+  const build = new Function("dom", "buildMs", `
+    "use strict";
+    const { El } = dom;
+    const events = [];
+    const resultsEl = new El("div");
+    const shareBtn = new El("button");
+    const card = new El("section");
+    const segs = ["matchday", "season"].map((t) => { const e = new El("button"); e.dataset = { roundTab: t }; return e; });
+    const pills = ["AAA", "BBB"].map((c) => { const e = new El("button"); e.dataset = { league: c }; return e; });
+    const document = {
+      createElement: (tag) => new El(tag),
+      querySelector: (sel) => (sel === "[data-league-results]" ? resultsEl
+        : sel === "[data-export-league-table]" ? shareBtn
+        : sel === ".league-card" ? card : null),
+      querySelectorAll: (sel) => (sel === "[data-round-tab]" ? segs : sel === "[data-league]" ? pills : []),
+    };
+    let renders = 0;
+    const render = () => { renders++; };
+    const requestAnimationFrame = (fn) => setTimeout(fn, 0);
+    const setTimeoutOrig = setTimeout;
+    const nextPaint = () => new Promise((resolve) => requestAnimationFrame(() => setTimeoutOrig(resolve, 0)));
+    let activeLeague = "AAA", leagueTab = "matchday", selectedPeriod = 1, currentView = "league";
+    let leagueState = { code: "AAA", name: "AAA League", owner: "someone", rounds: true };
+    let roundState = { code: "AAA", period: 1, matchday: 1 };
+    const leagueNames = { AAA: "AAA League", BBB: "BBB League" };
+    const leagueStates = {};
+    const uid = () => "u1";
+    const escapeHTML = (v) => String(v ?? "");
+    const leagueSupportsRounds = () => true;
+    const weekNumberFor = () => 1;
+    const periodLabel = (p) => "Matchweek " + p;
+    const isMixedActive = () => true;   // Adam's shape: PL + ELC
+    const traceTap = (name, detail) => events.push({ trace: name, ...detail });
+    const seasonBanner = () => "<sbanner>";
+    const trophyCabinet = () => "<cabinet>";
+    const seasonTableHtml = () => { const t = Date.now(); while (Date.now() - t < buildMs) {} return "<stable>"; };
+    const weekSeasonPicker = () => "<weeks>";
+    const leagueRevealsHtml = () => "<reveals>";
+    const roundBanner = () => "<rbanner>";
+    const roundTableHtml = () => "<roundtable>";
+
+    ${lift("const weekLabelFor = (period) => {")}
+    const RETAINED_PANEL_LIMIT = 8;
+    let retainedPanels = new Map();
+    let panelGeneration = 0;
+    let mountedKey = null;
+    let leagueStamps = new Map();
+    ${liftLine("const stampFor =")}
+    ${liftLine("const bumpStamp =")}
+    ${lift("function panelKey(tab, code = activeLeague, period = selectedPeriod)")}
+    ${lift("function retainPanel(key, node)")}
+    ${lift("function dropRetainedPanels(code = null)")}
+    ${lift("function resultsNode()")}
+    ${lift("function seasonStages(state, isOwner)")}
+    ${lift("async function fillPanelProgressively(panel, capture)")}
+    ${lift("async function showResultsPanel({ status } = {})")}
+    ${lift("const pulsingNode = (message) => {")}
+    ${lift("function syncShareLabel()")}
+    ${lift("function mountResults()")}
+    ${lift("function markSegment(tab)")}
+    ${lift("function markLeaguePill(code)")}
+    ${lift("function leagueCardShell(name, code)")}
+
+    return {
+      events, renders: () => renders,
+      node: () => resultsEl,
+      panelNode: () => resultsEl.firstElementChild,
+      text: () => resultsEl.innerHTML,
+      html: () => resultsEl.innerHTML,
+      bumpTruth: () => bumpStamp(activeLeague),
+      shareLabel: () => shareBtn.textContent,
+      cardText: () => card.textContent,
+      segState: () => segs.map((s) => ({ tab: s.dataset.roundTab, on: s.classList.contains("active"), aria: s.getAttribute("aria-selected") })),
+      pillState: () => pills.map((p) => ({ code: p.dataset.league, on: p.classList.contains("active"), aria: p.getAttribute("aria-selected") })),
+      setTab: (t) => { leagueTab = t; },
+      setLeague: (c) => { activeLeague = c; leagueState = { code: c, name: c + " League", owner: "someone", rounds: true }; },
+      setPeriod: (n) => { selectedPeriod = n; },
+      bumpFor: (code) => bumpStamp(code),
+      dropFor: (code) => dropRetainedPanels(code),
+      retainedSize: () => retainedPanels.size,
+      showResultsPanel, markSegment, markLeaguePill, mountResults,
+      replaceCard: (code) => { card.replaceChildren(leagueCardShell(leagueNames[code] || code, code)); },
+    };
+  `);
+  return { ...build(dom, buildMs), writes: dom.writes };
+}
+
+// (E1) (E12)
+test("the segment is marked, with aria, in the same task as the tap", () => {
+  const app = island();
+  app.markSegment("season");
+  assert.deepEqual(app.segState(), [
+    { tab: "matchday", on: false, aria: "false" },
+    { tab: "season", on: true, aria: "true" },
+  ]);
+});
+
+// (E2)
+test("a pulsing shell is inserted before the panel is built", async () => {
+  const app = island({ buildMs: 5 });
+  app.setTab("season");
+  const pending = app.showResultsPanel({ status: "Loading season…" });
+  // Synchronously after the call, the shell is already in place.
+  assert.match(app.html(), /is-pulsing/);
+  assert.match(app.html(), /Loading season…/);
+  await pending;
+  const order = app.events.filter((e) => e.trace).map((e) => e.trace);
+  assert.ok(order.indexOf("results-shell-inserted") < order.indexOf("panel-build-start"), order.join(" "));
+  assert.ok(order.indexOf("results-shell-painted") < order.indexOf("panel-build-start"), order.join(" "));
+});
+
+// (E3)
+test("a segment swap never calls the global render", async () => {
+  const app = island();
+  app.setTab("season");
+  await app.showResultsPanel({ status: "Loading season…" });
+  assert.equal(app.renders(), 0, "the whole of #app must not be rebuilt to swap a table");
+  const swap = lift("async function showResultsPanel({ status } = {})");
+  // Not one global render, not even a fallback: the island owns its own node.
+  assert.equal((swap.match(/\brender\(\)/g) || []).length, 0);
+});
+
+// (E4)
+test("returning to a panel already built is an immediate retained hit", async () => {
+  const app = island();
+  app.setTab("season");
+  await app.showResultsPanel({ status: "Loading season…" });
+  const before = app.events.length;
+  await app.showResultsPanel({ status: "Loading season…" });
+  const after = app.events.slice(before).filter((e) => e.trace).map((e) => e.trace);
+  assert.deepEqual(after, ["panel-retained-hit"], "no shell, no rebuild");
+  assert.match(app.html(), /stable/);
+});
+
+// (E5)
+test("an uncached panel shows the acknowledgement, then the content", async () => {
+  const app = island({ buildMs: 3 });
+  app.setTab("season");
+  const pending = app.showResultsPanel({ status: "Loading season…" });
+  assert.match(app.html(), /Loading season…/, "acknowledged first");
+  await pending;
+  assert.match(app.html(), /sbanner/, "then the real panel");
+  assert.doesNotMatch(app.html(), /is-pulsing/);
+});
+
+// (E6) (E7)
+test("rapid alternating taps finish on the last selection, and stale work is discarded", async () => {
+  const app = island({ buildMs: 4 });
+  app.setTab("season");
+  const first = app.showResultsPanel({ status: "Loading season…" });
+  app.setTab("matchday");
+  const second = app.showResultsPanel({ status: "Loading Week 1…" });
+  await Promise.all([first, second]);
+  assert.match(app.html(), /roundtable/, "the last tab wins");
+  assert.ok(app.events.some((e) => e.trace === "panel-discarded"), "and the overtaken build said so");
+});
+
+// (d) — the claim my last report made, which was false
+test("refreshing AAA leaves BBB as a REAL retained hit, not just an entry", async () => {
+  // A single global stamp meant refreshing AAA changed the key BBB's panel was
+  // filed under. The entry survived; nothing could ever find it again.
+  const app = island();
+  app.setTab("season");
+  await app.showResultsPanel({ status: "Loading season…" });   // AAA built
+  app.setLeague("BBB");
+  await app.showResultsPanel({ status: "Loading season…" });   // BBB built
+
+  app.bumpFor("AAA");
+  app.dropFor("AAA");
+
+  const before = app.events.length;
+  await app.showResultsPanel({ status: "Loading season…" });   // still BBB
+  const after = app.events.slice(before).filter((e) => e.trace).map((e) => e.trace);
+  assert.deepEqual(after, ["panel-retained-hit"], `BBB should still be a hit, got ${after.join(" ")}`);
+});
+
+// (e)
+test("an in-flight AAA build cannot write into or poison BBB", async () => {
+  const app = island({ buildMs: 6 });
+  app.setTab("season");
+  const inFlight = app.showResultsPanel({ status: "Loading season…" });   // AAA
+  app.setLeague("BBB");                                                   // pill switch
+  await inFlight;
+  assert.ok(
+    app.events.some((e) => e.trace === "panel-discarded"),
+    "the AAA job must abandon itself once the league changed",
+  );
+  // And nothing was filed under BBB's key by that job.
+  const before = app.events.length;
+  await app.showResultsPanel({ status: "Loading season…" });
+  const after = app.events.slice(before).filter((e) => e.trace);
+  assert.equal(after[0].trace, "panel-retained-miss", "BBB's cache was not poisoned by AAA's build");
+});
+
+// (E9)
+test("a refresh drops only the affected league's retained panels", async () => {
+  const app = island();
+  app.setTab("season");
+  await app.showResultsPanel({ status: "Loading season…" });
+  app.setLeague("BBB");
+  await app.showResultsPanel({ status: "Loading season…" });
+  assert.equal(app.retainedSize(), 2, "one panel per league");
+  app.dropFor("AAA");
+  assert.equal(app.retainedSize(), 1, "BBB's panel survives AAA's refresh");
+});
+
+test("a truth change invalidates the retained panel by key", async () => {
+  const app = island();
+  app.setTab("season");
+  await app.showResultsPanel({ status: "Loading season…" });
+  app.bumpTruth();
+  const before = app.events.length;
+  await app.showResultsPanel({ status: "Loading season…" });
+  const after = app.events.slice(before).filter((e) => e.trace).map((e) => e.trace);
+  assert.ok(after.includes("panel-retained-miss"), "new truth, new panel");
+});
+
+// (E8)
+test("the pill is marked in the same task, and never for two leagues at once", () => {
+  const app = island();
+  app.markLeaguePill("BBB");
+  assert.deepEqual(app.pillState(), [
+    { code: "AAA", on: false, aria: "false" },
+    { code: "BBB", on: true, aria: "true" },
+  ]);
+});
+
+// (a) (b)
+test("the pill is acknowledged and painted before any global render", () => {
+  const fn = lift("async function switchLeaguePill(code)");
+  const mark = fn.indexOf("markLeaguePill(code)");
+  const paint = fn.indexOf("await nextPaint()");
+  const global = fn.indexOf("\n  render();");
+  assert.ok(mark > 0 && paint > mark, "the mark comes first");
+  assert.ok(global > paint, "and the global render only after a real paint");
+  // Nothing awaited before the acknowledgement.
+  const head = fn.slice(0, mark).replace(/\/\/[^\n]*/g, "");
+  assert.doesNotMatch(head, /\bawait\b/);
+  // The click branch does no work of its own.
+  const branch = APP.slice(APP.indexOf('const league = event.target.closest("[data-league]");'));
+  assert.match(branch.slice(0, branch.indexOf("}")), /switchLeaguePill\(league\.dataset\.league\)/);
+  assert.doesNotMatch(branch.slice(0, branch.indexOf("}")), /setActiveLeague/);
+});
+
+test("the pill path takes the league's identity with it before painting", () => {
+  const fn = lift("async function switchLeaguePill(code)");
+  const paint = fn.indexOf("await nextPaint()");
+  for (const claim of ["activeLeague = code;", "selectedPeriod = null;", "roundState = null;", "hydrateCachedLeague();"]) {
+    assert.ok(fn.indexOf(claim) > 0 && fn.indexOf(claim) < paint, `${claim} must happen before the paint`);
+  }
+  // Any panel job for the league just left is void.
+  assert.ok(fn.indexOf("panelGeneration++") < paint);
+});
+
+// (g)
+test("the share label always matches the visible tab", () => {
+  const fn = lift("function syncShareLabel()");
+  assert.match(fn, /leagueTab === "matchday"/);
+  assert.match(fn, /Share table to WhatsApp/);
+  // Called on every path that changes what is on screen.
+  const swap = lift("async function showResultsPanel({ status } = {})");
+  assert.equal((swap.match(/syncShareLabel\(\)/g) || []).length, 2, "retained hit AND fresh build");
+  const pill = lift("async function switchLeaguePill(code)");
+  assert.ok((pill.match(/syncShareLabel\(\)/g) || []).length >= 2, "and after a pill switch");
+});
+
+// --- build 17 completion: real DOM, real staging -----------------------------
+
+test("a retained hit returns the very same node, with no innerHTML parsing", async () => {
+  const app = island();
+  app.setTab("season");
+  await app.showResultsPanel();
+  const first = app.panelNode();
+  const writesAfterBuild = app.writes();
+
+  app.setTab("matchday");
+  await app.showResultsPanel();
+  app.setTab("season");
+  await app.showResultsPanel();
+
+  assert.strictEqual(app.panelNode(), first, "the SAME element must come back, not a copy");
+  assert.equal(app.writes(), writesAfterBuild, "a retained hit parses no HTML at all");
+});
+
+test("Season is built in bounded stages, yielding between every one", async () => {
+  const app = island();
+  app.setTab("season");
+  await app.showResultsPanel();
+  const chunks = app.events.filter((e) => e.trace === "chunk").map((e) => e.stage);
+  assert.deepEqual(chunks, ["banner", "cabinet", "standings", "weeks", "reveals"]);
+  // Each stage is its own insertion, so none of them is one big block.
+  assert.equal(app.panelNode().children.length, 5);
+  const fn = lift("async function fillPanelProgressively(panel, capture)");
+  assert.match(fn, /await nextPaint\(\);/, "and it yields between them");
+});
+
+test("a period change between chunks stops the job dead", async () => {
+  const app = island({ buildMs: 4 });
+  app.setTab("season");
+  const pending = app.showResultsPanel();
+  app.setPeriod(9);                       // the week moved under it
+  await pending;
+  assert.ok(app.events.some((e) => e.trace === "panel-discarded"), "it must abandon");
+  assert.equal(app.retainedSize(), 0, "and cache nothing");
+});
+
+test("refreshed truth between chunks stops the job dead", async () => {
+  const app = island({ buildMs: 4 });
+  app.setTab("season");
+  const pending = app.showResultsPanel();
+  app.bumpFor("AAA");                     // a refresh landed mid-build
+  await pending;
+  const discarded = app.events.filter((e) => e.trace === "panel-discarded");
+  assert.ok(discarded.length, "it must abandon");
+  assert.equal(app.retainedSize(), 0, "and must not re-enter the cache under the old stamp");
+});
+
+test("the global League view never builds a Season panel", () => {
+  const view = APP.slice(APP.indexOf("function leagueView()"), APP.indexOf("function rulesView()"));
+  assert.match(view, /<div class="league-results" data-league-results><\/div>/);
+  for (const heavy of ["seasonTableHtml", "trophyCabinet", "seasonBanner", "weekSeasonPicker", "leagueRevealsHtml", "roundTableHtml"]) {
+    assert.ok(!view.replace(/\/\/[^\n]*/g, "").includes(heavy), `leagueView must not call ${heavy}`);
+  }
+  // And the old all-at-once builder is gone, so nothing can call it back.
+  assert.ok(!APP.includes("function resultsPanel("), "the blocking path must not exist");
+});
+
+test("a pill switch replaces the whole league card, not just the results", async () => {
+  const app = island();
+  app.replaceCard("BBB");
+  const text = app.cardText();
+  assert.match(text, /BBB League/, "the new league's name");
+  assert.match(text, /BBB/, "and its code");
+  assert.doesNotMatch(text, /AAA/, "never the league just left");
+  assert.match(text, /Loading league…/);
+});
+
+test("the share label follows the visible tab through a swap", async () => {
+  const app = island();
+  app.setTab("matchday");
+  await app.showResultsPanel();
+  assert.match(app.shareLabel(), /Share Matchweek 1 result/);
+  app.setTab("season");
+  await app.showResultsPanel();
+  assert.equal(app.shareLabel(), "Share table to WhatsApp");
+});
+
+// (E10)
+test("toggling Week and Season makes no API call", () => {
+  const handler = APP.slice(APP.indexOf('const roundTab = event.target.closest("[data-round-tab]");'));
+  const branch = handler.slice(0, handler.indexOf('const roundMd = event.target.closest'));
+  // The only network call is the round read, and only when the week is stale.
+  assert.match(branch, /const needsRound = wanted === "matchday"/);
+  assert.match(branch, /if \(!needsRound\) return;/);
+  // Season never fetches.
+  assert.doesNotMatch(branch.slice(branch.indexOf('wanted === "season"')), /loadLeagueState|fetchState/);
+});
+
+test("the segment and pill are acknowledged before any awaited work", () => {
+  const handler = APP.slice(APP.indexOf('const roundTab = event.target.closest("[data-round-tab]");'));
+  const branch = handler.slice(0, handler.indexOf('const roundMd = event.target.closest'));
+  assert.ok(branch.indexOf("markSegment(wanted)") < branch.indexOf("showResultsPanel("));
+  assert.doesNotMatch(branch.replace(/\/\/[^\n]*/g, "").slice(0, branch.indexOf("markSegment")), /\bawait\b/);
+  const pill = APP.slice(APP.indexOf('const league = event.target.closest("[data-league]");'));
+  const pillBranch = pill.slice(0, pill.indexOf("}", pill.indexOf("setActiveLeague")));
+  assert.ok(pillBranch.indexOf("markLeaguePill") < pillBranch.indexOf("setActiveLeague"));
 });
 
 // --- the shell --------------------------------------------------------------

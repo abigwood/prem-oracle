@@ -65,6 +65,8 @@ function loaders({ delays = {}, roundDelays = {}, fail = false, cachedLeagues = 
     });
 
     const uid = () => "u1";
+    const bumpStamp = () => {};             // panel retention is measured in the browser
+    const dropRetainedPanels = () => {};
     let seasonFlights = 0, roundFlights = 0;
     const countingApi = (path) => {
       if (path.includes("period=")) roundFlights++; else seasonFlights++;
@@ -560,6 +562,8 @@ function renderer() {
     let centred = 0;
 
     let renderedHTML = null;
+    let mountedKey = null;
+    const mountResults = () => {};   // the island is exercised in schedule_paint
     let tapInProgress = false;
     let heldRender = null;
     const traceTap = () => {};   // the trace is measured in the browser, not here

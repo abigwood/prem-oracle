@@ -1331,12 +1331,15 @@ class WeekPickerTests(unittest.TestCase):
         # Order: season header, trophy cabinet, league table, then the month
         # pills — the table is what people open the Season tab for; the pills
         # are navigation and sit at the bottom.
-        line = [l for l in self.app.splitlines() if "inner = `${seasonBanner(state)}" in l][0]
+        # The order is now the order of the progressive stages, which is where
+        # it has to be right — each one is inserted as it is built.
+        stages = self.app[self.app.index("function seasonStages(state, isOwner)"):]
+        stages = stages[:stages.index("\n}")]
         for earlier, later in (("seasonBanner", "trophyCabinet"),
                                ("trophyCabinet", "seasonTableHtml"),
-                               ("seasonTableHtml", "seasonWeeks"),
-                               ("seasonWeeks", "leagueRevealsHtml")):
-            self.assertLess(line.index(earlier), line.index(later), f"{earlier} must precede {later}")
+                               ("seasonTableHtml", "weekSeasonPicker"),
+                               ("weekSeasonPicker", "leagueRevealsHtml")):
+            self.assertLess(stages.index(earlier), stages.index(later), f"{earlier} must precede {later}")
 
     def test_week_naming_reaches_every_window_surface(self):
         label = self.app[self.app.index("const periodLabel = (period) =>"):]

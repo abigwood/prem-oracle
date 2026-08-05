@@ -742,6 +742,9 @@ async function loadLeagueState(generation = navGeneration, { roundStarted = fals
     cacheLeagueState(state);
     if (superseded()) return;
     leagueState = state;
+    // Fresh truth for this league: its retained panels describe the old truth.
+    bumpStamp(requested);
+    dropRetainedPanels(requested);
     if (rememberCompetition(leagueState.competitions || leagueState.competition)) await loadFixtures();
   } catch (error) {
     if (superseded()) return;
@@ -822,6 +825,8 @@ async function loadRoundState(generation = navGeneration) {
     cacheRoundState(requested, period, state);
     if (superseded()) return;
     roundState = state;
+    bumpStamp(requested);
+    dropRetainedPanels(requested);
   } catch (error) {
     if (superseded()) return;
     // A cached week already on screen is better than an error over the top.
@@ -2052,6 +2057,299 @@ function roundShareText(state, round) {
   return `${head}\n\n${podiumShareLines(round)}${rows.join("\n")}\n\nJoin on the web or in the app with code ${state.code}`;
 }
 
+const weekLabelFor = (period) => {
+  const week = weekNumberFor(period);
+  return week == null ? periodLabel(period) : `Week ${week}`;
+};
+
+/**
+ * Panels already built, as DETACHED DOM NODES rather than HTML.
+ *
+ * A string cache still paid to reparse and re-lay-out the whole Season panel on
+ * every "retained hit" — which is most of what made it expensive in the first
+ * place. These are real elements: a hit moves the same node back into the
+ * island, so the browser keeps the layout it already computed. Controls keep
+ * working because every handler in this app is delegated from `document`.
+ */
+const RETAINED_PANEL_LIMIT = 8;
+let retainedPanels = new Map();
+let panelGeneration = 0;
+let mountedKey = null;
+
+/**
+ * Per-league truth stamps. A single global stamp meant refreshing AAA changed
+ * the key BBB's panel was filed under, so BBB's panel became unreachable — the
+ * cache "survived" in the sense that nothing could ever find it again.
+ */
+let leagueStamps = new Map();
+const stampFor = (code) => leagueStamps.get(code) ?? 0;
+const bumpStamp = (code) => leagueStamps.set(code, stampFor(code) + 1);
+
+function panelKey(tab, code = activeLeague, period = selectedPeriod) {
+  return `${code}|${stampFor(code)}|${tab}|${tab === "matchday" ? period : "-"}`;
+}
+
+function retainPanel(key, node) {
+  retainedPanels.set(key, node);
+  // Bounded: the oldest goes when the map outgrows its limit.
+  while (retainedPanels.size > RETAINED_PANEL_LIMIT) {
+    retainedPanels.delete(retainedPanels.keys().next().value);
+  }
+}
+
+function dropRetainedPanels(code = null) {
+  if (!code) { retainedPanels = new Map(); mountedKey = null; return; }
+  for (const key of [...retainedPanels.keys()]) {
+    if (key.startsWith(`${code}|`)) retainedPanels.delete(key);
+  }
+  if (mountedKey?.startsWith(`${code}|`)) mountedKey = null;
+}
+
+function resultsNode() {
+  return document.querySelector("[data-league-results]");
+}
+
+/** The Season panel, in bounded stages. Each is small enough to paint between. */
+function seasonStages(state, isOwner) {
+  return [
+    ["banner", () => seasonBanner(state)],
+    ["cabinet", () => trophyCabinet(state)],
+    ["standings", () => seasonTableHtml(state, isOwner, true)],
+    ["weeks", () => (isMixedActive() ? weekSeasonPicker(selectedPeriod, "data-round-md") : "")],
+    ["reveals", () => leagueRevealsHtml(state)],
+  ];
+}
+
+/**
+ * Builds a panel into `panel`, one bounded stage at a time, yielding through a
+ * real paint between each so no single chunk owns the main thread. The capture
+ * is re-checked before building, before inserting and before caching every
+ * stage — a pill switch part way through must abandon, not finish into the
+ * wrong league's node or file itself under the wrong key.
+ */
+async function fillPanelProgressively(panel, capture) {
+  const { state, isOwner, tab, stale } = capture;
+  if (tab === "matchday") {
+    // Small by construction: one banner and one table.
+    const html = !roundState
+      ? pulsingStatus(`Loading ${escapeHTML(weekLabelFor(capture.period))}…`)
+      : roundState.error
+        ? `<div class="empty"><strong>${escapeHTML(roundState.error)}</strong></div>`
+        : `${roundBanner(roundState)}${roundTableHtml(roundState)}`;
+    traceTap("chunk", { stage: "week", chars: html.length });
+    panel.insertAdjacentHTML("beforeend", html);
+    return true;
+  }
+  if (!leagueSupportsRounds(state)) {
+    panel.insertAdjacentHTML("beforeend", state && !state.error
+      ? `${seasonTableHtml(state, isOwner, false)}${leagueRevealsHtml(state)}`
+      : "");
+    return true;
+  }
+  for (const [name, build] of seasonStages(state, isOwner)) {
+    if (stale()) { traceTap("panel-discarded", { tab, reason: `before-${name}` }); return false; }
+    const t0 = performance.now();
+    const html = build();
+    const built = performance.now() - t0;
+    if (stale()) { traceTap("panel-discarded", { tab, reason: `after-build-${name}` }); return false; }
+    const t1 = performance.now();
+    if (html) panel.insertAdjacentHTML("beforeend", html);
+    traceTap("chunk", { stage: name, chars: html.length, build: +built.toFixed(1), insert: +(performance.now() - t1).toFixed(1) });
+    await nextPaint();
+  }
+  return !stale();
+}
+
+/**
+ * Puts the right panel in the island: the retained node if there is one, or a
+ * new one built progressively behind a pulsing acknowledgement.
+ */
+async function showResultsPanel({ status } = {}) {
+  const generation = ++panelGeneration;
+  // Everything this job is about, captured now. Without it a pill switch part
+  // way through could write AAA's panel into BBB's node, or file it under
+  // BBB's key — one league's table under another's name, from its own cache.
+  const code = activeLeague;
+  const tab = leagueTab;
+  const period = selectedPeriod;
+  // The truth this job is building FROM. A refresh bumps the league's stamp, so
+  // comparing it means an in-flight job building the old truth abandons itself
+  // rather than finishing and re-entering the cache under a key nobody wants.
+  const stamp = stampFor(code);
+  const stale = () =>
+    generation !== panelGeneration
+    || code !== activeLeague
+    || tab !== leagueTab
+    || String(period) !== String(selectedPeriod)
+    || stamp !== stampFor(code);
+
+  const node = resultsNode();
+  if (!node) return;
+  const key = panelKey(tab, code, period);
+
+  const retained = retainedPanels.get(key);
+  if (retained) {
+    // The SAME element goes back in. No parsing, no relayout of content the
+    // browser has already measured.
+    node.replaceChildren(retained);
+    mountedKey = key;
+    syncShareLabel();
+    traceTap("panel-retained-hit", { tab });
+    return;
+  }
+  traceTap("panel-retained-miss", { tab });
+
+  node.replaceChildren(pulsingNode(status ?? (tab === "season" ? "Loading season…" : `Loading ${weekLabelFor(period)}…`)));
+  traceTap("results-shell-inserted", { tab });
+  await nextPaint();
+  traceTap("results-shell-painted", { tab });
+  if (stale()) { traceTap("panel-discarded", { tab, reason: "after-shell" }); return; }
+
+  const state = leagueState;
+  const panel = document.createElement("div");
+  panel.className = "results-panel";
+  // Inserted empty, so each stage lands in front of the viewer rather than
+  // arriving as one block at the end.
+  node.replaceChildren(panel);
+  traceTap("panel-build-start", { tab });
+  const complete = await fillPanelProgressively(panel, {
+    state, isOwner: state && !state.error && state.owner === uid(), tab, period, stale,
+  });
+  traceTap("panel-build-end", { tab, complete });
+  if (!complete || stale()) return;
+
+  retainPanel(key, panel);
+  mountedKey = key;
+  syncShareLabel();
+  traceTap("panel-painted", { tab });
+}
+
+const pulsingNode = (message) => {
+  const el = document.createElement("p");
+  el.className = "view-loading is-pulsing";
+  el.setAttribute("role", "status");
+  el.setAttribute("aria-live", "polite");
+  el.textContent = message;
+  return el;
+};
+
+/**
+ * Called after every global render of the League view. Reattaching a retained
+ * node is cheap and synchronous; anything else is built progressively, so a
+ * global render never carries the cost of a Season panel.
+ */
+function mountResults() {
+  if (currentView !== "league") return;
+  const node = resultsNode();
+  if (!node) return;
+  const key = panelKey(leagueTab);
+  if (mountedKey === key && node.firstElementChild) return;   // already right
+  const retained = retainedPanels.get(key);
+  if (retained) {
+    node.replaceChildren(retained);
+    mountedKey = key;
+    syncShareLabel();
+    traceTap("panel-retained-hit", { tab: leagueTab, via: "render" });
+    return;
+  }
+  showResultsPanel();
+}
+
+/**
+ * The share button sits outside the island, so it has to be told. Left alone it
+ * kept offering "Share Week 1 results" while Season was on screen.
+ */
+function syncShareLabel() {
+  const button = document.querySelector("[data-export-league-table]");
+  if (!button) return;
+  const showingRound = leagueTab === "matchday" && roundState && !roundState.error && roundState.period != null;
+  button.textContent = showingRound
+    ? (roundState.matchday != null ? `Share Matchweek ${roundState.matchday} result` : `Share ${periodLabel(roundState.period)} results`)
+    : "Share table to WhatsApp";
+}
+
+/** Marks the chosen segment in the same task as the tap. */
+function markSegment(tab) {
+  for (const seg of document.querySelectorAll("[data-round-tab]")) {
+    const chosen = seg.dataset.roundTab === tab;
+    seg.classList.toggle("active", chosen);
+    seg.setAttribute("aria-selected", chosen ? "true" : "false");
+  }
+}
+
+/**
+ * A league-pill tap, acknowledged before anything heavy.
+ *
+ * It used to mark the pill and then call setActiveLeague() in the same task,
+ * which calls the full global render() — so the browser could not show the
+ * marked pill until a 3.9-second synchronous rebuild had finished. The mark and
+ * the league's own results go up first, a real paint happens, and only then is
+ * the rest of the switch allowed to run.
+ */
+async function switchLeaguePill(code) {
+  if (!code || code === activeLeague) return;
+  markLeaguePill(code);
+  traceTap("pill-acknowledged", { code });
+
+  // Identity moves with the pill, so nothing can paint one league's data under
+  // another's name — including the panel job started below.
+  activeLeague = code;
+  selectedPeriod = null;
+  roundState = null;
+  if (activeLeague) localStorage.setItem(STORAGE.activeLeague, activeLeague);
+  hydrateCachedLeague();
+  panelGeneration++;   // any in-flight panel job for the old league is void
+
+  // The WHOLE league-specific card goes, not just the results. Swapping only
+  // the island left BBB's pill active above AAA's name, code and host controls
+  // — a worse lie than a slow screen, because it looks authoritative.
+  const card = document.querySelector(".league-card");
+  if (card) {
+    const name = leagueNames[code] || leagueStates[code]?.name || code;
+    card.replaceChildren(leagueCardShell(name, code));
+    mountedKey = null;
+    traceTap("pill-card-replaced", { code });
+  }
+  await nextPaint();
+  traceTap("pill-acknowledged-painted", { code });
+
+  // Now the rest: the full paint that carries this league's chrome, then its
+  // single background refresh.
+  if (code !== activeLeague) return;
+  render();
+  syncShareLabel();
+  refreshLeague().then(() => {
+    if (code !== activeLeague) return;
+    render();
+    syncShareLabel();
+  });
+}
+
+/**
+ * The lightweight stand-in for a league card, shown between the pill tap and
+ * the real chrome. It carries the new league's own name and code, so nothing on
+ * screen ever belongs to the league just left.
+ */
+function leagueCardShell(name, code) {
+  const wrap = document.createElement("div");
+  const heading = document.createElement("h2");
+  heading.textContent = name;
+  const codeLine = document.createElement("div");
+  codeLine.className = "league-code";
+  codeLine.innerHTML = `<span>League code</span><strong>${escapeHTML(code)}</strong>`;
+  wrap.append(heading, codeLine, pulsingNode("Loading league…"));
+  return wrap;
+}
+
+/** Marks the chosen league pill in the same task as the tap. */
+function markLeaguePill(code) {
+  for (const pill of document.querySelectorAll("[data-league]")) {
+    const chosen = pill.dataset.league === code;
+    pill.classList.toggle("active", chosen);
+    pill.setAttribute("aria-selected", chosen ? "true" : "false");
+  }
+}
+
 function roundToggle() {
   const period = selectedPeriod ?? leagueState?.currentPeriod ?? currentPeriodKey();
   // The segment that opens the picker names the week the same way the picker
@@ -2059,9 +2357,9 @@ function roundToggle() {
   // different controls.
   const week = weekNumberFor(period);
   const label = week == null ? periodLabel(period) : `Week ${week}`;
-  return `<div class="round-toggle">
-    <button type="button" class="round-seg${leagueTab === "matchday" ? " active" : ""}" data-round-tab="matchday">${escapeHTML(label)} ▾</button>
-    <button type="button" class="round-seg${leagueTab === "season" ? " active" : ""}" data-round-tab="season">Season</button>
+  return `<div class="round-toggle" role="tablist">
+    <button type="button" role="tab" class="round-seg${leagueTab === "matchday" ? " active" : ""}" aria-selected="${leagueTab === "matchday"}" data-round-tab="matchday">${escapeHTML(label)} ▾</button>
+    <button type="button" role="tab" class="round-seg${leagueTab === "season" ? " active" : ""}" aria-selected="${leagueTab === "season"}" data-round-tab="season">Season</button>
   </div>`;
 }
 
@@ -2969,26 +3267,12 @@ function leagueView() {
   const shareLabel = showMatchday && roundState && !roundState.error && roundState.period != null
     ? (roundState.matchday != null ? `Share Matchweek ${roundState.matchday} result` : `Share ${periodLabel(roundState.period)} results`)
     : "Share table to WhatsApp";
-  let inner;
-  if (showMatchday) {
-    inner = !roundState
-      ? `<div class="empty"><strong>Loading matchweek…</strong></div>`
-      : roundState.error
-        ? `<div class="empty"><strong>${escapeHTML(roundState.error)}</strong></div>`
-        : `${roundBanner(roundState)}${roundTableHtml(roundState)}`;
-  } else if (supportsRounds) {
-    // A window league gets the whole season laid out by month here — every week
-    // named once, so jumping to one is a tap rather than a scroll through forty.
-    const seasonWeeks = isMixedActive() ? weekSeasonPicker(selectedPeriod, "data-round-md") : "";
-    // Order matters here: where you stand, then how you got there. The cabinet
-    // is the reward and sits under the season header; the table is what people
-    // actually come to the Season tab for, so it comes before the week pills,
-    // which are navigation and belong at the bottom.
-    inner = `${seasonBanner(state)}${trophyCabinet(state)}${seasonTableHtml(state, isOwner, true)}${seasonWeeks}${leagueRevealsHtml(state)}`;
-  } else if (state && !state.error) {
-    // Resilient fallback: an old worker response without round data.
-    inner = `${seasonTableHtml(state, isOwner, false)}${leagueRevealsHtml(state)}`;
-  }
+  // A PLACEHOLDER, never a built panel. Any global render while Season is
+  // selected used to rebuild the whole heavy Season panel synchronously — which
+  // is what made a pill switch cost four seconds even after the pill itself was
+  // acknowledged. The panel is mounted after this shell paints, from a retained
+  // DOM node or progressively.
+  const inner = `<div class="league-results" data-league-results></div>`;
   const content = !state
     ? `<div class="empty"><strong>Loading league...</strong></div>`
     : state.error
@@ -3271,8 +3555,14 @@ function render(options = {}) {
   if (changed) {
     app.innerHTML = html;
     renderedHTML = html;
+    // The island's contents are not part of the rendered string, so a rebuilt
+    // shell has an empty placeholder and the mounted panel must be put back.
+    mountedKey = null;
     traceTap("render", { view: currentView, chars: html.length });
   }
+  // Cheap when a retained node exists; progressive when it does not. Either
+  // way the global render itself never builds a Season panel.
+  if (currentView === "league") mountResults();
   renderPickerLayer();
   document.getElementById("profileInitial").textContent = playerInitial();
   document.querySelectorAll(".bottom-nav button").forEach((button) => button.classList.toggle("active", button.dataset.view === currentView));
@@ -3823,23 +4113,35 @@ document.addEventListener("click", async (event) => {
     return;
   }
   const league = event.target.closest("[data-league]");
-  if (league) { setActiveLeague(league.dataset.league); return; }
+  if (league) {
+    switchLeaguePill(league.dataset.league);
+    return;
+  }
   const roundTab = event.target.closest("[data-round-tab]");
   if (roundTab) {
-    if (roundTab.dataset.roundTab === "matchday") {
-      if (leagueTab === "matchday") { matchdayPickerOpen = !matchdayPickerOpen; render(); return; }
-      leagueTab = "matchday";
-      matchdayPickerOpen = false;
+    const wanted = roundTab.dataset.roundTab;
+    // Reopening the week that is already showing is the picker, not a swap.
+    if (wanted === "matchday" && leagueTab === "matchday") {
+      matchdayPickerOpen = !matchdayPickerOpen;
       render();
-      if (!roundState || roundState.error || String(roundState.period) !== String(selectedPeriod)) {
-        await loadRoundState();
-        render();
-      }
       return;
     }
-    leagueTab = "season";
+    // The segment moves in the SAME task as the tap. Everything after this is
+    // allowed to take its time; this is not.
+    leagueTab = wanted;
     matchdayPickerOpen = false;
-    render();
+    markSegment(wanted);
+    traceTap("segment-acknowledged", { tab: wanted });
+    const needsRound = wanted === "matchday"
+      && (!roundState || roundState.error || String(roundState.period) !== String(selectedPeriod));
+    showResultsPanel({
+      status: wanted === "season" ? "Loading season…" : `Loading ${weekLabelFor(selectedPeriod)}…`,
+    }).then(async () => {
+      if (!needsRound) return;
+      await loadRoundState();
+      dropRetainedPanels(activeLeague);
+      await showResultsPanel({ status: `Loading ${weekLabelFor(selectedPeriod)}…` });
+    });
     return;
   }
   const roundMd = event.target.closest("[data-round-md]");

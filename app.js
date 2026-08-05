@@ -222,6 +222,14 @@ let busyMatch = "";
 let flashMessage = "";
 let flashTone = "success";
 let openScheduleDates = new Set();
+
+// Schedule is reference-first: it opens on the current week and the two after
+// it, with rows rather than prediction cards, and mounts exactly one rich card
+// at a time. Building 900 cards during navigation is what blocked WKWebView for
+// 2263ms on Adam's phone and left later taps queued behind it.
+const SCHEDULE_WEEKS_SHOWN = 3;
+let scheduleFullSeason = false;
+let expandedFixtureId = null;
 // Which My Predictions sections the viewer has collapsed. Sections default to
 // open, so only the closed ones are worth remembering — and remembering them
 // means a long list stays the shape they left it in.
@@ -519,8 +527,10 @@ const WEEK_CONVENTION = `<p class="week-convention">Weeks run Tuesday to Monday.
  * The everyday control: one horizontal strip, centred on the week in play.
  * Weeks already gone are faded and sit to the left; the rest are a swipe right.
  */
-function weekStrip(selected, attribute) {
-  const periods = periodsInOrder();
+function weekStrip(selected, attribute, only = null) {
+  // `only` trims the chips to the weeks actually on the board, so the selector
+  // never offers more than the view is showing.
+  const periods = only && only.length ? only : periodsInOrder();
   if (!periods.length) return "";
   const current = leagueState?.currentPeriod ?? currentPeriodKey();
   // A window league counts weeks and states the Tuesday convention once; a
@@ -1392,6 +1402,18 @@ function periodIsOpen(period, current) {
     || (!openScheduleDates.size && String(period) === String(current));
 }
 
+/**
+ * The weeks Schedule opens on: the current one and the two after it. The rest
+ * are a tap away and cost nothing until then — a full season of week cards,
+ * even lazily bodied, is still 38 headers and 38 selector chips to lay out.
+ */
+function scheduleWindow(periods, current) {
+  if (scheduleFullSeason || matchdayFilter !== "all") return periods;
+  const from = periods.findIndex((period) => comparePeriods(period, current) >= 0);
+  const start = from < 0 ? Math.max(0, periods.length - SCHEDULE_WEEKS_SHOWN) : from;
+  return periods.slice(start, start + SCHEDULE_WEEKS_SHOWN);
+}
+
 function groupedPeriods(list, currentPeriod = null) {
   const current = currentPeriod ?? currentPeriodKey();
   return byPeriod(list).map(({ period, matches }) => {
@@ -1422,7 +1444,69 @@ function groupedPeriods(list, currentPeriod = null) {
  */
 function dayBody(period, matches, open) {
   if (!open) return `<div class="day-body" data-lazy-body="${escapeHTML(String(period))}"></div>`;
-  return `<div class="day-body">${matches.map(matchCard).join("")}</div>`;
+  return `<div class="day-body">${matches.map(fixtureRow).join("")}</div>`;
+}
+
+/**
+ * One fixture, as little as will do: when it kicks off and who is playing.
+ *
+ * The prediction card underneath is real work — a forecast bar, form guides,
+ * score steppers — and building it for every fixture on the board is what made
+ * the tab unusable. It is built when somebody asks for that fixture, and only
+ * for that fixture.
+ */
+function fixtureRow(fixture) {
+  const id = String(fixture.id);
+  const open = expandedFixtureId === id;
+  const kickoff = fixture.startAt ? shortKickoff(fixture.startAt) : "";
+  const picked = picks[id];
+  return `<div class="fixture-row${open ? " is-open" : ""}" data-fixture-row="${escapeHTML(id)}">
+    <button type="button" class="fixture-row-head" data-expand-fixture="${escapeHTML(id)}"
+      aria-expanded="${open ? "true" : "false"}" aria-controls="fx-${escapeHTML(id)}">
+      <span class="fixture-row-when">${escapeHTML(kickoff)}</span>
+      <span class="fixture-row-teams">${escapeHTML(fixture.player1)} v ${escapeHTML(fixture.player2)}</span>
+      <span class="fixture-row-mark">${picked ? `${picked.p1}-${picked.p2}` : ""}</span>
+    </button>
+    <div class="fixture-row-body" id="fx-${escapeHTML(id)}">${open ? matchCard(fixture) : ""}</div>
+  </div>`;
+}
+
+/** "Sat 21 Aug, 15:00" — enough to place a fixture, nothing more. */
+function shortKickoff(startAt) {
+  const date = new Date(startAt);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleString("en-GB", {
+    weekday: "short", day: "numeric", month: "short",
+    hour: "2-digit", minute: "2-digit", timeZone: "Europe/London",
+  }).replace(",", "");
+}
+
+/**
+ * Mounts one fixture's prediction card and unmounts whichever was open.
+ *
+ * Done against the live DOM rather than through a re-render, so browsing
+ * fixture after fixture never rebuilds the board and the document holds at most
+ * one heavy card however many are opened.
+ */
+function expandFixture(id) {
+  const wanted = expandedFixtureId === String(id) ? null : String(id);
+  for (const row of document.querySelectorAll("[data-fixture-row]")) {
+    const rowId = row.dataset.fixtureRow;
+    const head = row.querySelector("[data-expand-fixture]");
+    const body = row.querySelector(".fixture-row-body");
+    if (!body || !head) continue;
+    if (rowId === wanted) {
+      const fixture = fixtureById(rowId);
+      body.innerHTML = fixture ? matchCard(fixture) : "";
+      row.classList.add("is-open");
+      head.setAttribute("aria-expanded", "true");
+    } else if (body.innerHTML) {
+      body.innerHTML = "";          // the heavy markup goes, not just its display
+      row.classList.remove("is-open");
+      head.setAttribute("aria-expanded", "false");
+    }
+  }
+  expandedFixtureId = wanted;
 }
 
 /** Fills a week's body the first time it is expanded. */
@@ -1432,7 +1516,7 @@ function fillDayBody(card) {
   const period = body.dataset.lazyBody;
   const matches = (currentView === "picks" ? visiblePickedFixtures() : fixtures)
     .filter((fixture) => String(periodOfFixture(fixture)) === period);
-  body.innerHTML = matches.map(matchCard).join("");
+  body.innerHTML = matches.map(fixtureRow).join("");
   body.removeAttribute("data-lazy-body");
 }
 
@@ -1684,18 +1768,22 @@ function todayView() {
 const scheduleHead = () =>
   `<div class="section-head"><div><span class="eyebrow">Full season</span><h2>Prediction schedule</h2></div></div>`;
 
-const scheduleFilters = () =>
+const scheduleFilters = (shown = null) =>
   `<div class="filters filters-week"><button class="filter${matchdayFilter === "all" ? " active" : ""}" data-filter="all">${isMixedActive() ? "All weeks" : "All rounds"}</button></div>
-   ${weekStrip(matchdayFilter, "data-filter")}`;
+   ${weekStrip(matchdayFilter, "data-filter", shown)}`;
 
 function scheduleView() {
   const current = leagueState?.currentPeriod ?? currentPeriodKey();
   const filtered = fixtures.filter((fixture) => matchdayFilter === "all" || String(periodOfFixture(fixture)) === String(matchdayFilter));
   const awaiting = leagueCodes.length && current != null && !slateForPeriod(current);
+  const shown = scheduleWindow(periodsInOrder(), current);
+  const inWindow = filtered.filter((fixture) => shown.some((period) => String(period) === String(periodOfFixture(fixture))));
+  const hidden = periodsInOrder().length - shown.length;
   return `${scheduleHead()}
     ${awaiting ? `<div class="launch-card"><p>No picks due yet — fixtures will appear here when your host publishes this week's slate.</p></div>` : ""}
-    ${scheduleFilters()}
-    ${groupedPeriods(filtered, current)}`;
+    ${scheduleFilters(shown)}
+    ${groupedPeriods(inWindow, current)}
+    ${hidden > 0 ? `<button class="secondary wide" type="button" data-full-season>Show full season<span class="muted-count"> · ${hidden} more ${hidden === 1 ? "week" : "weeks"}</span></button>` : ""}`;
 }
 
 // --- My Predictions ---------------------------------------------------------
@@ -2988,6 +3076,12 @@ let heldRender = null;
  */
 const TAP_TRACE_LIMIT = 60;
 const TAP_HISTORY = 3;
+// A nav tap is the one being investigated. Opening the profile and tapping
+// Copy diagnostics are two more taps, and with a plain ring of three they would
+// push the interesting one out before it could be read. Named nav taps are kept
+// separately and are never evicted by the taps used to report them.
+const NAV_TRACE_HISTORY = 6;
+let navTaps = [];
 let tapTrace = [];
 let tapStartedAt = 0;
 // Finished taps, newest last. The whole point is that somebody hits a slow tap
@@ -3031,6 +3125,11 @@ function traceInput(name, event, detail = {}) {
   const stamped = eventTime(event);
   if (name === "pointerdown") {
     if (tapTrace.length > 1) {
+      const navView = tapTrace.find((step) => step.view)?.view;
+      if (navView) {
+        navTaps.push({ view: navView, steps: tapTrace });
+        if (navTaps.length > NAV_TRACE_HISTORY) navTaps.shift();
+      }
       recentTaps.push(tapTrace);
       if (recentTaps.length > TAP_HISTORY) recentTaps.shift();
     }
@@ -3208,6 +3307,14 @@ const nextPaint = () => new Promise((resolve) => requestAnimationFrame(() => set
 async function navigateToView(view) {
   if (!view) return;
   launchRouted = true;   // the viewer is driving now
+  if (view === "schedule" && currentView !== "schedule") {
+    // Arriving fresh: the current week, no heavy card mounted, and the
+    // scroller put back to the top BEFORE any content is added — otherwise the
+    // new board is laid out against a scroll offset from the previous screen.
+    scheduleFullSeason = false;
+    expandedFixtureId = null;
+    appScroller()?.scrollTo({ top: 0 });
+  }
   currentView = view;
   clearFlash();
   // Acknowledge the tap first, then build the view in a later task so the
@@ -3384,10 +3491,25 @@ function diagnosticsText() {
   ];
   // Times are milliseconds from the physical pointerdown, which is where a slow
   // tap actually begins — not where a handler eventually hears about it.
-  const traces = [...recentTaps, tapTrace].filter((trace) => trace.length > 1);
-  traces.forEach((trace, index) => {
-    lines.push("", `tap ${index + 1 - traces.length === 0 ? "(current)" : `(-${traces.length - index - 1})`} — ms from pointerdown:`);
-    for (const step of trace) {
+  // Nav taps first and by name: those are the ones under investigation, and
+  // they survive however many taps it takes to open this dialog and copy it.
+  const seen = new Set();
+  const named = [];
+  for (const entry of navTaps) {
+    named.push({ label: `nav → ${entry.view}`, steps: entry.steps });
+    seen.add(entry.steps);
+  }
+  const traces = [...recentTaps, tapTrace].filter((trace) => trace.length > 1 && !seen.has(trace));
+  const all = [
+    ...named,
+    ...traces.map((trace, index) => ({
+      label: index === traces.length - 1 ? "tap (current)" : `tap (-${traces.length - index - 1})`,
+      steps: trace,
+    })),
+  ];
+  all.forEach(({ label, steps }) => {
+    lines.push("", `${label} — ms from pointerdown:`);
+    for (const step of steps) {
       const extra = Object.entries(step)
         .filter(([key]) => key !== "at" && key !== "event")
         .map(([key, value]) => `${key}=${value}`)
@@ -3551,6 +3673,18 @@ document.addEventListener("click", async (event) => {
   const share = event.target.closest("[data-share-league]");
   if (share) {
     shareNow(leagueInvite(share.dataset.shareLeague));
+    return;
+  }
+  // Mounting one card is a DOM edit, not a re-render: browsing fixture after
+  // fixture never rebuilds the board.
+  const expand = event.target.closest("[data-expand-fixture]");
+  if (expand) {
+    expandFixture(expand.dataset.expandFixture);
+    return;
+  }
+  if (event.target.closest("[data-full-season]")) {
+    scheduleFullSeason = true;
+    render({ scrollTop: true });
     return;
   }
   // Sharing the table has the same two text paths, with the same need to stay

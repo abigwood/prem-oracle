@@ -1680,3 +1680,35 @@ body.picker-open { overflow: hidden; }
   font-size: 13px;
   text-decoration: underline;
 }
+
+/* Schedule is reference-first: a compact row per fixture, with the prediction
+   card mounted only for the one being looked at. Building the rich card for
+   every fixture is what blocked the web view for over two seconds. */
+.fixture-row { border-bottom: 1px solid var(--line); }
+.fixture-row:last-child { border-bottom: 0; }
+.fixture-row-head {
+  /* Four columns: the chevron is a fourth grid item, and with only three it
+     wrapped onto a second row and doubled the height of every row. */
+  display: grid;
+  grid-template-columns: auto 1fr auto auto;
+  gap: 10px;
+  align-items: center;
+  width: 100%;
+  padding: 10px 14px;
+  border: 0;
+  background: none;
+  text-align: left;
+  color: var(--ink);
+}
+.fixture-row-head::after {
+  content: "⌄";
+  color: var(--muted, #6b7280);
+  transition: transform .15s ease;
+}
+.fixture-row.is-open .fixture-row-head::after { transform: rotate(180deg); }
+.fixture-row-when { color: var(--muted, #6b7280); font-size: .74rem; font-weight: 800; white-space: nowrap; }
+.fixture-row-teams { color: var(--ink); font-size: .92rem; font-weight: 800; }
+.fixture-row-mark { color: var(--purple); font-size: .82rem; font-weight: 900; }
+.fixture-row-body:empty { display: none; }
+.fixture-row.is-open { background: var(--white); }
+.muted-count { color: var(--muted, #6b7280); font-weight: 700; }

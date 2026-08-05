@@ -50,9 +50,14 @@ function board({ open = new Set(["md-1"]), filter = "all", current = "1" } = {})
     let matchdayFilter = filterIn;
     let currentView = "schedule";
     let built = [];
+    let heavy = [];
     const traceTap = () => {};   // the trace is measured in the browser, not here
     const escapeHTML = (v) => String(v ?? "");
-    const matchCard = (f) => { built.push(f.id); return '<div data-match-card="' + f.id + '"></div>'; };
+    const matchCard = (f) => { heavy.push(f.id); return '<div data-match-card="' + f.id + '"></div>'; };
+    const picks = {};
+    let expandedFixtureId = null;
+    const shortKickoff = () => "Sat 21 Aug 15:00";
+    ${lift("function fixtureRow(fixture)").replace("const id = String(fixture.id);", "const id = String(fixture.id); built.push(id);")}
     const periodOfFixture = (f) => f.matchday;
     const comparePeriods = (a, b) => Number(a) - Number(b);
     const periodLabel = (p) => "Matchweek " + p;
@@ -70,8 +75,8 @@ function board({ open = new Set(["md-1"]), filter = "all", current = "1" } = {})
     ${lift("function fillDayBody(card)")}
 
     return {
-      html: () => { built = []; const h = groupedPeriods(fixtures, current); return { h, built: built.slice() }; },
-      fill: (card) => { built = []; fillDayBody(card); return built.slice(); },
+      html: () => { built = []; heavy = []; const h = groupedPeriods(fixtures, current); return { h, built: built.slice(), heavy: heavy.slice() }; },
+      fill: (card) => { built = []; heavy = []; fillDayBody(card); return built.slice(); },
     };
   `);
   return build(fixtures, open, filter, current);
@@ -119,7 +124,9 @@ test("opening a week builds exactly that week", () => {
   const built = app.fill(card);
   assert.equal(built.length, PER_WEEK);
   assert.ok(built.every((id) => id.startsWith("pl-w7-")), built.slice(0, 3).join());
-  assert.match(card.body.innerHTML, /data-match-card="pl-w7-/);
+  // Rows, not prediction cards — the heavy markup is mounted on a tap.
+  assert.match(card.body.innerHTML, /data-fixture-row="pl-w7-/);
+  assert.doesNotMatch(card.body.innerHTML, /data-match-card/);
 });
 
 test("a week is built once and not again", () => {
@@ -158,6 +165,89 @@ test("filtering to a week opens it, so it is never an empty row", () => {
   assert.match(branch, /if \(matchdayFilter !== "all"\) openScheduleDates\.add\(`md-\$\{matchdayFilter\}`\);/);
   const { built } = board({ open: new Set(["md-12"]), filter: "12", current: "1" }).html();
   assert.ok(built.every((id) => id.startsWith("pl-w12-")));
+});
+
+// --- reference-first Schedule ------------------------------------------------
+
+test("navigation builds NO prediction cards, only rows", () => {
+  const { h, built, heavy } = board().html();
+  assert.equal(heavy.length, 0, "matchCard() must not run during navigation");
+  assert.ok(built.length > 0, "but the open week's rows are there");
+  assert.doesNotMatch(h, /data-match-card/);
+  assert.match(h, /data-fixture-row=/);
+});
+
+test("a row says when and who, and nothing heavier", () => {
+  const row = lift("function fixtureRow(fixture)");
+  assert.match(row, /fixture-row-when/);
+  assert.match(row, /fixture-row-teams/);
+  // The card is mounted only for the fixture being looked at.
+  assert.match(row, /\$\{open \? matchCard\(fixture\) : ""\}/);
+  // And it announces itself as expandable.
+  assert.match(row, /aria-expanded="\$\{open \? "true" : "false"\}"/);
+  assert.match(row, /aria-controls="fx-/);
+});
+
+test("only one rich card is ever mounted", () => {
+  const fn = lift("function expandFixture(id)");
+  // Opening another unmounts the previous, and collapsing removes the markup
+  // rather than merely hiding it.
+  assert.match(fn, /body\.innerHTML = "";/);
+  assert.match(fn, /body\.innerHTML = fixture \? matchCard\(fixture\) : "";/);
+  assert.match(fn, /head\.setAttribute\("aria-expanded", "false"\)/);
+  assert.match(fn, /head\.setAttribute\("aria-expanded", "true"\)/);
+  // A DOM edit, not a re-render: browsing never rebuilds the board.
+  assert.doesNotMatch(fn, /\brender\(/);
+});
+
+test("tapping the same fixture again closes it", () => {
+  const fn = lift("function expandFixture(id)");
+  assert.match(fn, /const wanted = expandedFixtureId === String\(id\) \? null : String\(id\);/);
+});
+
+test("the board opens on the current week and the two after it", () => {
+  const fn = lift("function scheduleWindow(periods, current)");
+  assert.match(fn, /periods\.slice\(start, start \+ SCHEDULE_WEEKS_SHOWN\)/);
+  assert.match(APP, /const SCHEDULE_WEEKS_SHOWN = 3;/);
+  // A filter or an explicit reveal opts out of the window.
+  assert.match(fn, /if \(scheduleFullSeason \|\| matchdayFilter !== "all"\) return periods;/);
+});
+
+test("the week selector is trimmed to what the board is showing", () => {
+  const strip = lift("function weekStrip(selected, attribute, only = null)");
+  assert.match(strip, /const periods = only && only\.length \? only : periodsInOrder\(\);/);
+  const view = APP.slice(APP.indexOf("function scheduleView()"), APP.indexOf("// --- My Predictions"));
+  assert.match(view, /scheduleFilters\(shown\)/);
+  assert.match(view, /data-full-season/);
+});
+
+test("arriving at Schedule resets the scroller BEFORE content is added", () => {
+  const nav = lift("async function navigateToView(view)");
+  const reset = nav.indexOf("appScroller()?.scrollTo({ top: 0 })");
+  assert.ok(reset > 0, "the scroller is put back");
+  assert.ok(reset < nav.indexOf("render({ scrollTop: true })"), "before the board is built");
+  assert.match(nav, /scheduleFullSeason = false;/);
+  assert.match(nav, /expandedFixtureId = null;/);
+});
+
+test("expanding and revealing answer on the tap, before any await", () => {
+  const listener = APP.slice(APP.indexOf('document.addEventListener("click", async (event) => {'));
+  const head = listener.slice(0, listener.indexOf("const leagueCountStep"));
+  const code = head.replace(/\/\/[^\n]*/g, "");
+  assert.doesNotMatch(code, /\bawait\b/);
+  assert.match(code, /expandFixture\(expand\.dataset\.expandFixture\)/);
+  assert.match(code, /scheduleFullSeason = true/);
+});
+
+test("a nav tap's trace survives the taps used to report it", () => {
+  // Opening the profile and tapping Copy diagnostics are two more taps; a
+  // plain ring would push the interesting one out before it could be read.
+  assert.match(APP, /const NAV_TRACE_HISTORY = 6;/);
+  const fn = lift("function traceInput(name, event, detail = {})");
+  assert.match(fn, /const navView = tapTrace\.find\(\(step\) => step\.view\)\?\.view;/);
+  assert.match(fn, /navTaps\.push\(\{ view: navView, steps: tapTrace \}\);/);
+  const diag = lift("function diagnosticsText()");
+  assert.match(diag, /nav → \$\{entry\.view\}/);
 });
 
 // --- the shell --------------------------------------------------------------
@@ -213,9 +303,9 @@ test("a lazily built card is the same card", () => {
   // Both paths call the one matchCard, so calendar links, TV info and score
   // controls cannot differ between them.
   const body = lift("function dayBody(period, matches, open)");
-  assert.match(body, /matches\.map\(matchCard\)\.join\(""\)/);
+  assert.match(body, /matches\.map\(fixtureRow\)\.join\(""\)/);
   const fill = lift("function fillDayBody(card)");
-  assert.match(fill, /matches\.map\(matchCard\)\.join\(""\)/);
+  assert.match(fill, /matches\.map\(fixtureRow\)\.join\(""\)/);
   assert.equal((APP.match(/function matchCard\(/g) || []).length, 1, "one card builder, one behaviour");
 });
 

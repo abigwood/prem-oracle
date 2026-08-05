@@ -1263,7 +1263,7 @@ class WeekPickerTests(unittest.TestCase):
     # --- the everyday strip ------------------------------------------------
 
     def test_the_strip_is_centred_on_the_current_week(self):
-        strip = self.app[self.app.index("function weekStrip(selected, attribute)"):]
+        strip = self.app[self.app.index("function weekStrip(selected, attribute, only = null)"):]
         strip = strip[:strip.index("function weekSeasonPicker")]
         # The current week is marked so the scroller can find it...
         self.assertIn('data-week-anchor="1"', strip)
@@ -1277,7 +1277,7 @@ class WeekPickerTests(unittest.TestCase):
         self.assertIn("centreWeekStrip();", self.app)
 
     def test_past_weeks_are_faded_and_the_current_one_is_biggest(self):
-        strip = self.app[self.app.index("function weekStrip(selected, attribute)"):]
+        strip = self.app[self.app.index("function weekStrip(selected, attribute, only = null)"):]
         strip = strip[:strip.index("function weekSeasonPicker")]
         self.assertIn("const past = comparePeriods(period, current) < 0;", strip)
         self.assertIn('past ? " is-past" : ""', strip)
@@ -1291,7 +1291,7 @@ class WeekPickerTests(unittest.TestCase):
         self.assertIn("overflow-x: auto;", self.css[self.css.index(".week-strip {"):])
 
     def test_chips_are_week_n_with_a_date_subtitle(self):
-        strip = self.app[self.app.index("function weekStrip(selected, attribute)"):]
+        strip = self.app[self.app.index("function weekStrip(selected, attribute, only = null)"):]
         strip = strip[:strip.index("function weekSeasonPicker")]
         # Labelled from the period, so a window reads "Week 11" and a matchweek
         # league "Matchweek 11"; the date subtitle is window-only.
@@ -1301,7 +1301,7 @@ class WeekPickerTests(unittest.TestCase):
     def test_the_tuesday_convention_is_stated_once_not_per_chip(self):
         self.assertIn('const WEEK_CONVENTION = `<p class="week-convention">Weeks run Tuesday to Monday.</p>`;', self.app)
         # No chip anywhere carries a weekday prefix any more.
-        for surface in ("function weekStrip(selected, attribute)", "function weekSeasonPicker(selected, attribute)"):
+        for surface in ("function weekStrip(selected, attribute, only = null)", "function weekSeasonPicker(selected, attribute)"):
             block = self.app[self.app.index(surface):]
             block = block[:block.index("\n}\n")]
             self.assertNotIn("windowLabel", block, surface)
@@ -1316,7 +1316,7 @@ class WeekPickerTests(unittest.TestCase):
         self.assertIn("periodsInOrder().indexOf(String(period))", fn)
         self.assertIn("index + 1", fn)
         # "Round" is reserved for official competition rounds.
-        for surface in ("function weekStrip(selected, attribute)", "function weekSeasonPicker(selected, attribute)"):
+        for surface in ("function weekStrip(selected, attribute, only = null)", "function weekSeasonPicker(selected, attribute)"):
             block = self.app[self.app.index(surface):]
             block = block[:block.index("\n}\n")]
             self.assertNotIn("Round", block, surface)
@@ -1441,7 +1441,7 @@ class WeekPickerTests(unittest.TestCase):
         self.assertIn("periodLabel(period)", toggle)
 
     def test_matchweek_leagues_get_the_strip_without_dates_or_convention(self):
-        strip = self.app[self.app.index("function weekStrip(selected, attribute)"):]
+        strip = self.app[self.app.index("function weekStrip(selected, attribute, only = null)"):]
         strip = strip[:strip.index("/**\n * The season view")]
         # One control, labelled from the period itself.
         self.assertIn("const windows = isWindowKey(periods[0]);", strip)
@@ -1935,7 +1935,10 @@ class ScheduleTabTests(unittest.TestCase):
         body = self.app[self.app.index("function dayBody(period, matches, open)"):]
         body = body[:body.index("\n}")]
         self.assertIn('if (!open) return `<div class="day-body" data-lazy-body=', body)
-        self.assertIn('matches.map(matchCard).join("")', body)
+        # Rows, not prediction cards: building matchCard() for every fixture
+        # during navigation is what blocked the web view for 2263ms.
+        self.assertIn('matches.map(fixtureRow).join("")', body)
+        self.assertNotIn("matchCard", body)
 
     def test_expanding_builds_that_week_on_demand(self):
         fill = self.app[self.app.index("function fillDayBody(card)"):]
@@ -1944,7 +1947,8 @@ class ScheduleTabTests(unittest.TestCase):
         self.assertIn("if (!body) return;", fill)
         self.assertIn('body.removeAttribute("data-lazy-body");', fill)
         # Same card builder as the eager path, so calendar and TV info cannot drift.
-        self.assertIn('matches.map(matchCard).join("")', fill)
+        self.assertIn('matches.map(fixtureRow).join("")', fill)
+        self.assertNotIn("matchCard", fill)
         toggle = self.app[self.app.index('document.addEventListener("toggle"'):]
         self.assertIn("fillDayBody(card);", toggle)
 

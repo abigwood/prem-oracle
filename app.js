@@ -1,6 +1,6 @@
 const SEASON_START = new Date("2026-08-21T20:00:00+01:00");
 const SEASON_START_DATE = "2026-08-21";
-const APP_BUILD = "20260805b";
+const APP_BUILD = "20260805c";
 const API = window.PREM_API || null;
 // Canonical public home of the web app. Inside the Capacitor shell the page is
 // served from premoracle://localhost, so location.origin can never be used to
@@ -2974,24 +2974,154 @@ let renderedHTML = null;
 let tapInProgress = false;
 let heldRender = null;
 
-function flushHeldRender() {
+/**
+ * What actually happened between a finger touching the glass and the screen
+ * changing.
+ *
+ * Written because the obvious explanations for a slow tap keep being wrong:
+ * the event sequence, the mechanism that releases the hold, and where the
+ * milliseconds go are all things to record rather than assume. Timing starts at
+ * the PHYSICAL pointerdown, not when a handler eventually receives it — the gap
+ * between those two is itself one of the things being measured.
+ *
+ * Local only. It goes nowhere unless the viewer copies it and sends it.
+ */
+const TAP_TRACE_LIMIT = 60;
+const TAP_HISTORY = 3;
+let tapTrace = [];
+let tapStartedAt = 0;
+// Finished taps, newest last. The whole point is that somebody hits a slow tap
+// and THEN goes to copy the diagnostics — if starting a new tap wiped the
+// record, the only trace ever reported would be of opening the dialog.
+let recentTaps = [];
+
+/**
+ * When the browser says the physical event happened, on performance.now()'s
+ * clock.
+ *
+ * Modern engines give event.timeStamp relative to the time origin, which is
+ * directly comparable; older ones gave epoch milliseconds. Anything that comes
+ * out in the future, or implausibly far in the past, is not usable — the caller
+ * falls back to receipt time and the trace says which baseline it used.
+ */
+function eventTime(event) {
+  const raw = typeof event?.timeStamp === "number" ? event.timeStamp : NaN;
+  if (!Number.isFinite(raw) || raw <= 0) return null;
+  const candidate = raw > 1e12 ? raw - performance.timeOrigin : raw;
+  const now = performance.now();
+  if (candidate > now + 1 || candidate < now - 60000) return null;
+  return candidate;
+}
+
+function traceTap(event, detail) {
+  const now = performance.now();
+  if (!tapStartedAt) return;
+  tapTrace.push({ at: +(now - tapStartedAt).toFixed(1), event, ...detail });
+  if (tapTrace.length > TAP_TRACE_LIMIT) tapTrace.shift();
+}
+
+/**
+ * An input event, timed from when it PHYSICALLY happened rather than from when
+ * JavaScript got round to it. The gap between the two is main-thread queueing,
+ * and it is invisible to every other measurement here — a listener that starts
+ * late has no way of knowing it was late.
+ */
+function traceInput(name, event, detail = {}) {
+  const received = performance.now();
+  const stamped = eventTime(event);
+  if (name === "pointerdown") {
+    if (tapTrace.length > 1) {
+      recentTaps.push(tapTrace);
+      if (recentTaps.length > TAP_HISTORY) recentTaps.shift();
+    }
+    tapTrace = [];
+    // The physical moment is the baseline whenever the engine gives us one.
+    tapStartedAt = stamped ?? received;
+  }
+  if (!tapStartedAt) return;
+  const entry = {
+    at: +((stamped ?? received) - tapStartedAt).toFixed(1),
+    event: name,
+    recv: +(received - tapStartedAt).toFixed(1),
+    ...detail,
+  };
+  if (stamped !== null) entry.queue = +(received - stamped).toFixed(1);
+  else entry.baseline = "receipt";   // no usable event timestamp on this engine
+  tapTrace.push(entry);
+  if (tapTrace.length > TAP_TRACE_LIMIT) tapTrace.shift();
+}
+
+// Main-thread stalls during a tap are invisible to every other measurement
+// here: nothing else can run to observe them, including this file's timers.
+if (typeof PerformanceObserver === "function") {
+  try {
+    new PerformanceObserver((list) => {
+      for (const entry of list.getEntries()) {
+        if (entry.duration >= 50) traceTap("longtask", { ms: Math.round(entry.duration) });
+      }
+    }).observe({ entryTypes: ["longtask"] });
+  } catch {
+    // Not every engine reports long tasks; the rest of the trace still stands.
+  }
+}
+
+function flushHeldRender(releasedBy) {
   if (!tapInProgress) return;
+  traceTap("hold-released", { by: releasedBy });
   tapInProgress = false;
   const held = heldRender;
   heldRender = null;
   if (held) render(held);
 }
 
-document.addEventListener("pointerdown", () => {
+document.addEventListener("pointerdown", (event) => {
   tapInProgress = true;
-  setTimeout(flushHeldRender, 500); // a finger held down is not a reason to freeze
+  traceInput("pointerdown", event, {
+    pointerType: event.pointerType,
+    x: Math.round(event.clientX),
+    y: Math.round(event.clientY),
+    target: describeTarget(event.target),
+    scale: window.visualViewport ? +window.visualViewport.scale.toFixed(3) : null,
+    offsetTop: window.visualViewport ? Math.round(window.visualViewport.offsetTop) : null,
+  });
+  setTimeout(() => flushHeldRender("watchdog-500ms"), 500);
 }, true);
-document.addEventListener("pointercancel", flushHeldRender, true);
-document.addEventListener("pointerup", () => setTimeout(flushHeldRender, 0), true);
+
+document.addEventListener("pointerup", (event) => {
+  traceInput("pointerup", event, { pointerType: event.pointerType });
+  setTimeout(() => flushHeldRender("pointerup"), 0);
+}, true);
+
+document.addEventListener("pointercancel", (event) => {
+  traceInput("pointercancel", event, { pointerType: event.pointerType });
+  flushHeldRender("pointercancel");
+}, true);
+
+// Recorded, not handled: if iOS ever sends these without pointer events, the
+// trace says so instead of us guessing.
+for (const name of ["touchstart", "touchend", "touchcancel"]) {
+  document.addEventListener(name, (event) => traceInput(name, event), true);
+}
+
+document.addEventListener("click", (event) => {
+  traceInput("click", event, {
+    target: describeTarget(event.target),
+    view: event.target.closest?.("[data-view]")?.dataset.view ?? null,
+  });
+}, true);
+
+/** Enough to identify what was hit, without carrying anything personal. */
+function describeTarget(node) {
+  const el = node?.closest?.("[data-view], button, a, summary, input") || node;
+  if (!el || !el.tagName) return "?";
+  const view = el.dataset?.view ? `[data-view=${el.dataset.view}]` : "";
+  const cls = typeof el.className === "string" && el.className ? "." + el.className.split(" ")[0] : "";
+  return `${el.tagName}${view}${cls}`;
+}
 
 function render(options = {}) {
   // Held, not dropped: the newest request wins and lands when the tap is done.
-  if (tapInProgress) { heldRender = options; return; }
+  if (tapInProgress) { heldRender = options; traceTap("render-held", {}); return; }
   const app = document.getElementById("app");
   const views = { today: todayView, schedule: scheduleView, picks: picksView, league: leagueView, rules: rulesView };
   const html = (views[currentView] || todayView)();
@@ -2999,6 +3129,7 @@ function render(options = {}) {
   if (changed) {
     app.innerHTML = html;
     renderedHTML = html;
+    traceTap("render", { view: currentView, chars: html.length });
   }
   renderPickerLayer();
   document.getElementById("profileInitial").textContent = playerInitial();
@@ -3055,6 +3186,7 @@ function paintShell(view) {
   const app = document.getElementById("app");
   if (!app) return false;
   app.innerHTML = shell();
+  traceTap("shell-inserted", { view });
   // The shell is not the view, so the next render must not be deduped away.
   renderedHTML = null;
   markActiveTab();
@@ -3068,7 +3200,10 @@ function markActiveTab() {
 }
 
 /** Lets the browser paint what has just been written before more work starts. */
-const nextPaint = () => new Promise((resolve) => requestAnimationFrame(() => setTimeout(resolve, 0)));
+const nextPaint = () => new Promise((resolve) => requestAnimationFrame(() => setTimeout(() => {
+  traceTap("shell-painted", {});
+  resolve();
+}, 0)));
 
 async function navigateToView(view) {
   if (!view) return;
@@ -3241,13 +3376,30 @@ window.premOracleViewport = viewportReport;
  */
 function diagnosticsText() {
   const report = viewportReport();
-  return [
+  const lines = [
     `Prem Oracle ${APP_BUILD}`,
     `scale ${report.scale}  viewport ${report.vvWidth}  offsetTop ${report.offsetTop}`,
     `innerWidth ${report.innerWidth}  screenWidth ${report.screenWidth}  dpr ${report.dpr}`,
     `rootFont ${report.rootFontPx}px  native ${report.native}`,
-  ].join("\n");
+  ];
+  // Times are milliseconds from the physical pointerdown, which is where a slow
+  // tap actually begins — not where a handler eventually hears about it.
+  const traces = [...recentTaps, tapTrace].filter((trace) => trace.length > 1);
+  traces.forEach((trace, index) => {
+    lines.push("", `tap ${index + 1 - traces.length === 0 ? "(current)" : `(-${traces.length - index - 1})`} — ms from pointerdown:`);
+    for (const step of trace) {
+      const extra = Object.entries(step)
+        .filter(([key]) => key !== "at" && key !== "event")
+        .map(([key, value]) => `${key}=${value}`)
+        .join(" ");
+      lines.push(`  ${String(step.at).padStart(7)}  ${step.event}${extra ? "  " + extra : ""}`);
+    }
+  });
+  return lines.join("\n");
 }
+
+// Readable from a support session without a debugger attached.
+window.premOracleTapTrace = () => [...recentTaps, tapTrace].filter((t) => t.length > 1);
 
 function restoreViewport() {
   const report = viewportReport();

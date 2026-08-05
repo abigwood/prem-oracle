@@ -50,6 +50,7 @@ function board({ open = new Set(["md-1"]), filter = "all", current = "1" } = {})
     let matchdayFilter = filterIn;
     let currentView = "schedule";
     let built = [];
+    const traceTap = () => {};   // the trace is measured in the browser, not here
     const escapeHTML = (v) => String(v ?? "");
     const matchCard = (f) => { built.push(f.id); return '<div data-match-card="' + f.id + '"></div>'; };
     const periodOfFixture = (f) => f.matchday;
@@ -192,7 +193,10 @@ test("the shell waits for a frame AND a task, not just a promise", () => {
   // is the whole point of the pause.
   const line = liftConst("nextPaint");
   assert.match(line, /requestAnimationFrame/);
-  assert.match(line, /setTimeout\(resolve, 0\)/);
+  assert.match(line, /setTimeout\(/);
+  // And it records the moment the shell actually reaches the glass, which is
+  // the number a slow-tap report needs.
+  assert.match(line, /traceTap\("shell-painted"/);
 });
 
 test("the tap-hold from build 11 cannot swallow the shell", () => {

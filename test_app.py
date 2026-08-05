@@ -1820,21 +1820,24 @@ class LeagueSwitchAndShareTests(unittest.TestCase):
     def test_a_repaint_is_held_for_the_length_of_a_tap(self):
         fn = self.app[self.app.index("function render(options = {})"):]
         fn = fn[:fn.index("\n}")]
-        self.assertIn("if (tapInProgress) { heldRender = options; return; }", fn)
-        flush = self.app[self.app.index("function flushHeldRender()"):]
+        self.assertIn('if (tapInProgress) { heldRender = options; traceTap("render-held", {}); return; }', fn)
+        flush = self.app[self.app.index("function flushHeldRender(releasedBy)"):]
         flush = flush[:flush.index("\n}")]
         self.assertIn("tapInProgress = false;", flush)
         self.assertIn("if (held) render(held);", flush)
 
     def test_every_way_a_tap_can_end_releases_the_repaint(self):
         for release in (
-            'document.addEventListener("pointercancel", flushHeldRender, true);',
-            'document.addEventListener("pointerup", () => setTimeout(flushHeldRender, 0), true);',
+            'flushHeldRender("pointercancel");',
+            'setTimeout(() => flushHeldRender("pointerup"), 0);',
             'document.addEventListener("click", flushHeldRender);',
         ):
             self.assertIn(release, self.app, release)
         # And a finger simply held down cannot freeze the screen.
-        self.assertIn("setTimeout(flushHeldRender, 500);", self.app)
+        self.assertIn('setTimeout(() => flushHeldRender("watchdog-500ms"), 500);', self.app)
+        # Every release names itself, so the trace says which one fired.
+        for mechanism in ("pointerup", "pointercancel", "watchdog-500ms"):
+            self.assertIn(f'flushHeldRender("{mechanism}")', self.app, mechanism)
         # The click flush is registered after the handler that acts on the tap,
         # so the button is never replaced before its own click is delivered.
         self.assertLess(
@@ -1921,10 +1924,12 @@ class ScheduleTabTests(unittest.TestCase):
         self.assertIn("markActiveTab();", paint)
 
     def test_the_pause_is_long_enough_to_actually_paint(self):
-        line = self.app[self.app.index("const nextPaint ="):]
-        line = line[:line.index("\n")]
-        self.assertIn("requestAnimationFrame", line)
-        self.assertIn("setTimeout(resolve, 0)", line)
+        block = self.app[self.app.index("const nextPaint ="):]
+        block = block[:block.index("async function navigateToView")]
+        self.assertIn("requestAnimationFrame", block)
+        self.assertIn("setTimeout(", block)
+        # The moment the shell reaches the glass is recorded, not assumed.
+        self.assertIn('traceTap("shell-painted", {});', block)
 
     def test_a_closed_week_builds_no_cards(self):
         body = self.app[self.app.index("function dayBody(period, matches, open)"):]
@@ -2118,6 +2123,66 @@ class NamesAndViewportTests(unittest.TestCase):
         self.assertIn("Math.abs(report.scale - 1) > 0.01", restore)
         # Reachable from a support session without a debugger attached.
         self.assertIn("window.premOracleViewport = viewportReport;", self.app)
+
+    def test_the_trace_baseline_is_the_physical_event_not_its_receipt(self):
+        # performance.now() inside the listener measures from when JavaScript
+        # RECEIVED the event. Any main-thread queueing before that is exactly
+        # where a multi-second delay would hide, and it would be invisible.
+        fn = self.app[self.app.index("function traceInput(name, event, detail = {})"):]
+        fn = fn[:fn.index("\n}")]
+        self.assertIn("const stamped = eventTime(event);", fn)
+        self.assertIn("tapStartedAt = stamped ?? received;", fn)
+        self.assertIn("entry.queue = +(received - stamped).toFixed(1);", fn)
+        # Receipt is kept alongside, so the trace separates the stages.
+        self.assertIn("recv: +(received - tapStartedAt).toFixed(1),", fn)
+        # And when no usable timestamp exists, the trace says which baseline it fell back to.
+        self.assertIn('entry.baseline = "receipt";', fn)
+
+    def test_event_timestamps_are_normalised_before_they_are_trusted(self):
+        fn = self.app[self.app.index("function eventTime(event)"):]
+        fn = fn[:fn.index("\n}")]
+        # Epoch-based timestamps from older engines are converted, not used raw.
+        self.assertIn("raw > 1e12 ? raw - performance.timeOrigin : raw", fn)
+        # A future or implausibly old value is not a measurement.
+        self.assertIn("if (candidate > now + 1 || candidate < now - 60000) return null;", fn)
+        self.assertIn("if (!Number.isFinite(raw) || raw <= 0) return null;", fn)
+
+    def test_queue_delay_is_recorded_for_every_input_event(self):
+        for name in ("pointerdown", "pointerup", "pointercancel", "click"):
+            self.assertIn(f'traceInput("{name}", event', self.app, name)
+        # Touch events too, so the sequence question is settled by the trace.
+        self.assertIn('document.addEventListener(name, (event) => traceInput(name, event), true);', self.app)
+
+    def test_the_trace_records_what_happened_rather_than_assuming(self):
+        # Every stage the corrections asked for, and pointerType with it, so
+        # the event mechanism is observed rather than guessed at.
+        for recorded in (
+            'traceInput("pointerdown"', 'traceInput("pointerup"', 'traceInput("pointercancel"',
+            'traceInput("click"', 'traceTap("shell-inserted"', 'traceTap("shell-painted"',
+            'traceTap("render"', 'traceTap("render-held"', 'traceTap("longtask"',
+            'traceTap("hold-released"',
+        ):
+            self.assertIn(recorded, self.app, recorded)
+        down = self.app[self.app.index('document.addEventListener("pointerdown", (event) => {'):]
+        down = down[:down.index("}, true);")]
+        for field in ("pointerType:", "x:", "y:", "target:", "scale:", "offsetTop:"):
+            self.assertIn(field, down, field)
+        # Touch events are recorded too, so a claim that iOS sends those
+        # INSTEAD of pointer events is settled by the trace, not by assertion.
+        self.assertIn('for (const name of ["touchstart", "touchend", "touchcancel"])', self.app)
+        # Main-thread stalls, which nothing else in the trace could observe.
+        self.assertIn('entryTypes: ["longtask"]', self.app)
+
+    def test_a_slow_tap_survives_long_enough_to_be_reported(self):
+        # Somebody hits a slow tap and THEN opens diagnostics. If a new tap
+        # wiped the record, the only trace ever sent would be of the dialog.
+        fn = self.app[self.app.index("function traceInput(name, event, detail = {})"):]
+        fn = fn[:fn.index("\n}")]
+        self.assertIn("recentTaps.push(tapTrace);", fn)
+        self.assertIn("if (recentTaps.length > TAP_HISTORY) recentTaps.shift();", fn)
+        diag = self.app[self.app.index("function diagnosticsText()"):]
+        diag = diag[:diag.index("\n}")]
+        self.assertIn("[...recentTaps, tapTrace]", diag)
 
     def test_diagnostics_are_local_only_and_carry_no_identity(self):
         # The App Privacy label declares no diagnostic collection, and this

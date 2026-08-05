@@ -318,18 +318,19 @@ function renderer() {
     let renderedHTML = null;
     let tapInProgress = false;
     let heldRender = null;
-    ${lift("function flushHeldRender()")}
+    const traceTap = () => {};   // the trace is measured in the browser, not here
+    ${lift("function flushHeldRender(releasedBy)")}
     ${lift("function render(options = {})")}
 
     // Install the pointer listeners exactly as app.js does.
-    document.addEventListener("pointerdown", () => { tapInProgress = true; setTimeout(flushHeldRender, 500); }, true);
-    document.addEventListener("pointercancel", flushHeldRender, true);
-    document.addEventListener("pointerup", () => setTimeout(flushHeldRender, 0), true);
+    document.addEventListener("pointerdown", () => { tapInProgress = true; setTimeout(() => flushHeldRender("watchdog-500ms"), 500); }, true);
+    document.addEventListener("pointercancel", () => flushHeldRender("pointercancel"), true);
+    document.addEventListener("pointerup", () => setTimeout(() => flushHeldRender("pointerup"), 0), true);
 
     const fire = (type) => (listeners[type] || []).forEach((fn) => fn());
     const runTimers = () => { const due = timers.splice(0); due.forEach((t) => t.fn()); };
     return {
-      render, flushHeldRender,
+      render, flushHeldRender: () => flushHeldRender("test"),
       setView: (v) => { view = v; },
       writes: () => writes.slice(),
       centred: () => centred,

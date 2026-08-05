@@ -323,6 +323,25 @@ function island({ buildMs = 0 } = {}) {
     const { El } = dom;
     const events = [];
     const resultsEl = new El("div");
+    const pickerEl = new El("div");
+    const matchdaySeg = new El("button");
+    let fixtureRevisions = { PL: "r1" };
+    let matchdayPickerOpen = false;
+    let apiCalls = 0;
+    let roundCalls = [];
+    let roundDelayMs = 0;
+    let cachedRounds = {};
+    let weekSelectionGeneration = 0;
+    const cachedRoundState = (code, period) => cachedRounds[code + ":" + period] || null;
+    const loadRoundState = async () => {
+      const want = selectedPeriod;
+      roundCalls.push(want);
+      const wait = roundDelayMs;
+      await new Promise((r) => setTimeoutOrig(r, wait));
+      roundState = { code: activeLeague, period: want, matchday: want, fresh: true };
+    };
+    const currentPeriodKey = () => 1;
+    const weekStrip = () => { apiCalls += 0; return "<weeks/>"; };
     const shareBtn = new El("button");
     const card = new El("section");
     const segs = ["matchday", "season"].map((t) => { const e = new El("button"); e.dataset = { roundTab: t }; return e; });
@@ -331,7 +350,9 @@ function island({ buildMs = 0 } = {}) {
       createElement: (tag) => new El(tag),
       querySelector: (sel) => (sel === "[data-league-results]" ? resultsEl
         : sel === "[data-export-league-table]" ? shareBtn
-        : sel === ".league-card" ? card : null),
+        : sel === ".league-card" ? card
+        : sel === "[data-picker-island]" ? pickerEl
+        : sel === '[data-round-tab="matchday"]' ? matchdaySeg : null),
       querySelectorAll: (sel) => (sel === "[data-round-tab]" ? segs : sel === "[data-league]" ? pills : []),
     };
     let renders = 0;
@@ -356,6 +377,7 @@ function island({ buildMs = 0 } = {}) {
     const seasonTableHtml = () => { const t = Date.now(); while (Date.now() - t < buildMs) {} return "<stable>"; };
     const weekSeasonPicker = () => "<weeks>";
     const leagueRevealsHtml = () => "<reveals>";
+    const pulsingStatus = (m) => '<p class="view-loading is-pulsing">' + m + "</p>";
     const roundBanner = () => "<rbanner>";
     const roundTableHtml = () => "<roundtable>";
 
@@ -364,6 +386,11 @@ function island({ buildMs = 0 } = {}) {
     let retainedPanels = new Map();
     let panelGeneration = 0;
     let mountedKey = null;
+    let mountedContext = null;
+    let pickerGeneration = 0;
+    const sameContext = (code, tab, period) =>
+      mountedContext && mountedContext.code === code && mountedContext.tab === tab
+      && String(mountedContext.period) === String(period);
     let leagueStamps = new Map();
     ${liftLine("const stampFor =")}
     ${liftLine("const bumpStamp =")}
@@ -379,6 +406,14 @@ function island({ buildMs = 0 } = {}) {
     ${lift("function mountResults()")}
     ${lift("function markSegment(tab)")}
     ${lift("function markLeaguePill(code)")}
+    let retainedPickers = new Map();
+    const pickerKey = () =>
+      activeLeague + "|" + Object.values(fixtureRevisions).join(",") + "|" + (selectedPeriod ?? currentPeriodKey());
+    ${lift("function pickerIsland()")}
+    ${lift("function markPickerExpanded(open)")}
+    ${lift("async function toggleWeeklyPicker()")}
+    ${lift("function closeWeeklyPicker()")}
+    ${lift("async function selectWeeklyPeriod(week)")}
     ${lift("function leagueCardShell(name, code)")}
 
     return {
@@ -400,6 +435,16 @@ function island({ buildMs = 0 } = {}) {
       retainedSize: () => retainedPanels.size,
       showResultsPanel, markSegment, markLeaguePill, mountResults,
       replaceCard: (code) => { card.replaceChildren(leagueCardShell(leagueNames[code] || code, code)); },
+      toggleWeeklyPicker, closeWeeklyPicker, selectWeeklyPeriod,
+      roundCalls: () => roundCalls.slice(),
+      setRoundDelay: (ms) => { roundDelayMs = ms; },
+      seedRound: (code, period) => { cachedRounds[code + ":" + period] = { code, period, matchday: period, cached: true }; },
+      roundNow: () => roundState,
+      pickerNode: () => pickerEl.firstElementChild,
+      pickerOpen: () => matchdayPickerOpen,
+      pickerAria: () => matchdaySeg.getAttribute("aria-expanded"),
+      apiCalls: () => apiCalls,
+      bumpRevision: () => { fixtureRevisions = { PL: "r2" }; },
     };
   `);
   return { ...build(dom, buildMs), writes: dom.writes };
@@ -584,6 +629,288 @@ test("the share label always matches the visible tab", () => {
   assert.ok((pill.match(/syncShareLabel\(\)/g) || []).length >= 2, "and after a pill switch");
 });
 
+// --- build 18: the weekly picker island (F4-F11) -----------------------------
+
+// F4
+test("opening and closing the dropdown renders nothing globally and asks nothing", async () => {
+  const app = island();
+  const before = app.renders();
+  await app.toggleWeeklyPicker();
+  assert.equal(app.pickerOpen(), true);
+  assert.equal(app.pickerAria(), "true", "and says so");
+  await app.toggleWeeklyPicker();
+  assert.equal(app.pickerOpen(), false);
+  assert.equal(app.pickerAria(), "false");
+  assert.equal(app.renders(), before, "the League screen is not rebuilt to show a list of weeks");
+  assert.equal(app.apiCalls(), 0, "and nothing is fetched");
+  assert.equal(app.pickerNode(), null, "closing empties the container");
+});
+
+// F5
+test("reopening the dropdown reuses the exact same node", async () => {
+  const app = island();
+  await app.toggleWeeklyPicker();
+  const first = app.pickerNode();
+  assert.ok(first, "built once");
+  const writesAfterBuild = app.writes();
+  await app.toggleWeeklyPicker();     // shut
+  await app.toggleWeeklyPicker();     // open again
+  assert.strictEqual(app.pickerNode(), first, "the SAME element must come back");
+  assert.equal(app.writes(), writesAfterBuild, "and nothing is reparsed");
+});
+
+test("a changed fixture revision rebuilds the picker rather than reusing it", async () => {
+  const app = island();
+  await app.toggleWeeklyPicker();
+  const first = app.pickerNode();
+  await app.toggleWeeklyPicker();
+  app.bumpRevision();
+  await app.toggleWeeklyPicker();
+  assert.notStrictEqual(app.pickerNode(), first, "new fixtures, new picker");
+});
+
+test("an unbuilt picker acknowledges before it is built", async () => {
+  const app = island();
+  const pending = app.toggleWeeklyPicker();
+  assert.match(app.pickerNode()?.className ?? "", /is-pulsing/, "acknowledged in the tap task");
+  await pending;
+  assert.match(app.pickerNode()?.className ?? "", /picker-weeks/, "then the real picker");
+});
+
+// F9 F10
+test("a refresh never removes a valid panel, and swaps atomically when ready", async () => {
+  const app = island({ buildMs: 3 });
+  app.setTab("season");
+  await app.showResultsPanel();
+  const original = app.panelNode();
+  assert.ok(original, "something valid is on screen");
+
+  app.bumpFor("AAA");                 // truth refreshed
+  const pending = app.showResultsPanel();
+  // Still showing the old panel while the new one is built offscreen.
+  assert.strictEqual(app.panelNode(), original, "valid content must not be removed mid-refresh");
+  assert.ok(app.events.some((e) => e.trace === "results-kept-visible"), "and it says it kept it");
+  await pending;
+  assert.notStrictEqual(app.panelNode(), original, "replaced only once complete");
+  assert.ok(app.events.some((e) => e.trace === "panel-swapped"), "in one atomic swap");
+});
+
+test("a loader appears only when there is nothing valid to keep", async () => {
+  const app = island();
+  app.setTab("season");
+  await app.showResultsPanel();
+  const shells = app.events.filter((e) => e.trace === "results-shell-inserted").length;
+  assert.equal(shells, 1, "the first, uncached visit gets one");
+  app.bumpFor("AAA");
+  await app.showResultsPanel();
+  assert.equal(
+    app.events.filter((e) => e.trace === "results-shell-inserted").length,
+    shells,
+    "and a refresh over valid content gets none",
+  );
+});
+
+// F11
+test("rapid tab changes during a refresh still land on the final choice", async () => {
+  const app = island({ buildMs: 4 });
+  app.setTab("season");
+  const a = app.showResultsPanel();
+  app.setTab("matchday");
+  const b = app.showResultsPanel();
+  await Promise.all([a, b]);
+  assert.match(app.text(), /roundtable/, "the last tab wins");
+});
+
+// --- build 18 final: context, not just truth ---------------------------------
+
+test("a panel for a DIFFERENT week is never held on screen under the new one", async () => {
+  const app = island({ buildMs: 3 });
+  app.setTab("season");
+  await app.showResultsPanel();
+  const seasonPanel = app.panelNode();
+
+  // Same league, different tab: the old answer is not stale content, it is the
+  // wrong table, so it must not be kept visible.
+  app.setTab("matchday");
+  const pending = app.showResultsPanel();
+  assert.notStrictEqual(app.panelNode(), seasonPanel, "the season panel must not linger");
+  await pending;
+  assert.ok(
+    app.events.some((e) => e.trace === "results-shell-inserted"),
+    "an unrelated context gets the acknowledgement, not the previous panel",
+  );
+});
+
+test("only a same-context refresh keeps the visible panel", async () => {
+  const app = island({ buildMs: 3 });
+  app.setTab("season");
+  await app.showResultsPanel();
+  const original = app.panelNode();
+  app.bumpFor("AAA");                       // same league, tab and week
+  const pending = app.showResultsPanel();
+  assert.strictEqual(app.panelNode(), original, "kept while the replacement builds");
+  await pending;
+  assert.ok(app.events.some((e) => e.trace === "results-kept-visible"));
+});
+
+test("a different period does not count as the same context", async () => {
+  const app = island();
+  app.setTab("matchday");
+  await app.showResultsPanel();
+  app.setPeriod(7);
+  const pending = app.showResultsPanel();
+  assert.ok(
+    app.events.filter((e) => e.trace === "results-kept-visible").length === 0,
+    "week 7 must not sit under week 1's panel",
+  );
+  await pending;
+});
+
+test("the picker generation discards an open job overtaken by close then reopen", async () => {
+  const app = island();
+  const first = app.toggleWeeklyPicker();   // open
+  app.closeWeeklyPicker();                  // shut before it built
+  await first;
+  assert.ok(app.events.some((e) => e.trace === "picker-discarded"), "the first job abandoned");
+  assert.equal(app.pickerNode(), null, "and nothing was inserted after the close");
+});
+
+test("the retained picker key carries the selected week", () => {
+  // The current week is highlighted inside the picker, so the highlight would
+  // go stale as the week rolled over while the revision stayed the same.
+  const key = liftLine("const pickerKey = () =>");
+  const body = APP.slice(APP.indexOf("const pickerKey = () =>"), APP.indexOf(";", APP.indexOf("const pickerKey = () =>") + 30));
+  assert.match(body, /selectedPeriod \?\? currentPeriodKey\(\)/);
+  assert.match(body, /fixtureRevisions/);
+  assert.match(body, /activeLeague/);
+});
+
+// F7 — behavioural
+test("a cached week paints before the request, and still refreshes exactly once", async () => {
+  const app = island();
+  app.seedRound("AAA", 3);
+  app.setRoundDelay(20);
+  const pending = app.selectWeeklyPeriod(3);
+
+  // Synchronously after the call the cached week is already the round state.
+  assert.equal(app.roundNow()?.period, 3, "week 3's own cache, not the previous week");
+  assert.equal(app.roundNow()?.cached, true);
+  assert.deepEqual(app.roundCalls(), [], "nothing requested yet");
+
+  await pending;
+  assert.deepEqual(app.roundCalls(), [3], "exactly one refresh, cache hit or not");
+  assert.equal(app.roundNow()?.fresh, true, "and the fresh answer replaced it");
+});
+
+// F8 — behavioural
+test("an uncached week acknowledges first and never shows the previous week", async () => {
+  const app = island();
+  app.seedRound("AAA", 2);
+  app.setRoundDelay(15);
+  await app.selectWeeklyPeriod(2);          // week 2 is on screen
+  const week2Panel = app.panelNode();
+
+  const pending = app.selectWeeklyPeriod(5);   // nothing cached for 5
+  assert.equal(app.roundNow(), null, "week 2's table is cleared, not reused");
+  assert.notStrictEqual(app.panelNode(), week2Panel, "and its panel is not left up");
+  await pending;
+  assert.deepEqual(app.roundCalls(), [2, 5], "one refresh each");
+  assert.equal(app.roundNow()?.period, 5);
+});
+
+test("rapid week changes with reversed responses finish on the LAST week", async () => {
+  const app = island();
+  app.setRoundDelay(30);
+  const two = app.selectWeeklyPeriod(2);
+  app.setRoundDelay(2);
+  const three = app.selectWeeklyPeriod(3);
+  await Promise.all([two, three]);
+  assert.equal(app.roundNow()?.period, 3, "week 3 was chosen last, so week 3 wins");
+  assert.ok(
+    app.events.some((e) => e.trace === "week-selection-discarded"),
+    "and the overtaken selection said so rather than repainting",
+  );
+});
+
+test("a stale week response cannot change the share label", async () => {
+  const app = island();
+  app.setRoundDelay(25);
+  const two = app.selectWeeklyPeriod(2);
+  app.setRoundDelay(1);
+  const three = app.selectWeeklyPeriod(3);
+  await Promise.all([two, three]);
+  assert.match(app.shareLabel(), /Share Matchweek 3 result/, `got ${app.shareLabel()}`);
+});
+
+test("selecting a week closes the picker and voids its pending build", async () => {
+  const app = island();
+  const opening = app.toggleWeeklyPicker();
+  await app.selectWeeklyPeriod(4);
+  await opening;
+  assert.equal(app.pickerOpen(), false);
+  assert.equal(app.pickerAria(), "false");
+  assert.equal(app.pickerNode(), null, "the island is empty and nothing arrived late");
+});
+
+test("building a full week picker scans the fixture list ONCE, not once per week", () => {
+  // weekStrip called periodLabel per chip, which called weekNumberFor, which
+  // rescanned and re-sorted every fixture. Thirty-eight weeks of nine hundred
+  // fixtures is what produced 3.5 seconds of synchronous build.
+  let scans = 0;
+  const build = new Function(`
+    "use strict";
+    let scanCount = 0;
+    let fixtures = Array.from({ length: 932 }, (_, i) => ({ id: "f" + i, week: Math.floor(i / 25) + 1 }));
+    const periodOfFixture = (f) => { scanCount++; return "w" + String(f.week).padStart(2, "0"); };
+    const comparePeriods = (a, b) => String(a).localeCompare(String(b));
+    const isWindowKey = () => true;
+    let periodIndexCache = { source: null, list: [], index: new Map() };
+    ${lift("function periodIndex()")}
+    ${lift("function periodsInOrder()")}
+    ${lift("function weekNumberFor(period)")}
+    return {
+      drawAll: () => { const all = periodsInOrder(); return all.map((p) => weekNumberFor(p)); },
+      scans: () => scanCount,
+      total: () => fixtures.length,
+      reload: () => { fixtures = fixtures.slice(); },
+    };
+  `);
+  const app = build();
+  const numbers = app.drawAll();
+  scans = app.scans();
+
+  assert.deepEqual(numbers.slice(0, 3), [1, 2, 3], "week numbers still come out right");
+  assert.equal(scans, app.total(), `one pass over the fixtures, got ${scans} for ${app.total()} fixtures`);
+
+  // Drawing again costs nothing at all.
+  app.drawAll();
+  assert.equal(app.scans(), scans, "a second draw reuses the prepared index");
+
+  // A new fixture list invalidates it, because the array identity changed.
+  app.reload();
+  app.drawAll();
+  assert.equal(app.scans(), scans * 2, "and a reloaded feed is prepared afresh");
+});
+
+test("the Weekly League dropdown still reaches every week", () => {
+  // The dead matchdayPicker() is gone; this exercises the live opener.
+  assert.ok(!APP.includes("function matchdayPicker("), "dead path removed");
+  const opener = lift("async function toggleWeeklyPicker()");
+  assert.match(opener, /weekStrip\(selectedPeriod \?\? currentPeriodKey\(\), "data-round-md"\)/);
+  const strip = lift("function weekStrip(selected, attribute, only = null)");
+  // No trimming unless a caller asks for it, so the picker offers the lot.
+  assert.match(strip, /const periods = only && only\.length \? only : periodsInOrder\(\);/);
+});
+
+test("the segments say what they are, and the dropdown reports its state", () => {
+  const toggle = lift("function roundToggle()");
+  assert.match(toggle, />Weekly League ▾</);
+  assert.match(toggle, />Season League</);
+  assert.match(toggle, /aria-expanded="\$\{matchdayPickerOpen\}"/);
+  assert.match(toggle, /aria-selected="\$\{leagueTab === "matchday"\}"/);
+  assert.match(toggle, /aria-selected="\$\{leagueTab === "season"\}"/);
+});
+
 // --- build 17 completion: real DOM, real staging -----------------------------
 
 test("a retained hit returns the very same node, with no innerHTML parsing", async () => {
@@ -607,9 +934,10 @@ test("Season is built in bounded stages, yielding between every one", async () =
   app.setTab("season");
   await app.showResultsPanel();
   const chunks = app.events.filter((e) => e.trace === "chunk").map((e) => e.stage);
-  assert.deepEqual(chunks, ["banner", "cabinet", "standings", "weeks", "reveals"]);
-  // Each stage is its own insertion, so none of them is one big block.
-  assert.equal(app.panelNode().children.length, 5);
+  // No "weeks": the month calendar cost 8,185 chars and 3.5s of synchronous
+  // build to duplicate navigation the Weekly League dropdown already owns.
+  assert.deepEqual(chunks, ["banner", "cabinet", "standings", "reveals"]);
+  assert.equal(app.panelNode().children.length, 4);
   const fn = lift("async function fillPanelProgressively(panel, capture)");
   assert.match(fn, /await nextPaint\(\);/, "and it yields between them");
 });
@@ -676,14 +1004,24 @@ test("toggling Week and Season makes no API call", () => {
   assert.doesNotMatch(branch.slice(branch.indexOf('wanted === "season"')), /loadLeagueState|fetchState/);
 });
 
-test("the segment and pill are acknowledged before any awaited work", () => {
+test("the segment is acknowledged before any awaited work", () => {
   const handler = APP.slice(APP.indexOf('const roundTab = event.target.closest("[data-round-tab]");'));
   const branch = handler.slice(0, handler.indexOf('const roundMd = event.target.closest'));
-  assert.ok(branch.indexOf("markSegment(wanted)") < branch.indexOf("showResultsPanel("));
-  assert.doesNotMatch(branch.replace(/\/\/[^\n]*/g, "").slice(0, branch.indexOf("markSegment")), /\bawait\b/);
-  const pill = APP.slice(APP.indexOf('const league = event.target.closest("[data-league]");'));
-  const pillBranch = pill.slice(0, pill.indexOf("}", pill.indexOf("setActiveLeague")));
-  assert.ok(pillBranch.indexOf("markLeaguePill") < pillBranch.indexOf("setActiveLeague"));
+  const mark = branch.indexOf("markSegment(wanted)");
+  assert.ok(mark > 0, "the segment is marked in this branch");
+  assert.ok(mark < branch.indexOf("showResultsPanel("), "before any panel work");
+  // Nothing is awaited before the mark. (Awaits AFTER it, inside the
+  // revalidation callback, are exactly where they belong.)
+  const head = branch.slice(0, mark).replace(/\/\/[^\n]*/g, "");
+  assert.doesNotMatch(head, /\bawait\b/);
+});
+
+test("the week chip is marked and the picker shut before anything is awaited", () => {
+  const fn = lift("async function selectWeeklyPeriod(week)");
+  const head = fn.slice(0, fn.indexOf("await")).replace(/\/\/[^\n]*/g, "");
+  for (const immediate of ["chip.classList.toggle", "closeWeeklyPicker();", "markSegment(\"matchday\")", "roundState = cached"]) {
+    assert.ok(head.includes(immediate), `${immediate} must happen before the first await`);
+  }
 });
 
 // --- the shell --------------------------------------------------------------

@@ -563,6 +563,7 @@ function renderer() {
 
     let renderedHTML = null;
     let mountedKey = null;
+    let mountedContext = null;
     const mountResults = () => {};   // the island is exercised in schedule_paint
     let tapInProgress = false;
     let heldRender = null;

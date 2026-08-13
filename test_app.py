@@ -258,6 +258,19 @@ class NativeShareAndCalendarTests(unittest.TestCase):
         self.assertIn('registerPlugin(\'Share\'', (ROOT / "vendor/capacitor/share.js").read_text())
         self.assertIn("vendor/capacitor/share.js", self.html)
 
+    def test_filesystem_plugin_is_vendored_for_the_share_card(self):
+        # @capacitor/share takes files as file:// URLs, so the PNG has to be
+        # written to disk before iOS can be offered it.
+        plugin = ROOT / "vendor/capacitor/filesystem.js"
+        self.assertTrue(plugin.exists())
+        self.assertIn("registerPlugin('Filesystem'", plugin.read_text())
+        self.assertIn("vendor/capacitor/filesystem.js", self.html)
+        self.assertIn("vendor/capacitor/filesystem.js", (ROOT / "sw.js").read_text())
+        deps = json.loads((ROOT / "package.json").read_text())["dependencies"]
+        self.assertIn("@capacitor/filesystem", deps)
+        # The native project has to carry the Swift half of it too.
+        self.assertIn("CapacitorFilesystem", (ROOT / "ios/App/CapApp-SPM/Package.swift").read_text())
+
     def test_native_share_goes_through_the_capacitor_plugin(self):
         self.assertIn("openShareSheet", self.app)
         self.assertIn("Capacitor?.Plugins?.Share", self.app)
@@ -292,6 +305,77 @@ class NativeShareAndCalendarTests(unittest.TestCase):
         self.assertIn('"content-type": "text/calendar; charset=utf-8"', self.worker)
         self.assertIn("buildFixtureIcs", self.logic)
         self.assertIn("parsePickParam", self.logic)
+
+
+class SmartInviteLinkTests(unittest.TestCase):
+    """v1.6.4: the join link on a share card opens the app for mates who have
+    it, and the App Store for mates who do not."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = (ROOT / "app.js").read_text()
+        cls.html = (ROOT / "index.html").read_text()
+        cls.worker = (ROOT / "worker/src/worker.js").read_text()
+        cls.entitlements = (ROOT / "ios/App/App/App.entitlements").read_text()
+        cls.pbxproj = (ROOT / "ios/App/App.xcodeproj/project.pbxproj").read_text()
+
+    TEAM_ID = "Y98F87NK7D"
+    BUNDLE_ID = "com.abigwood.premoracle"
+
+    def test_the_app_claims_the_domain_its_links_are_built_from(self):
+        # WEB_BASE is where every shared link points, so it is the domain the
+        # entitlement has to claim — anything else deep-links nowhere.
+        self.assertIn('const WEB_BASE = "https://abigwood.github.io/prem-oracle/";', self.app)
+        self.assertIn("com.apple.developer.associated-domains", self.entitlements)
+        self.assertIn("applinks:abigwood.github.io", self.entitlements)
+        # The capability only ships if the target actually signs with the file.
+        self.assertIn("CODE_SIGN_ENTITLEMENTS = App/App.entitlements;", self.pbxproj)
+        self.assertIn(f"DEVELOPMENT_TEAM = {self.TEAM_ID};", self.pbxproj)
+
+    def test_the_worker_serves_the_site_association_file(self):
+        # GitHub Pages cannot serve /.well-known at the domain root, so the
+        # worker answers for it — as JSON, which is what Apple fetches.
+        self.assertIn('path === "/.well-known/apple-app-site-association"', self.worker)
+        self.assertIn('path === "/apple-app-site-association"', self.worker)
+        aasa = self.worker[self.worker.index("const appleAppSiteAssociation = () =>"):]
+        aasa = aasa[:aasa.index("\nconst kvGet")]
+        self.assertIn(f'appID: "{self.TEAM_ID}.{self.BUNDLE_ID}"', aasa)
+        self.assertIn('paths: ["/prem-oracle/*", "/prem-oracle/"]', aasa)
+        self.assertIn('"content-type": "application/json"', aasa)
+
+    def test_an_invite_link_carries_the_code_as_a_query(self):
+        fn = self.app[self.app.index("function inviteLinkFor(code)"):]
+        fn = fn[:fn.index("\n}")]
+        self.assertIn("?league=${code}", fn)
+        # Natively it must be the public site, which universal-links back in.
+        self.assertIn("isNativeApp() ? WEB_BASE", fn)
+
+    def test_an_incoming_link_opens_the_join_flow(self):
+        self.assertIn("function setupNativeUniversalLinks()", self.app)
+        fn = self.app[self.app.index("async function setupNativeUniversalLinks()"):]
+        fn = fn[:fn.index("\n}")]
+        self.assertIn('app.addListener("appUrlOpen"', fn)
+        self.assertIn("app.getLaunchUrl?.()", fn, "a cold launch has no event, only a launch URL")
+        self.assertIn("openInviteFlow(code)", fn)
+        parse = self.app[self.app.index("function leagueCodeFromUrl(url)"):]
+        parse = parse[:parse.index("\n}")]
+        self.assertIn('searchParams.get("league")', parse)
+        self.assertIn("toUpperCase()", parse)
+        # The web build reads the same code off its own launch URL.
+        self.assertIn('new URLSearchParams(location.search).get("league")?.toUpperCase()', self.app)
+
+    def test_safari_offers_the_app_to_mates_who_do_not_have_it(self):
+        self.assertIn('<meta name="apple-itunes-app" content="app-id=6790803359">', self.html)
+
+    def test_the_share_card_footer_is_the_join_link(self):
+        footer = self.app[self.app.index("function drawCardFooter(ctx, y, model)"):]
+        footer = footer[:footer.index("\n}")]
+        self.assertIn("Join league ${model.code}", footer)
+        self.assertIn("${model.link}", footer)
+        for model in ("function weeklyCardModel(state, round)", "function seasonCardModel(state)"):
+            fn = self.app[self.app.index(model):]
+            fn = fn[:fn.index("\n}")]
+            self.assertIn("link: inviteLinkFor(state.code)", fn)
 
 
 class ClubColourTests(unittest.TestCase):
@@ -655,9 +739,18 @@ class CompetitionAppTests(unittest.TestCase):
         self.assertIn("Prem Oracle ${leagueCompetitionNames(state)} table", self.app)
 
     def test_matchweek_share_leads_with_the_podium(self):
-        self.assertIn("function podiumShareLines(round)", self.app)
-        self.assertIn('{ gold: "🏆", silver: "🥈", bronze: "🥉" }', self.app)
-        self.assertIn("${podiumShareLines(round)}${rows.join", self.app)
+        # The shared matchweek is a drawn card now, and it leads with the same
+        # three names, in the same order, as the banner on the League tab.
+        model = self.app[self.app.index("function weeklyCardModel(state, round)"):]
+        model = model[:model.index("\n}")]
+        self.assertIn('["gold", "silver", "bronze"]', model)
+        self.assertIn("round.podium || []", model)
+        card = self.app[self.app.index("function drawWeeklyResultCard(state, round)"):]
+        card = card[:card.index("\n}")]
+        self.assertLess(card.index("drawCardHero"), card.index("drawCardPodium"))
+        self.assertLess(card.index("drawCardPodium"), card.index("drawCardTableHead"))
+        # A worker too old to send a podium has one drawn for it by nobody.
+        self.assertIn("if (model.podium.length) {", card)
 
     def test_per_competition_notification_preferences(self):
         self.assertIn('id="notificationPrefs"', self.html)
@@ -1356,7 +1449,7 @@ class WeekPickerTests(unittest.TestCase):
             "Pick fixtures for ${escapeHTML(periodLabelLong(period))}",
             "Pick fixtures for ${escapeHTML(periodLabelLong(state.currentPeriod))}",
             "${escapeHTML(periodLabelLong(pickerPeriod))}",
-            "`Share ${periodLabel(roundState.period)} results`",
+            "periodLabel(roundState?.period ?? selectedPeriod",
             "periodLabel(round.period)",
             "${periodLabel(period)} in progress",
         ):
@@ -1763,6 +1856,7 @@ class LeagueSwitchAndShareTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = (ROOT / "app.js").read_text()
+        cls.css = (ROOT / "styles.css").read_text()
 
     # --- the stale-response guard ----------------------------------------
 
@@ -1881,19 +1975,55 @@ class LeagueSwitchAndShareTests(unittest.TestCase):
         self.assertNotIn("await", code, "the share sheet must be raised inside the tap")
         self.assertIn('event.target.closest("[data-share-league]")', code)
         self.assertIn("shareNow(leagueInvite(share.dataset.shareLeague));", code)
-        self.assertIn('event.target.closest("[data-export-league-table]") && shareTableNow()', code)
+        self.assertIn('event.target.closest("[data-export-league-table]")', code)
+        self.assertIn("shareCardNow();", code)
 
-    def test_the_drawn_share_card_is_the_only_path_that_waits(self):
-        fn = self.app[self.app.index("function shareTableNow()"):]
+    def test_the_share_card_is_drawn_inside_the_tap(self):
+        # Build 19 had to wait on toBlob before it could share, which on iOS
+        # ends the tap and loses the sheet. Nothing on this path awaits.
+        for name in ("function shareCardNow()", "function cardPng(canvas, filename)",
+                     "function shareCardFile(png, { title, text })"):
+            fn = self.app[self.app.index(name):]
+            fn = fn[:fn.index("\n}")]
+            self.assertNotIn("await", fn, name)
+            self.assertNotIn("async", fn, name)
+        png = self.app[self.app.index("function cardPng(canvas, filename)"):]
+        png = png[:png.index("\n}")]
+        self.assertIn('canvas.toDataURL("image/png")', png)
+        self.assertNotIn(".toBlob(", self.app, "toBlob is asynchronous and would end the tap")
+        # The one thing that must wait is the native write, and it waits after
+        # the tap on its own promise rather than in front of the share.
+        native = self.app[self.app.index("async function shareCardNatively(png, { title, text })"):]
+        native = native[:native.index("\n}")]
+        self.assertIn('directory: "CACHE"', native)
+        self.assertIn("files: [uri]", native)
+
+    def test_the_weekly_card_is_gated_on_a_settled_week(self):
+        fn = self.app[self.app.index("function weeklyCardReady()"):]
         fn = fn[:fn.index("\n}")]
-        self.assertNotIn("await", fn)
-        self.assertIn("shareNow({ title: \"Prem Oracle\", text: roundShareText(leagueState, roundState) });", fn)
-        self.assertIn("isNativeApp() && leagueState?.table?.length", fn)
-        # The remaining branch below is the PNG card, which must be built first.
-        later = self.app[self.app.index('const exportTable = event.target.closest("[data-export-league-table]");'):]
-        later = later[:later.index("const scoreWindow")]
-        self.assertIn("await shareLeagueTableGraphic(leagueState);", later)
-        self.assertNotIn("isNativeApp()", later, "the native paths are handled above")
+        self.assertIn("roundState.complete", fn)
+        self.assertIn("roundState.table?.length", fn)
+        state = self.app[self.app.index("function shareCardState()"):]
+        state = state[:state.index("\n}")]
+        self.assertIn("shares once it's settled", state)
+        # The button says so, and cannot be pressed anyway.
+        self.assertIn("button.disabled = !ready;", self.app)
+        self.assertIn("${share.ready ? \"\" : \" disabled\"}", self.app)
+        self.assertIn(".whatsapp-share:disabled", self.css)
+        # And the share itself checks again, in case the label is out of date.
+        share = self.app[self.app.index("function shareCardNow()"):]
+        share = share[:share.index("\n}")]
+        self.assertIn("!shareCardState().ready", share)
+
+    def test_a_share_card_reads_only_what_the_panel_already_holds(self):
+        # The KV-read lesson: a card must never cost a request.
+        for name in ("function weeklyCardModel(state, round)", "function seasonCardModel(state)",
+                     "function drawWeeklyResultCard(state, round)", "function drawSeasonTableCard(state)",
+                     "function shareCardNow()"):
+            fn = self.app[self.app.index(name):]
+            fn = fn[:fn.index("\n}")]
+            for reach in ("fetch(", "api(", "loadRoundState", "loadLeagueState", "fetchState"):
+                self.assertNotIn(reach, fn, f"{name} must not reach the network with {reach}")
 
 
 class ScheduleTabTests(unittest.TestCase):

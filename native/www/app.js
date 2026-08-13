@@ -1,6 +1,6 @@
 const SEASON_START = new Date("2026-08-21T20:00:00+01:00");
 const SEASON_START_DATE = "2026-08-21";
-const APP_BUILD = "20260805g";
+const APP_BUILD = "20260805h";
 const API = window.PREM_API || null;
 // Canonical public home of the web app. Inside the Capacitor shell the page is
 // served from premoracle://localhost, so location.origin can never be used to
@@ -2009,43 +2009,11 @@ function leagueCompetitionNames(state) {
   return codes.map((code) => competitionMeta(code).name).join(" + ");
 }
 
-function leagueTableText(state) {
-  const updated = new Intl.DateTimeFormat("en-GB", {
-    day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", timeZone: "Europe/London",
-  }).format(new Date());
-  const rows = (state.table || []).map((row, index) => {
-    const rank = row.rank || index + 1;
-    const movement = Number(row.movement || 0);
-    const marker = movement > 0 ? `▲${movement}` : movement < 0 ? `▼${Math.abs(movement)}` : "-";
-    return `${rank}. ${row.nick} ${marker} - ${row.pts} pts (${row.exact} exact)${row.wins ? ` 🏆x${row.wins}` : ""}`;
-  });
-  return `Prem Oracle ${leagueCompetitionNames(state)} table - ${state.name}\nUpdated ${updated}\n\n${rows.join("\n")}\n\nJoin on the web or in the app with code ${state.code}`;
-}
-
 function winnerNames(round) {
   return (round?.winners || [])
     .map((winnerUid) => (round.table || []).find((row) => row.uid === winnerUid)?.nick)
     .filter(Boolean)
     .join(" & ");
-}
-
-// The shared matchweek result leads with the podium — the same three names,
-// in the same order, as the banner on the League tab.
-function podiumShareLines(round) {
-  const podium = round?.podium || [];
-  if (!podium.length) return "";
-  const medals = { gold: "🏆", silver: "🥈", bronze: "🥉" };
-  return `${podium.map((entry) => `${medals[entry.place]} ${entry.nick} ${entry.pts} pts`).join("\n")}\n\n`;
-}
-
-function roundShareText(state, round) {
-  const competition = leagueCompetitionNames(state);
-  const week = round.matchday != null ? `Matchweek ${round.matchday}` : periodLabel(round.period);
-  const head = round.complete
-    ? `🏆 ${competition} ${week}: won by ${winnerNames(round) || "nobody"}`
-    : `🏆 ${competition} ${week} · in progress`;
-  const rows = (round.table || []).map((row, index) => `${row.rank || index + 1}. ${row.nick} - ${row.pts} pts (${row.exact} exact)`);
-  return `${head}\n\n${podiumShareLines(round)}${rows.join("\n")}\n\nJoin on the web or in the app with code ${state.code}`;
 }
 
 const weekLabelFor = (period) => {
@@ -2282,15 +2250,15 @@ function mountResults() {
 
 /**
  * The share button sits outside the island, so it has to be told. Left alone it
- * kept offering "Share Week 1 results" while Season was on screen.
+ * kept offering "Share Week 1 results" while Season was on screen — and now it
+ * would also offer a result for a week that has not finished being played.
  */
 function syncShareLabel() {
   const button = document.querySelector("[data-export-league-table]");
   if (!button) return;
-  const showingRound = leagueTab === "matchday" && roundState && !roundState.error && roundState.period != null;
-  button.textContent = showingRound
-    ? (roundState.matchday != null ? `Share Matchweek ${roundState.matchday} result` : `Share ${periodLabel(roundState.period)} results`)
-    : "Share table to WhatsApp";
+  const { ready, label } = shareCardState();
+  button.textContent = label;
+  button.disabled = !ready;
 }
 
 /** Marks the chosen segment in the same task as the tap. */
@@ -2535,23 +2503,30 @@ function fixtureHasResult(match) {
   return result?.p1 != null && result?.p2 != null;
 }
 
-function seasonBanner(state) {
+/**
+ * Where the season has got to, in one line. The banner says it and so does the
+ * share card, from here — a card that placed the table one week away from where
+ * the panel behind it does would be a card nobody could trust.
+ */
+function seasonProgressLine(state) {
   // A mixed league has no matchweek numbering and no season length, so it is
   // told where it is in its own terms rather than being given "of null".
   if (state.mixed || seasonRounds() == null) {
     const period = state.currentPeriod;
-    const detail = period == null
+    return period == null
       ? "season complete"
       : state.currentMatchdayHasResults ? `${periodLabel(period)} in progress` : `next up: ${periodLabel(period)}`;
-    return `<div class="round-banner"><strong>Season 2026/27</strong><span>${escapeHTML(detail)}</span></div>`;
   }
   const played = state.currentMatchday == null ? seasonRounds() : Math.max(0, state.currentMatchday - 1);
   const currentMatchdayHasResults = state.currentMatchdayHasResults ||
     fixtures.some((fixture) => fixture.matchday === state.currentMatchday && fixtureHasResult(fixture));
-  const detail = currentMatchdayHasResults && state.currentMatchday != null
+  return currentMatchdayHasResults && state.currentMatchday != null
     ? `Matchweek ${state.currentMatchday} in progress`
     : played === 0 ? `starts Matchweek ${state.currentMatchday || 1}` : `after Matchweek ${played} of ${seasonRounds()}`;
-  return `<div class="round-banner"><strong>Season 2026/27</strong><span>${detail}</span></div>`;
+}
+
+function seasonBanner(state) {
+  return `<div class="round-banner"><strong>Season 2026/27</strong><span>${escapeHTML(seasonProgressLine(state))}</span></div>`;
 }
 
 // Slate line under a matchweek banner, so a curated week is always legible as
@@ -2728,25 +2703,6 @@ function shareNow({ title, text, url }) {
   });
 }
 
-/**
- * The league table's text share, when it is one of the paths that needs no
- * preparation. False means the web PNG card is the right answer, and that one
- * genuinely has to be drawn before it can be shared.
- */
-function shareTableNow() {
-  if (leagueTab === "matchday" && roundState && !roundState.error && roundState.table?.length) {
-    shareNow({ title: "Prem Oracle", text: roundShareText(leagueState, roundState) });
-    return true;
-  }
-  // The PNG share card rides on navigator.share({files}), which the native
-  // WKWebView has no answer for. Natively we share the same text instead.
-  if (isNativeApp() && leagueState?.table?.length) {
-    shareNow({ title: `${leagueState.name} league table`, text: leagueTableShareText(leagueState) });
-    return true;
-  }
-  return false;
-}
-
 /** The invite text for a league. Pure, so it can be built inside the tap. */
 function leagueInvite(code) {
   const url = inviteLinkFor(code);
@@ -2775,112 +2731,492 @@ function fitText(ctx, text, maxWidth, fontFactory, maxSize, minSize) {
   return minSize;
 }
 
-function drawLeagueTableCard(state) {
-  const W = 1080;
-  const H = 1350;
+/**
+ * --- Share cards ---------------------------------------------------------
+ *
+ * Two PNGs, drawn on a canvas from the panels already on screen: the settled
+ * matchweek result, and the season table. Nothing here fetches. Every number,
+ * name and medal comes from `leagueState` / `roundState` — the same objects the
+ * retained panels were built from — because a share that cost a KV read would
+ * put the price of showing off on every league in the app.
+ */
+const CARD_W = 1080;
+const CARD_PAD = 64;
+const CARD = {
+  bg: "#180020",
+  brand: "#38003C",
+  green: "#00FF87",
+  ink: "#FFFFFF",
+  muted: "#B79FC0",
+  faint: "rgba(255, 255, 255, .30)",
+  row: "#26002E",
+  rowAlt: "#2E0038",
+  line: "rgba(255, 255, 255, .10)",
+  gold: "#FFC94A",
+  goldWash: "rgba(255, 201, 74, .13)",
+  goldEdge: "rgba(255, 201, 74, .45)",
+  silver: "#D8DCE6",
+  bronze: "#D79A66",
+};
+const CARD_BLOCK = { gold: CARD.gold, silver: CARD.silver, bronze: CARD.bronze };
+// Block heights in the drawn rostrum, in the same order the CSS one steps.
+const CARD_PODIUM = {
+  gold: { x: 390, w: 300, h: 200 },
+  silver: { x: 108, w: 268, h: 150 },
+  bronze: { x: 704, w: 268, h: 118 },
+};
+const CARD_HEAD_H = 190;
+const CARD_HERO_H = 220;
+// Headroom for one name on the tallest step. A shared place stacks its names
+// on the one step, so the region grows to keep them clear of the points line.
+const CARD_PODIUM_H = 350;
+const CARD_PODIUM_STACK = 34;
+const CARD_TABLE_HEAD_H = 56;
+const CARD_ROW_H = 74;
+// The season row carries an honours line under the name, so it is taller.
+const CARD_SEASON_ROW_H = 92;
+const CARD_FOOT_H = 200;
+const CARD_GAP = 28;
+
+const cardFont = (weight, size) => `${weight} ${size}px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif`;
+
+const cardDate = () =>
+  new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "long", year: "numeric", timeZone: "Europe/London" })
+    .format(new Date());
+
+const sentenceCase = (value) => `${String(value).charAt(0).toUpperCase()}${String(value).slice(1)}`;
+
+/** A name too long for its column is cut, not spilled over the points. */
+function ellipsise(ctx, text, maxWidth) {
+  if (ctx.measureText(text).width <= maxWidth) return text;
+  let cut = String(text);
+  while (cut.length > 1 && ctx.measureText(`${cut}…`).width > maxWidth) cut = cut.slice(0, -1);
+  return `${cut}…`;
+}
+
+function drawFitted(ctx, text, x, y, maxWidth, { weight = 900, max = 48, min = 28, colour = CARD.ink, align = "left" } = {}) {
+  ctx.textAlign = align;
+  ctx.fillStyle = colour;
+  fitText(ctx, text, maxWidth, (size) => cardFont(weight, size), max, min);
+  ctx.fillText(ellipsise(ctx, text, maxWidth), x, y);
+  ctx.textAlign = "left";
+}
+
+function cardCanvas(height) {
   const canvas = document.createElement("canvas");
-  canvas.width = W;
-  canvas.height = H;
+  canvas.width = CARD_W;
+  canvas.height = height;
   const ctx = canvas.getContext("2d");
-  const rows = state.table || [];
-  const topRows = rows.slice(0, 10);
-  const updated = new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "long", timeZone: "Europe/London" }).format(new Date());
+  ctx.fillStyle = CARD.bg;
+  ctx.fillRect(0, 0, CARD_W, height);
+  return { canvas, ctx };
+}
 
-  ctx.fillStyle = "#f5f7fb";
-  ctx.fillRect(0, 0, W, H);
-  ctx.fillStyle = "#38003c";
-  ctx.fillRect(0, 0, W, 258);
-  ctx.fillStyle = "#00ff87";
-  ctx.fillRect(0, 244, W, 16);
-  roundedRect(ctx, 48, 48, W - 96, H - 96, 28);
-  ctx.strokeStyle = "rgba(56, 0, 60, .14)";
-  ctx.lineWidth = 4;
+function drawCardHeader(ctx, league, line) {
+  ctx.fillStyle = CARD.brand;
+  ctx.fillRect(0, 0, CARD_W, CARD_HEAD_H - 8);
+  ctx.fillStyle = CARD.green;
+  ctx.fillRect(0, CARD_HEAD_H - 8, CARD_W, 8);
+  ctx.fillStyle = CARD.green;
+  ctx.font = cardFont(900, 30);
+  ctx.fillText("PREM ORACLE", CARD_PAD, 62);
+  drawFitted(ctx, league, CARD_PAD, 124, CARD_W - CARD_PAD * 2, { max: 60, min: 34 });
+  ctx.fillStyle = CARD.muted;
+  ctx.font = cardFont(800, 28);
+  ctx.fillText(line, CARD_PAD, 166);
+}
+
+// The winner, once, in gold — the one thing a mate should read from across the
+// room before they read anything else.
+function drawCardHero(ctx, y, model) {
+  const centre = CARD_W / 2;
+  roundedRect(ctx, CARD_PAD, y, CARD_W - CARD_PAD * 2, CARD_HERO_H, 26);
+  ctx.fillStyle = CARD.goldWash;
+  ctx.fill();
+  ctx.strokeStyle = CARD.goldEdge;
+  ctx.lineWidth = 3;
   ctx.stroke();
+  ctx.textAlign = "center";
+  ctx.fillStyle = CARD.muted;
+  ctx.font = cardFont(800, 26);
+  ctx.fillText(model.heroEyebrow, centre, y + 56);
+  ctx.textAlign = "left";
+  drawFitted(ctx, `🏆 ${model.heroName}`, centre, y + 134, CARD_W - CARD_PAD * 2 - 72,
+    { max: 72, min: 32, colour: CARD.gold, align: "center" });
+  ctx.textAlign = "center";
+  ctx.fillStyle = CARD.ink;
+  ctx.font = cardFont(800, 30);
+  ctx.fillText(model.heroLine, centre, y + 184);
+  ctx.textAlign = "left";
+}
 
-  ctx.fillStyle = "#00ff87";
-  ctx.font = "900 42px -apple-system, BlinkMacSystemFont, sans-serif";
-  ctx.fillText("PREM", 78, 128);
-  ctx.fillStyle = "#ffffff";
-  ctx.font = "900 58px -apple-system, BlinkMacSystemFont, sans-serif";
-  ctx.fillText("ORACLE", 242, 128);
-  ctx.fillStyle = "#d8c9dc";
-  ctx.font = "800 26px -apple-system, BlinkMacSystemFont, sans-serif";
-  ctx.fillText("LIVE LEAGUE TABLE", 80, 176);
+const podiumStackDepth = (groups) => Math.max(1, ...groups.map((group) => group.entries.length));
+const podiumHeight = (groups) => CARD_PODIUM_H + (podiumStackDepth(groups) - 1) * CARD_PODIUM_STACK;
 
-  ctx.fillStyle = "#17202a";
-  fitText(ctx, state.name, W - 130, (size) => `900 ${size}px -apple-system, BlinkMacSystemFont, sans-serif`, 64, 38);
-  ctx.fillText(state.name, 78, 330);
-  ctx.fillStyle = "#64748b";
-  ctx.font = "800 30px -apple-system, BlinkMacSystemFont, sans-serif";
-  ctx.fillText(`Standings - ${updated}`, 78, 374);
-
-  const startY = 420;
-  const rowH = Math.max(76, Math.min(104, (H - startY - 170) / Math.max(topRows.length, 1)));
-  topRows.forEach((row, index) => {
-    const y = startY + index * rowH;
-    roundedRect(ctx, 78, y, W - 156, rowH - 12, 16);
-    ctx.fillStyle = index < 3 ? "#effdf4" : "#ffffff";
+// The rostrum: second, first, third — first tallest and in gold. A place nobody
+// reached has no block, so a two-player league draws two.
+function drawCardPodium(ctx, y, groups) {
+  const base = y + podiumHeight(groups) - 30;
+  ctx.fillStyle = CARD.line;
+  ctx.fillRect(CARD_PAD, base, CARD_W - CARD_PAD * 2, 3);
+  for (const group of groups) {
+    const { x, w, h } = CARD_PODIUM[group.place];
+    const top = base - h;
+    const centre = x + w / 2;
+    roundedRect(ctx, x, top, w, h, 14);
+    ctx.fillStyle = CARD_BLOCK[group.place];
     ctx.fill();
-    ctx.strokeStyle = index < 3 ? "#00a86b" : "#d7dee8";
-    ctx.lineWidth = index < 3 ? 4 : 2;
-    ctx.stroke();
-    const mid = y + (rowH - 12) / 2;
     ctx.textAlign = "center";
-    ctx.fillStyle = "#38003c";
-    ctx.font = "900 38px -apple-system, BlinkMacSystemFont, sans-serif";
-    ctx.fillText(String(row.rank || index + 1), 134, mid + 14);
+    ctx.fillStyle = CARD.brand;
+    ctx.font = cardFont(900, 62);
+    ctx.fillText(PLACE_NUMBER[group.place], centre, top + h / 2 + 22);
+    // A shared place stacks its names on the one block, because the podium
+    // rules never award the place below a tie to anybody. The stack is built
+    // upwards from the points line so the second name lands above the first
+    // rather than on top of the points.
+    const size = group.entries.length > 1 ? 26 : 34;
+    const lowest = top - 44;
+    group.entries.forEach((entry, index) => {
+      // Held to the width of its own block: a long name that spread wider than
+      // that reached across and sat on the step next to it.
+      drawFitted(ctx, entry.nick, centre, lowest - (group.entries.length - 1 - index) * (size + 8), w,
+        { max: size, min: 20, colour: CARD.ink, align: "center" });
+    });
+    ctx.textAlign = "center";
+    ctx.font = cardFont(900, 40);
+    ctx.fillStyle = CARD.ink;
+    ctx.fillText(PLACE_EMOJI[group.place], centre, lowest - (group.entries.length - 1) * (size + 8) - 36);
+    ctx.fillStyle = CARD.muted;
+    ctx.font = cardFont(800, 26);
+    ctx.fillText(`${group.entries[0].pts} pts`, centre, top - 12);
     ctx.textAlign = "left";
-    ctx.fillStyle = "#17202a";
-    fitText(ctx, row.nick, 520, (size) => `900 ${size}px -apple-system, BlinkMacSystemFont, sans-serif`, 42, 26);
-    ctx.fillText(row.nick, 210, mid - 6);
-    ctx.fillStyle = "#64748b";
-    ctx.font = "800 25px -apple-system, BlinkMacSystemFont, sans-serif";
-    ctx.fillText(`${row.exact} exact - ${row.correct} scoring picks`, 210, mid + 30);
+  }
+}
+
+const CARD_COL = { rank: 112, name: 168, exact: 730, pts: 880, medal: 962 };
+
+function drawCardTableHead(ctx, y) {
+  ctx.fillStyle = CARD.muted;
+  ctx.font = cardFont(800, 22);
+  ctx.fillText("PLAYER", CARD_COL.name, y + 36);
+  ctx.textAlign = "right";
+  ctx.fillText("EXACT", CARD_COL.exact, y + 36);
+  ctx.fillText("PTS", CARD_COL.pts, y + 36);
+  ctx.textAlign = "left";
+  ctx.fillStyle = CARD.line;
+  ctx.fillRect(CARD_PAD, y + CARD_TABLE_HEAD_H - 10, CARD_W - CARD_PAD * 2, 2);
+}
+
+function drawCardRowPlate(ctx, y, height, index, place) {
+  roundedRect(ctx, CARD_PAD, y, CARD_W - CARD_PAD * 2, height - 10, 16);
+  ctx.fillStyle = place ? CARD.goldWash : index % 2 ? CARD.rowAlt : CARD.row;
+  ctx.fill();
+  if (!place) return;
+  ctx.strokeStyle = CARD.goldEdge;
+  ctx.lineWidth = 2;
+  ctx.stroke();
+}
+
+/** The three medals under a season name, zeros softly muted rather than hidden. */
+function drawCardHonours(ctx, x, y, counts) {
+  const parts = [["🏆", counts.gold], ["🥈", counts.silver], ["🥉", counts.bronze]];
+  ctx.font = cardFont(800, 24);
+  let cursor = x;
+  parts.forEach(([emoji, count], index) => {
+    const text = `${emoji} ${count}`;
+    ctx.fillStyle = count ? CARD.muted : CARD.faint;
+    ctx.fillText(text, cursor, y);
+    cursor += ctx.measureText(text).width;
+    if (index === parts.length - 1) return;
+    ctx.fillStyle = CARD.faint;
+    ctx.fillText(" · ", cursor, y);
+    cursor += ctx.measureText(" · ").width;
+  });
+}
+
+function drawCardFooter(ctx, y, model) {
+  ctx.fillStyle = CARD.line;
+  ctx.fillRect(CARD_PAD, y, CARD_W - CARD_PAD * 2, 2);
+  ctx.fillStyle = CARD.green;
+  ctx.font = cardFont(900, 34);
+  ctx.fillText("PREM ORACLE", CARD_PAD, y + 62);
+  const brand = ctx.measureText("PREM ORACLE").width;
+  ctx.fillStyle = CARD.muted;
+  ctx.font = cardFont(800, 28);
+  ctx.fillText(" · Score Predictor", CARD_PAD + brand, y + 62);
+  ctx.fillStyle = CARD.ink;
+  ctx.font = cardFont(900, 36);
+  ctx.fillText("Think you can call it?", CARD_PAD, y + 118);
+  ctx.fillStyle = CARD.muted;
+  ctx.font = cardFont(800, 25);
+  ctx.fillText(`Join league ${model.code} · ${model.link}`, CARD_PAD, y + 164);
+}
+
+/**
+ * The settled matchweek, as the card will say it.
+ *
+ * Medals come from the round's own podium, never from the row order, so a tie
+ * that put two players on gold and nobody on silver reads the same here as it
+ * does in the banner. A worker too old to send a podium sends none, and then
+ * the card shows none either — the panel behind it doesn't invent one.
+ */
+function weeklyCardModel(state, round) {
+  const week = round.matchday != null ? `Matchweek ${round.matchday}` : periodLabel(round.period);
+  const awards = new Map((round.podium || []).map((entry) => [entry.uid, entry.place]));
+  const groups = ["gold", "silver", "bronze"]
+    .map((place) => ({ place, entries: (round.podium || []).filter((entry) => entry.place === place) }))
+    .filter((group) => group.entries.length);
+  const champions = groups.find((group) => group.place === "gold")?.entries || [];
+  const names = winnerNames(round) || champions.map((entry) => entry.nick).join(" & ");
+  const pts = champions[0]?.pts ?? (round.table || [])[0]?.pts ?? 0;
+  return {
+    league: state.name,
+    headline: `${week} · Final result · ${cardDate()}`,
+    heroEyebrow: champions.length > 1 ? "JOINT MATCHWEEK CHAMPIONS" : "MATCHWEEK CHAMPION",
+    heroName: names || "Nobody",
+    heroLine: `${week} champion · ${pts} pts`,
+    podium: groups,
+    rows: (round.table || []).map((row, index) => ({
+      rank: row.rank || index + 1,
+      nick: row.nick,
+      pts: row.pts,
+      exact: row.exact,
+      place: awards.get(row.uid) || null,
+    })),
+    code: state.code,
+    link: inviteLinkFor(state.code),
+  };
+}
+
+function drawWeeklyResultCard(state, round) {
+  const model = weeklyCardModel(state, round);
+  const podiumH = model.podium.length ? podiumHeight(model.podium) + CARD_GAP : 0;
+  const height = CARD_HEAD_H + CARD_GAP + CARD_HERO_H + CARD_GAP + podiumH
+    + CARD_TABLE_HEAD_H + model.rows.length * CARD_ROW_H + CARD_GAP + CARD_FOOT_H;
+  const { canvas, ctx } = cardCanvas(height);
+  drawCardHeader(ctx, model.league, model.headline);
+  let y = CARD_HEAD_H + CARD_GAP;
+  drawCardHero(ctx, y, model);
+  y += CARD_HERO_H + CARD_GAP;
+  if (model.podium.length) {
+    drawCardPodium(ctx, y, model.podium);
+    y += podiumHeight(model.podium) + CARD_GAP;
+  }
+  drawCardTableHead(ctx, y);
+  y += CARD_TABLE_HEAD_H;
+  model.rows.forEach((row, index) => {
+    const top = y + index * CARD_ROW_H;
+    const mid = top + (CARD_ROW_H - 10) / 2;
+    drawCardRowPlate(ctx, top, CARD_ROW_H, index, row.place);
+    ctx.textAlign = "center";
+    ctx.fillStyle = row.place ? CARD.gold : CARD.muted;
+    ctx.font = cardFont(900, 30);
+    ctx.fillText(String(row.rank), CARD_COL.rank, mid + 11);
+    ctx.textAlign = "left";
+    drawFitted(ctx, row.nick, CARD_COL.name, mid + 12, 500, { max: 34, min: 24 });
     ctx.textAlign = "right";
-    ctx.fillStyle = "#38003c";
-    ctx.font = "900 46px -apple-system, BlinkMacSystemFont, sans-serif";
-    ctx.fillText(String(row.pts), W - 120, mid + 16);
+    ctx.fillStyle = CARD.muted;
+    ctx.font = cardFont(800, 30);
+    ctx.fillText(String(row.exact), CARD_COL.exact, mid + 11);
+    ctx.fillStyle = CARD.ink;
+    ctx.font = cardFont(900, 34);
+    ctx.fillText(String(row.pts), CARD_COL.pts, mid + 12);
+    ctx.textAlign = "center";
+    // The medal sits at the right edge, so the three that matter are findable
+    // down one side without reading a single name.
+    if (row.place) {
+      ctx.font = cardFont(900, 34);
+      ctx.fillText(PLACE_EMOJI[row.place], CARD_COL.medal, mid + 12);
+    }
     ctx.textAlign = "left";
   });
-  ctx.fillStyle = "#64748b";
-  ctx.font = "800 26px -apple-system, BlinkMacSystemFont, sans-serif";
-  ctx.fillText(`Exact = 5 - GD/draw = 2 - winner = 1 - code ${state.code}`, 78, H - 92);
-  ctx.textAlign = "right";
-  ctx.fillStyle = "#38003c";
-  ctx.font = "900 32px -apple-system, BlinkMacSystemFont, sans-serif";
-  ctx.fillText("PREM ORACLE", W - 78, H - 92);
+  y += model.rows.length * CARD_ROW_H + CARD_GAP;
+  drawCardFooter(ctx, y, model);
   return canvas;
 }
 
-async function canvasToBlob(canvas) {
-  return new Promise((resolve) => canvas.toBlob(resolve, "image/png", 0.95));
+/**
+ * The season table, as the card will say it — the cumulative cabinet under
+ * every name, exactly as the panel renders it, `podiumCounts` and all.
+ */
+function seasonCardModel(state) {
+  return {
+    league: state.name,
+    headline: `Season league · ${sentenceCase(seasonProgressLine(state))}`,
+    rows: (state.table || []).map((row, index) => ({
+      rank: row.rank || index + 1,
+      nick: row.nick,
+      pts: row.pts,
+      exact: row.exact,
+      honours: podiumCounts(row),
+    })),
+    code: state.code,
+    link: inviteLinkFor(state.code),
+  };
+}
+
+function drawSeasonTableCard(state) {
+  const model = seasonCardModel(state);
+  const height = CARD_HEAD_H + CARD_GAP + CARD_TABLE_HEAD_H
+    + model.rows.length * CARD_SEASON_ROW_H + CARD_GAP + CARD_FOOT_H;
+  const { canvas, ctx } = cardCanvas(height);
+  drawCardHeader(ctx, model.league, model.headline);
+  let y = CARD_HEAD_H + CARD_GAP;
+  drawCardTableHead(ctx, y);
+  y += CARD_TABLE_HEAD_H;
+  model.rows.forEach((row, index) => {
+    const top = y + index * CARD_SEASON_ROW_H;
+    const mid = top + (CARD_SEASON_ROW_H - 10) / 2;
+    drawCardRowPlate(ctx, top, CARD_SEASON_ROW_H, index, null);
+    ctx.textAlign = "center";
+    ctx.fillStyle = CARD.muted;
+    ctx.font = cardFont(900, 30);
+    ctx.fillText(String(row.rank), CARD_COL.rank, mid + 4);
+    ctx.textAlign = "left";
+    drawFitted(ctx, row.nick, CARD_COL.name, mid - 4, 500, { max: 34, min: 24 });
+    drawCardHonours(ctx, CARD_COL.name, mid + 30, row.honours);
+    ctx.textAlign = "right";
+    ctx.fillStyle = CARD.muted;
+    ctx.font = cardFont(800, 30);
+    ctx.fillText(String(row.exact), CARD_COL.exact, mid + 4);
+    ctx.fillStyle = CARD.ink;
+    ctx.font = cardFont(900, 34);
+    ctx.fillText(String(row.pts), CARD_COL.pts, mid + 5);
+    ctx.textAlign = "left";
+  });
+  y += model.rows.length * CARD_SEASON_ROW_H + CARD_GAP;
+  drawCardFooter(ctx, y, model);
+  return canvas;
+}
+
+// The caption that travels with the image. WhatsApp shows a picture with no
+// tappable anything, so the join link has to be in words as well as drawn.
+function weeklyCardCaption(state, round) {
+  const competition = leagueCompetitionNames(state);
+  const week = round.matchday != null ? `Matchweek ${round.matchday}` : periodLabel(round.period);
+  return `🏆 ${competition} ${week}: won by ${winnerNames(round) || "nobody"}. Think you can call it? Join ${state.name} with code ${state.code}: ${inviteLinkFor(state.code)}`;
 }
 
 function leagueTableShareText(state) {
-  const link = inviteLinkFor(state.code);
-  return `🏆 ${state.name} - Prem Oracle live league table. Tap to join on the web or in the app and get your picks in: ${link}`;
+  return `🏆 ${state.name} - Prem Oracle ${leagueCompetitionNames(state)} table. Think you can call it? Join with code ${state.code}: ${inviteLinkFor(state.code)}`;
 }
 
-async function shareLeagueTableGraphic(state) {
-  const canvas = drawLeagueTableCard(state);
-  const blob = await canvasToBlob(canvas);
-  if (!blob) throw new Error("Could not create league table graphic.");
-  const text = leagueTableShareText(state);
-  const file = new File([blob], "prem-oracle-league-table.png", { type: "image/png" });
-  if (navigator.canShare?.({ files: [file] })) {
-    await navigator.share({ files: [file], text, title: `${state.name} league table` });
-    return;
-  }
-  if (navigator.share) {
-    await navigator.share({ text, title: `${state.name} league table` });
-    return;
-  }
-  const url = URL.createObjectURL(blob);
+/**
+ * The drawn card as a PNG, without ever awaiting.
+ *
+ * `toBlob` is asynchronous, and on iOS an await — even one that resolves
+ * immediately — ends the tap that asked for the share, after which the sheet is
+ * silently refused. `toDataURL` and `atob` are both synchronous, so the file is
+ * in hand while the tap is still the tap.
+ */
+function cardPng(canvas, filename) {
+  const dataUrl = canvas.toDataURL("image/png");
+  const base64 = dataUrl.slice(dataUrl.indexOf(",") + 1);
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return { base64, filename, file: new File([bytes], filename, { type: "image/png" }) };
+}
+
+function downloadCard(png) {
+  const url = URL.createObjectURL(png.file);
   const anchor = document.createElement("a");
   anchor.href = url;
-  anchor.download = "prem-oracle-league-table.png";
+  anchor.download = png.filename;
   anchor.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+/**
+ * The native path: write the PNG into the app's cache, then hand iOS the file.
+ *
+ * @capacitor/share takes `files` as file:// URLs and nothing else — it has no
+ * use for a Blob, a data: URL or a File — so the picture has to exist on disk
+ * before the sheet can offer it. The cache directory is the right home: iOS may
+ * reclaim it whenever it likes, and a shared card is finished with the moment
+ * it has been sent.
+ */
+async function shareCardNatively(png, { title, text }) {
+  const plugins = window.Capacitor?.Plugins || {};
+  const { Filesystem, Share } = plugins;
+  if (!Filesystem || !Share) {
+    shareNow({ title, text });
+    return;
+  }
+  try {
+    await Filesystem.writeFile({ path: png.filename, data: png.base64, directory: "CACHE" });
+    const { uri } = await Filesystem.getUri({ path: png.filename, directory: "CACHE" });
+    await Share.share({ title, text, files: [uri], dialogTitle: title });
+  } catch (error) {
+    // Dismissing the sheet is an answer, not a failure.
+    if (error?.name === "AbortError" || /cancel/i.test(error?.message || "")) return;
+    // Anything else — no room in the cache, a plugin missing from the build —
+    // still shares, just without the picture.
+    shareNow({ title, text });
+  }
+}
+
+/**
+ * Delivery. Native goes through the file; the web asks for a file share and
+ * falls back to putting the PNG in the viewer's downloads, which is the only
+ * thing a desktop browser without the Web Share API can honestly do with it.
+ */
+function shareCardFile(png, { title, text }) {
+  if (isNativeApp()) {
+    shareCardNatively(png, { title, text });
+    return;
+  }
+  if (navigator.canShare?.({ files: [png.file] })) {
+    navigator.share({ files: [png.file], title, text }).catch((error) => {
+      if (error?.name === "AbortError" || /cancel/i.test(error?.message || "")) return;
+      downloadCard(png);
+    });
+    return;
+  }
+  downloadCard(png);
+}
+
+/**
+ * A settled week, and a table to draw it from. Mid-week there is no result to
+ * share — a card headed "Final result" over a half-played table would be a lie
+ * that outlives the week it was made in.
+ */
+function weeklyCardReady() {
+  return !!(roundState && !roundState.error && roundState.complete && roundState.table?.length);
+}
+
+/** What the share button says, and whether it does anything when pressed. */
+function shareCardState() {
+  if (leagueTab === "matchday" && leagueSupportsRounds(leagueState)) {
+    if (roundState?.matchday != null) {
+      return weeklyCardReady()
+        ? { ready: true, label: `Share Matchweek ${roundState.matchday} result` }
+        : { ready: false, label: `Matchweek ${roundState.matchday} shares once it's settled` };
+    }
+    // The same fallback the week segment uses, so a panel still loading is
+    // still named rather than offering to share "Matchweek null".
+    const week = periodLabel(roundState?.period ?? selectedPeriod ?? leagueState.currentPeriod ?? currentPeriodKey());
+    return weeklyCardReady()
+      ? { ready: true, label: `Share ${week} result` }
+      : { ready: false, label: `${week} shares once it's settled` };
+  }
+  return { ready: !!leagueState?.table?.length, label: "Share season table" };
+}
+
+/**
+ * The share, start to finish, inside the tap that asked for it. Drawing is
+ * synchronous and so is the PNG, so nothing is awaited before the sheet.
+ */
+function shareCardNow() {
+  const state = leagueState;
+  if (!state || state.error || !shareCardState().ready) return;
+  const weekly = leagueTab === "matchday" && leagueSupportsRounds(state);
+  const png = weekly
+    ? cardPng(drawWeeklyResultCard(state, roundState), "prem-oracle-matchweek.png")
+    : cardPng(drawSeasonTableCard(state), "prem-oracle-season-table.png");
+  const title = weekly ? `${state.name} matchweek result` : `${state.name} season table`;
+  const text = weekly ? weeklyCardCaption(state, roundState) : leagueTableShareText(state);
+  shareCardFile(png, { title, text });
 }
 
 // --- Host Fixture Picker ---------------------------------------------------
@@ -3448,10 +3784,7 @@ function leagueView() {
   const state = leagueState;
   const isOwner = state && !state.error && state.owner === uid();
   const supportsRounds = leagueSupportsRounds(state);
-  const showMatchday = supportsRounds && leagueTab === "matchday";
-  const shareLabel = showMatchday && roundState && !roundState.error && roundState.period != null
-    ? (roundState.matchday != null ? `Share Matchweek ${roundState.matchday} result` : `Share ${periodLabel(roundState.period)} results`)
-    : "Share table to WhatsApp";
+  const share = shareCardState();
   // A PLACEHOLDER, never a built panel. Any global render while Season is
   // selected used to rebuild the whole heavy Season panel synchronously — which
   // is what made a pill switch cost four seconds even after the pill itself was
@@ -3473,7 +3806,7 @@ function leagueView() {
           ${isOwner ? `<button class="link-danger" type="button" data-delete-league="${state.code}">Delete league</button>` : ""}
           ${supportsRounds ? `${roundToggle()}<div class="picker-island" data-picker-island></div>` : ""}
           ${inner}
-          <button class="whatsapp-share wide" type="button" data-export-league-table="${state.code}">${shareLabel}</button>
+          <button class="whatsapp-share wide" type="button" data-export-league-table="${state.code}"${share.ready ? "" : " disabled"}>${escapeHTML(share.label)}</button>
         </section>`;
   return `<div class="section-head"><div><span class="eyebrow">Private predictor leagues</span><h2>League table</h2></div></div>${flash()}${leagueSwitcher()}${content}${controls}${restore}`;
 }
@@ -4259,9 +4592,13 @@ document.addEventListener("click", async (event) => {
     navigateToView(nav.dataset.view);
     return;
   }
-  // Sharing the table has the same two text paths, with the same need to stay
-  // inside the tap. Only the drawn card falls through to the branch below.
-  if (event.target.closest("[data-export-league-table]") && shareTableNow()) return;
+  // The share card is drawn, turned into a PNG and handed to the sheet without
+  // awaiting anything, so it belongs up here with the other gestures rather
+  // than below an await that would have ended the tap.
+  if (event.target.closest("[data-export-league-table]")) {
+    shareCardNow();
+    return;
+  }
   const leagueCountStep = event.target.closest("[data-league-count-step]");
   if (leagueCountStep) {
     if (!countBusy) await changeWeeklyCount(Number(leagueCountStep.dataset.leagueCountStep));
@@ -4381,23 +4718,6 @@ document.addEventListener("click", async (event) => {
       setFlash(error.message, "error");
     }
     render();
-    return;
-  }
-  const exportTable = event.target.closest("[data-export-league-table]");
-  if (exportTable) {
-    // Only reached when shareTableNow() declined: the web PNG card.
-    if (leagueState?.table?.length) {
-      setFlash("Building share card.");
-      render();
-      try {
-        await shareLeagueTableGraphic(leagueState);
-        setFlash("Share card ready.");
-      } catch {
-        location.href = whatsappUrlFor(leagueTableText(leagueState));
-        setFlash("Opened WhatsApp share text.");
-      }
-      render();
-    }
     return;
   }
   const scoreWindow = event.target.closest("[data-score-window]");

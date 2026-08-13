@@ -761,6 +761,8 @@ th.wins-col { font-size: .92rem; }
   background: #28d7c8;
   font-weight: 900;
 }
+/* A week still being played has no final result to share, and says so. */
+.whatsapp-share:disabled { cursor: not-allowed; opacity: .5; }
 .link-danger {
   display: block;
   margin: 8px auto 0;

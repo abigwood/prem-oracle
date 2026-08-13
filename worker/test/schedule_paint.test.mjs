@@ -338,7 +338,8 @@ function island({ buildMs = 0 } = {}) {
       roundCalls.push(want);
       const wait = roundDelayMs;
       await new Promise((r) => setTimeoutOrig(r, wait));
-      roundState = { code: activeLeague, period: want, matchday: want, fresh: true };
+      roundState = { code: activeLeague, period: want, matchday: want, fresh: true,
+        complete: true, table: [{ uid: "u1", rank: 1, nick: "Adam", pts: 12, exact: 1 }] };
     };
     const currentPeriodKey = () => 1;
     const weekStrip = () => { apiCalls += 0; return "<weeks/>"; };
@@ -361,8 +362,9 @@ function island({ buildMs = 0 } = {}) {
     const setTimeoutOrig = setTimeout;
     const nextPaint = () => new Promise((resolve) => requestAnimationFrame(() => setTimeoutOrig(resolve, 0)));
     let activeLeague = "AAA", leagueTab = "matchday", selectedPeriod = 1, currentView = "league";
-    let leagueState = { code: "AAA", name: "AAA League", owner: "someone", rounds: true };
-    let roundState = { code: "AAA", period: 1, matchday: 1 };
+    let leagueState = { code: "AAA", name: "AAA League", owner: "someone", rounds: true, currentMatchday: 1, table: [{ uid: "u1", rank: 1, nick: "Adam", pts: 12, exact: 1 }] };
+    let roundState = { code: "AAA", period: 1, matchday: 1,
+      complete: true, table: [{ uid: "u1", rank: 1, nick: "Adam", pts: 12, exact: 1 }] };
     const leagueNames = { AAA: "AAA League", BBB: "BBB League" };
     const leagueStates = {};
     const uid = () => "u1";
@@ -402,6 +404,8 @@ function island({ buildMs = 0 } = {}) {
     ${lift("async function fillPanelProgressively(panel, capture)")}
     ${lift("async function showResultsPanel({ status } = {})")}
     ${lift("const pulsingNode = (message) => {")}
+    ${lift("function weeklyCardReady()")}
+    ${lift("function shareCardState()")}
     ${lift("function syncShareLabel()")}
     ${lift("function mountResults()")}
     ${lift("function markSegment(tab)")}
@@ -428,7 +432,7 @@ function island({ buildMs = 0 } = {}) {
       segState: () => segs.map((s) => ({ tab: s.dataset.roundTab, on: s.classList.contains("active"), aria: s.getAttribute("aria-selected") })),
       pillState: () => pills.map((p) => ({ code: p.dataset.league, on: p.classList.contains("active"), aria: p.getAttribute("aria-selected") })),
       setTab: (t) => { leagueTab = t; },
-      setLeague: (c) => { activeLeague = c; leagueState = { code: c, name: c + " League", owner: "someone", rounds: true }; },
+      setLeague: (c) => { activeLeague = c; leagueState = { code: c, name: c + " League", owner: "someone", rounds: true, currentMatchday: 1, table: [{ uid: "u1", rank: 1, nick: "Adam", pts: 12, exact: 1 }] }; },
       setPeriod: (n) => { selectedPeriod = n; },
       bumpFor: (code) => bumpStamp(code),
       dropFor: (code) => dropRetainedPanels(code),
@@ -438,7 +442,8 @@ function island({ buildMs = 0 } = {}) {
       toggleWeeklyPicker, closeWeeklyPicker, selectWeeklyPeriod,
       roundCalls: () => roundCalls.slice(),
       setRoundDelay: (ms) => { roundDelayMs = ms; },
-      seedRound: (code, period) => { cachedRounds[code + ":" + period] = { code, period, matchday: period, cached: true }; },
+      seedRound: (code, period) => { cachedRounds[code + ":" + period] = { code, period, matchday: period, cached: true,
+        complete: true, table: [{ uid: "u1", rank: 1, nick: "Adam", pts: 12, exact: 1 }] }; },
       roundNow: () => roundState,
       pickerNode: () => pickerEl.firstElementChild,
       pickerOpen: () => matchdayPickerOpen,
@@ -619,9 +624,14 @@ test("the pill path takes the league's identity with it before painting", () => 
 
 // (g)
 test("the share label always matches the visible tab", () => {
+  // The button is told what it is by one function, so the label and whether
+  // it does anything can never disagree.
   const fn = lift("function syncShareLabel()");
-  assert.match(fn, /leagueTab === "matchday"/);
-  assert.match(fn, /Share table to WhatsApp/);
+  assert.match(fn, /shareCardState\(\)/);
+  assert.match(fn, /button\.disabled = !ready/);
+  const which = lift("function shareCardState()");
+  assert.match(which, /leagueTab === "matchday"/);
+  assert.match(which, /Share season table/);
   // Called on every path that changes what is on screen.
   const swap = lift("async function showResultsPanel({ status } = {})");
   assert.equal((swap.match(/syncShareLabel\(\)/g) || []).length, 2, "retained hit AND fresh build");
@@ -990,7 +1000,7 @@ test("the share label follows the visible tab through a swap", async () => {
   assert.match(app.shareLabel(), /Share Matchweek 1 result/);
   app.setTab("season");
   await app.showResultsPanel();
-  assert.equal(app.shareLabel(), "Share table to WhatsApp");
+  assert.equal(app.shareLabel(), "Share season table");
 });
 
 // (E10)

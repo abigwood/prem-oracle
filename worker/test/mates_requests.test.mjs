@@ -223,6 +223,199 @@ test("each league's matrix is cached under its own key", async () => {
     "two leagues are two reads, never one shared answer");
 });
 
+// --- the real switch sequence -----------------------------------------------
+//
+// loadMatesState() on its own is not the production path. A pill tap forgets
+// the old league, restores the new one's cached season state, paints, and only
+// then — behind a season request that can be slow — revalidates. These drive
+// the actual switchers so a cached matrix is proved to reach the screen ahead
+// of the network rather than behind it.
+function switching({ seasonDelay = 0, roundDelay = 0, cachedRounds = {}, cachedLeagues = {}, tab = "mates" } = {}) {
+  const calls = [];
+  const paints = [];
+  const build = new Function("seasonDelay", "roundDelay", "calls", "paints", "cachedRounds", "cachedLeagues", "tab", `
+    "use strict";
+    let activeLeague = "AAA";
+    let leagueTab = tab;
+    let selectedPeriod = null, roundState = null;
+    let leagueStates = { ...cachedLeagues };
+    let leagueState = leagueStates.AAA || null;
+    let roundStates = { ...cachedRounds };
+    let matesState = null, matesRequest = 0, matesLockHorizon = Infinity;
+    let navGeneration = 0, currentView = "league", panelGeneration = 0, mountedKey = null;
+    let leagueStamps = new Map(), retainedPanels = new Map();
+    const leagueCodes = ["AAA", "BBB"];
+    const leagueNames = {};
+    const STORAGE = { activeLeague: "a", roundStates: "r" };
+    const localStorage = { setItem() {}, getItem: () => null, removeItem() {} };
+    const API = "https://worker.test";
+    const uid = () => "u1";
+    const document = { hidden: false, querySelector: () => null };
+    const traceTap = () => {};
+    const markLeaguePill = () => {};
+    const closeWeeklyPicker = () => {};
+    const syncShareLabel = () => {};
+    const clearFlash = () => {};
+    const currentPeriodKey = () => 3;
+    const nextPaint = () => Promise.resolve();
+    const render = () => { paints.push({ what: "render", showing: matesState && matesState.code }); };
+    const showResultsPanel = async () => { paints.push({ what: "panel", showing: matesState && matesState.code }); };
+    // The season read: deliberately slow, so anything that waits for it shows.
+    const refreshLeague = () => new Promise((resolve) => setTimeout(() => {
+      calls.push("season:" + activeLeague);
+      leagueState = { code: activeLeague, currentPeriod: 3, name: activeLeague };
+      leagueStates[activeLeague] = leagueState;
+      resolve();
+    }, seasonDelay));
+    const api = (path) => {
+      calls.push(path);
+      const code = /code=([A-Z]+)/.exec(path)[1];
+      return new Promise((resolve) => setTimeout(() => resolve({
+        code, period: 3, fresh: true,
+        table: [{ uid: "u1", nick: code }],
+        reveal: [{ id: "f1", lockAt: new Date(Date.now() + 3600000).toISOString(), revealed: false, eligible: 2, lockedIn: 1 }],
+      }), roundDelay));
+    };
+
+    const stateFlights = new Map();
+    ${lift("function fetchState(path)")}
+    ${liftLine("const roundStatePath =")}
+    ${liftLine("const matesPeriod =")}
+    ${lift("function matesUsable(state)")}
+    ${lift("function currentRoundReveal()")}
+    ${lift("function forgetMatesState()")}
+    ${lift("function hydrateMatesState()")}
+    ${lift("function lockHorizonOf(state)")}
+    ${lift("function cacheRoundState(code, period, state)")}
+    ${lift("function cachedRoundState(code, period)")}
+    ${liftLine("const roundCacheKey =")}
+    ${liftLine("const stampFor =")}
+    ${liftLine("const bumpStamp =")}
+    ${lift("function dropRetainedPanels(code = null)")}
+    ${lift("function hydrateCachedLeague()")}
+    ${lift("async function loadMatesState(generation = navGeneration)")}
+    ${lift("async function revalidateMatesAfterSwitch(code)")}
+    ${lift("async function switchLeaguePill(code)")}
+    ${lift("function setActiveLeague(code, refresh = true)")}
+
+    return {
+      pill: (code) => switchLeaguePill(code),
+      choose: (code) => setActiveLeague(code),
+      state: () => matesState,
+      period: () => matesPeriod(),
+      horizon: () => matesLockHorizon,
+      calls: () => calls,
+      paints: () => paints,
+      roundCalls: () => calls.filter((call) => call.startsWith("/state")),
+    };
+  `);
+  return build(seasonDelay, roundDelay, calls, paints, cachedRounds, cachedLeagues, tab);
+}
+
+/** Let the un-awaited refresh chain finish, as the app leaves it to. */
+const settle = (ms = 80) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const BBB_SEASON = { AAA: { code: "AAA", currentPeriod: 3 }, BBB: { code: "BBB", currentPeriod: 3 } };
+const BBB_ROUND = {
+  "BBB:3": { code: "BBB", period: 3, table: [{ uid: "u1", nick: "BBB" }], reveal: [
+    { id: "f1", lockAt: new Date(Date.now() + 2 * HOUR).toISOString(), revealed: false, eligible: 2, lockedIn: 2 },
+  ] },
+};
+
+test("a cached matrix paints ahead of a slow season request, and revalidates once", async () => {
+  const app = switching({ seasonDelay: 40, cachedLeagues: BBB_SEASON, cachedRounds: BBB_ROUND });
+  const switched = app.pill("BBB");
+  // Before any network has answered: AAA is gone and BBB's cache is up.
+  assert.equal(app.state().code, "BBB", "the cached matrix is in hand immediately");
+  assert.deepEqual(app.roundCalls(), [], "and nothing has been asked for yet");
+  await switched;
+  await settle();
+  assert.equal(app.roundCalls().length, 1, "exactly one round revalidation");
+  assert.match(app.roundCalls()[0], /code=BBB/);
+  assert.ok(!app.paints().some((paint) => paint.showing === "AAA"), "AAA never painted");
+  assert.ok(app.horizon() > Date.now(), "and the cached round set its own horizon");
+});
+
+test("with no cache, only the acknowledged shell shows — and still one read", async () => {
+  const app = switching({ seasonDelay: 20, cachedLeagues: BBB_SEASON });
+  const switched = app.pill("BBB");
+  assert.equal(app.state(), null, "nothing drawable, so the panel shows its shell");
+  await switched;
+  await settle();
+  assert.equal(app.roundCalls().length, 1);
+  assert.equal(app.state().code, "BBB");
+  assert.ok(!app.paints().some((paint) => paint.showing === "AAA"));
+});
+
+test("the league switcher route behaves identically to the pill", async () => {
+  const app = switching({ seasonDelay: 30, cachedLeagues: BBB_SEASON, cachedRounds: BBB_ROUND });
+  app.choose("BBB");
+  assert.equal(app.state().code, "BBB", "cache paints before the network");
+  await settle();
+  assert.equal(app.roundCalls().length, 1, "exactly one round revalidation");
+  assert.equal(app.state().code, "BBB");
+  assert.equal(app.state().fresh, true, "and the answer replaces the cache");
+});
+
+test("a refreshed season that moves the round discards the cached one", async () => {
+  // The cache is for period 3; the refreshed season says the league has moved
+  // on to 4. The stale matrix must not paint under the new period.
+  const stale = { "BBB:3": { code: "BBB", period: 3, table: [], reveal: [] } };
+  const app = switching({
+    seasonDelay: 10,
+    cachedLeagues: { AAA: { code: "AAA", currentPeriod: 3 }, BBB: { code: "BBB", currentPeriod: 3 } },
+    cachedRounds: stale,
+  });
+  const switched = app.pill("BBB");
+  assert.equal(app.state().period, 3, "the cached period paints while it is current");
+  await switched;
+  await settle();
+  // The season refresh in this harness confirms period 3, so to exercise the
+  // move we ask again with the league now on a different round.
+  const moved = switching({
+    seasonDelay: 0,
+    cachedLeagues: { AAA: { code: "AAA", currentPeriod: 3 }, BBB: { code: "BBB", currentPeriod: 9 } },
+    cachedRounds: stale,
+  });
+  moved.pill("BBB");
+  assert.equal(moved.state(), null, "a round that is no longer current is not drawable");
+});
+
+test("neither route ever issues two round reads", async () => {
+  for (const drive of [(app) => app.pill("BBB"), (app) => app.choose("BBB")]) {
+    const app = switching({ seasonDelay: 5, cachedLeagues: BBB_SEASON, cachedRounds: BBB_ROUND });
+    await drive(app);
+    await settle();
+    assert.equal(app.roundCalls().length, 1);
+  }
+});
+
+test("a league change with Mates' Picks closed reads no round at all", async () => {
+  const app = switching({ seasonDelay: 5, tab: "season", cachedLeagues: BBB_SEASON, cachedRounds: BBB_ROUND });
+  await app.pill("BBB");
+  await settle();
+  assert.deepEqual(app.roundCalls(), [], "the segment that is not showing asks for nothing");
+});
+
+test("both routes hydrate from cache and revalidate through the same two helpers", () => {
+  for (const route of ["async function switchLeaguePill(code)", "function setActiveLeague(code, refresh = true)"]) {
+    const fn = lift(route);
+    assert.match(fn, /forgetMatesState\(\)/, route);
+    assert.match(fn, /hydrateMatesState\(\)/, route);
+    assert.match(fn, /revalidateMatesAfterSwitch\(/, route);
+    // Cache first, network second — in that order, in the source.
+    assert.ok(fn.indexOf("hydrateMatesState()") < fn.indexOf("revalidateMatesAfterSwitch("), route);
+    assert.ok(fn.indexOf("forgetMatesState()") < fn.indexOf("hydrateMatesState()"), route);
+  }
+  // The cached adoption is the context rule's own answer, and costs nothing.
+  const hydrate = lift("function hydrateMatesState()");
+  assert.match(hydrate, /currentRoundReveal\(\)/);
+  assert.match(hydrate, /lockHorizonOf/);
+  for (const banned of ["await", "fetch", "api(", "loadMatesState"]) {
+    assert.ok(!hydrate.includes(banned), `hydrating from cache must not ${banned}`);
+  }
+});
+
 // --- cross-league privacy ---------------------------------------------------
 //
 // Two leagues can contain the very same fixture, so "has this payload got an

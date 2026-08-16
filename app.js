@@ -892,6 +892,38 @@ function forgetMatesState() {
 }
 
 /**
+ * The new league's matrix from cache, adopted BEFORE any network wait.
+ *
+ * `hydrateCachedLeague()` has already restored that league's season state, so
+ * its current round is known without asking anybody — which means a league this
+ * device has seen before can paint its matrix on the same tick as the pill.
+ * Waiting for the season refresh to confirm a period we already had cached put
+ * a loading shell in front of data that was sitting in storage the whole time.
+ *
+ * Nothing valid in cache simply leaves the slot empty, and the panel shows the
+ * acknowledged shell instead of somebody else's league.
+ */
+function hydrateMatesState() {
+  matesState = currentRoundReveal();
+  matesLockHorizon = matesState ? lockHorizonOf(matesState) : Infinity;
+}
+
+/**
+ * The single round read a league change owes Mates' Picks, once the refreshed
+ * season state has confirmed which round is current.
+ *
+ * Switching league with the segment open is an entry into it for the new
+ * league, and gets exactly one revalidation like any other entry — after the
+ * season answer, because until then the current period is only a cached guess.
+ */
+async function revalidateMatesAfterSwitch(code) {
+  if (leagueTab !== "mates" || code !== activeLeague) return;
+  await loadMatesState();
+  if (leagueTab !== "mates" || code !== activeLeague) return;
+  await showResultsPanel();
+}
+
+/**
  * The next kick-off still ahead of us, so a foreground return knows whether it
  * missed anything. Infinity means every fixture in the round has kicked off and
  * there is no boundary left to cross.
@@ -1121,8 +1153,17 @@ function setActiveLeague(code, refresh = true) {
   // with no key to look itself up by, so a switch to a league this device knows
   // perfectly well still showed "Loading matchweek…".
   hydrateCachedLeague();
+  // The same two steps as the pill route, in the same order: the cached matrix
+  // is adopted before the paint, and the one revalidation it owes Mates' Picks
+  // waits for the season answer that confirms the current round.
+  hydrateMatesState();
   render();
-  if (refresh) refreshLeague().then(render);
+  if (refresh) {
+    refreshLeague().then(async () => {
+      render();
+      await revalidateMatesAfterSwitch(next);
+    });
+  }
 }
 
 function saveLeague(code) {
@@ -2501,6 +2542,9 @@ async function switchLeaguePill(code) {
   forgetMatesState();
   if (activeLeague) localStorage.setItem(STORAGE.activeLeague, activeLeague);
   hydrateCachedLeague();
+  // Straight after the season cache, so the matrix is in hand before the first
+  // paint rather than behind the refresh below.
+  hydrateMatesState();
   panelGeneration++;   // any in-flight panel job for the old league is void
 
   // The WHOLE league-specific card goes, not just the results. Swapping only
@@ -2525,14 +2569,7 @@ async function switchLeaguePill(code) {
     if (code !== activeLeague) return;
     render();
     syncShareLabel();
-    // The new league's current round is only known once its season state has
-    // landed — that is what names the current period. Switching leagues with
-    // Mates' Picks open is an entry into the segment for the new league, and
-    // gets the same single revalidation as any other entry.
-    if (leagueTab !== "mates") return;
-    await loadMatesState();
-    if (code !== activeLeague || leagueTab !== "mates") return;
-    await showResultsPanel();
+    await revalidateMatesAfterSwitch(code);
   });
 }
 

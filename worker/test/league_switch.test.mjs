@@ -503,10 +503,16 @@ function switcher() {
     const cachedRoundState = () => null;
     const refreshLeague = async () => {};
     ${lift("function hydrateCachedLeague()")}
-    // Switching league drops Mates' Picks state, so this harness has to own
-    // the same three variables the real one does.
+    // Switching league drops Mates' Picks state and re-hydrates it from cache,
+    // so this harness has to own the same variables the real one does. The
+    // revalidation itself is exercised in mates_requests.test.mjs.
     let matesState = null, matesRequest = 0, matesLockHorizon = Infinity;
+    let leagueTab = "matchday";
+    const currentRoundReveal = () => null;
+    const lockHorizonOf = () => Infinity;
+    const revalidateMatesAfterSwitch = async () => {};
     ${lift("function forgetMatesState()")}
+    ${lift("function hydrateMatesState()")}
     ${lift("function setActiveLeague(code, refresh = true)")}
     return {
       flash: (m) => setFlash(m),

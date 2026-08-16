@@ -208,8 +208,11 @@ test("a voided fixture settles to nothing rather than scoring", () => {
   assert.equal(entry.voided, true);
   assert.equal(entry.settled, false, "void is its own outcome — nothing was scored");
   for (const row of entry.picks) assert.equal(row.pts, null, "so there are no points to show");
-  // The picks themselves are still out: the fixture kicked off before it died.
+  assert.equal(entry.result, null, "and no final score: an abandoned scoreline is not a result");
+  // The picks themselves are still out: the fixture kicked off before it died,
+  // and a status can neither open the privacy gate nor close it again.
   assert.equal(entry.picks.find((row) => row.uid === "u1").p1, 2);
+  assert.equal(entry.revealed, true);
 });
 
 // --- the shape as a whole --------------------------------------------------

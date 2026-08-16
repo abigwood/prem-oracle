@@ -846,6 +846,52 @@ async function loadRoundState(generation = navGeneration) {
 const matesPeriod = () => leagueState?.currentPeriod ?? null;
 
 /**
+ * The ONE rule that decides whether a round payload may be drawn as this
+ * league's Mates' Picks. Every path that could put a name or a prediction on
+ * screen asks this and nothing else.
+ *
+ * A global holding one league's picks while the pill has already moved to
+ * another is not a stale-data problem, it is a privacy one: two leagues can
+ * contain the very same fixture, so "does this payload have an entry for this
+ * fixture?" is not a safe question. Only "is this payload THIS league's CURRENT
+ * round?" is, and it has to be asked at the moment of drawing rather than
+ * trusted from whenever the payload was fetched.
+ */
+function matesUsable(state) {
+  const period = matesPeriod();
+  return !!state && !state.error && period != null
+    && state.code === activeLeague
+    && String(state.period) === String(period);
+}
+
+/**
+ * A current-round payload for the league on screen, from wherever one is
+ * already in hand — the Mates' Picks slot, the Weekly tab when it happens to be
+ * showing the current round, or that round's cache.
+ *
+ * This is what lets an expanded fixture card reveal without the viewer ever
+ * having opened the Mates' Picks segment: the round response they already
+ * loaded carries the field. Every candidate goes through the same context rule,
+ * so a historic week or another league's round is never one of them.
+ */
+function currentRoundReveal() {
+  const cached = activeLeague && matesPeriod() != null
+    ? cachedRoundState(activeLeague, matesPeriod())
+    : null;
+  return [matesState, roundState, cached].find(matesUsable) || null;
+}
+
+/**
+ * Everything Mates' Picks is holding, dropped. Called the instant the active
+ * league changes, before anything can be painted under the new name.
+ */
+function forgetMatesState() {
+  matesState = null;
+  matesRequest++;              // any in-flight read for the old league is void
+  matesLockHorizon = Infinity;
+}
+
+/**
  * The next kick-off still ahead of us, so a foreground return knows whether it
  * missed anything. Infinity means every fixture in the round has kicked off and
  * there is no boundary left to cross.
@@ -877,13 +923,23 @@ async function loadMatesState(generation = navGeneration) {
     ticket !== matesRequest || code !== activeLeague || generation !== navGeneration
     || view !== currentView || String(period) !== String(matesPeriod());
 
+  // Anything held from another league or another round is dropped before it
+  // can be painted, and only a cache that passes the same context rule takes
+  // its place. Otherwise the shell stands until the read below lands.
+  if (!matesUsable(matesState)) matesState = null;
   const cached = cachedRoundState(code, period);
-  if (cached && !cached.error && !matesState) matesState = cached;
+  if (!matesState && matesUsable(cached)) {
+    matesState = cached;
+    matesLockHorizon = lockHorizonOf(cached);
+  }
 
   try {
     const state = await fetchState(roundStatePath(code, period));
     cacheRoundState(code, period, state);
     if (superseded()) return;
+    // The answer is checked against the screen as it is NOW, not as it was when
+    // the request went out — a slow league's reply must not land on a fast one.
+    if (!matesUsable(state)) return;
     matesState = state;
     matesLockHorizon = lockHorizonOf(state);
     bumpStamp(code);
@@ -904,6 +960,9 @@ async function loadMatesState(generation = navGeneration) {
  */
 async function refreshMatesOnForeground() {
   if (document.hidden || currentView !== "league" || leagueTab !== "mates") return;
+  // A horizon belongs to the context that set it. After a league switch there
+  // is nothing to have crossed until the new league's round has been read.
+  if (!matesUsable(matesState)) return;
   if (Date.now() < matesLockHorizon) return;
   matesLockHorizon = Infinity;          // one crossing, one revalidation
   await loadMatesState();
@@ -1054,6 +1113,7 @@ function setActiveLeague(code, refresh = true) {
   activeLeague = next;
   selectedPeriod = null;
   roundState = null;
+  forgetMatesState();
   if (activeLeague) localStorage.setItem(STORAGE.activeLeague, activeLeague);
   else localStorage.removeItem(STORAGE.activeLeague);
   // Season, week and that week's table restored together, BEFORE the paint.
@@ -1506,12 +1566,13 @@ function matchCard(match) {
  * round has no entry and gets no section at all, rather than an empty one.
  */
 function fixtureRevealSection(match) {
-  if (!activeLeague || !matesState || matesState.error) return "";
-  const entry = (matesState.reveal || []).find((row) => String(row.id) === String(match.id));
-  const inRound = entry || (matesState.table && (slateForPeriod(matesState.period)?.fixtureIds || [])
+  const state = currentRoundReveal();
+  if (!state) return "";
+  const entry = (state.reveal || []).find((row) => String(row.id) === String(match.id));
+  const inRound = entry || (state.table && (slateForPeriod(state.period)?.fixtureIds || [])
     .some((id) => String(id) === String(match.id)));
   if (!inRound) return "";
-  const card = { id: String(match.id), ...matesFixtureView(match, entry, matesState.table, uid()) };
+  const card = { id: String(match.id), ...matesFixtureView(match, entry, state.table, uid()) };
   if (card.state === "locked") {
     return `<section class="fixture-reveal">
       <p class="mates-state">Mates' picks reveal at kick-off · ${card.lockedIn} of ${card.eligible} locked in</p>
@@ -2218,7 +2279,9 @@ function seasonStages(state, isOwner) {
 async function fillPanelProgressively(panel, capture) {
   const { state, isOwner, tab, stale } = capture;
   if (tab === "mates") {
-    if (!matesState || matesState.error) {
+    // Only this league's current round may be drawn. Anything else — another
+    // league's, another week's, an error — is the acknowledged shell instead.
+    if (!matesUsable(matesState)) {
       panel.insertAdjacentHTML("beforeend", matesState?.error
         ? `<div class="empty"><strong>${escapeHTML(matesState.error)}</strong></div>`
         : pulsingStatus("Loading Mates' Picks…"));
@@ -2433,6 +2496,9 @@ async function switchLeaguePill(code) {
   activeLeague = code;
   selectedPeriod = null;
   roundState = null;
+  // Mates' Picks holds other people's predictions, so it goes in the same
+  // breath as the identity change rather than being left to be noticed later.
+  forgetMatesState();
   if (activeLeague) localStorage.setItem(STORAGE.activeLeague, activeLeague);
   hydrateCachedLeague();
   panelGeneration++;   // any in-flight panel job for the old league is void
@@ -2455,10 +2521,18 @@ async function switchLeaguePill(code) {
   if (code !== activeLeague) return;
   render();
   syncShareLabel();
-  refreshLeague().then(() => {
+  refreshLeague().then(async () => {
     if (code !== activeLeague) return;
     render();
     syncShareLabel();
+    // The new league's current round is only known once its season state has
+    // landed — that is what names the current period. Switching leagues with
+    // Mates' Picks open is an entry into the segment for the new league, and
+    // gets the same single revalidation as any other entry.
+    if (leagueTab !== "mates") return;
+    await loadMatesState();
+    if (code !== activeLeague || leagueTab !== "mates") return;
+    await showResultsPanel();
   });
 }
 
@@ -2787,6 +2861,22 @@ function seasonTableHtml(state, isOwner, withWins) {
 const MATES_ROWS_SHOWN = 8;
 
 /**
+ * The client's own read of a fixture's lock, in the SAME precedence the server
+ * uses: an explicit lockAt first, its scheduled kick-off second, nothing if
+ * neither parses.
+ *
+ * This clock has exactly one job — telling "not yet" apart from "we cannot say"
+ * when an older worker sends no reveal field. It can never authorise showing a
+ * prediction: the only thing that puts a pick on screen is the server having
+ * sent it, and the server only sends it after its own gate has opened. A device
+ * with a wrong clock sees the wrong caption, never somebody else's pick.
+ */
+function clientLockMs(fixture) {
+  const parsed = Date.parse(fixture?.lockAt || fixture?.startAt || "");
+  return Number.isFinite(parsed) ? parsed : NaN;
+}
+
+/**
  * The week's rank, with ties SHARING a place.
  *
  * The round table ranks positionally — two players on 23 points are 1 and 2 —
@@ -2830,7 +2920,7 @@ function revealRows(entry, table, viewerUid) {
  * and "we cannot say", which are very different things to show a viewer.
  */
 function matesFixtureView(fixture, entry, table, viewerUid) {
-  const lockMs = Date.parse(fixture?.startAt || "");
+  const lockMs = clientLockMs(fixture);
   const passed = Number.isFinite(lockMs) && Date.now() >= lockMs;
   if (!entry) {
     // Pre-kick-off this is simply a fixture we have nothing to say about yet.
@@ -2856,6 +2946,11 @@ function matesFixtureView(fixture, entry, table, viewerUid) {
  * view-model itself rather than inferred from what happened to be painted.
  */
 function matesMatrix(state, viewerUid = uid()) {
+  // The context rule again, at the last point before names and predictions
+  // become a view-model. The panel checks too, but a builder that will render
+  // whatever it is handed is one forgetful caller away from a leak — and the
+  // two leagues sharing a fixture id is exactly the case that hides it.
+  if (!matesUsable(state)) return { period: null, total: 0, revealed: 0, cards: [] };
   const entries = new Map((state?.reveal || []).map((entry) => [String(entry.id), entry]));
   const ids = (state?.reveal || []).length
     ? (state.reveal || []).map((entry) => String(entry.id))

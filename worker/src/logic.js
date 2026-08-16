@@ -710,11 +710,14 @@ export function buildRoundReveal({ fixtures, picksByMatch, members, serverNow, i
     if (!entry.revealed || !includePicks) return entry;
     const result = normaliseResult(match);
     const voided = isVoided(match);
-    // Void is its own outcome, not a settled one: nothing scored, so nothing
-    // to show points for. The same distinction the season reveals already make.
+    // Void is its own outcome, not a settled one: nothing scored, so nothing to
+    // show points for, and no final score either — an abandoned game's score at
+    // the moment it died is not a result anybody was predicting. The picks
+    // themselves stay out, because the gate they passed was the clock's and a
+    // status can neither open it nor close it again.
     entry.settled = !!result && !voided;
     entry.voided = voided;
-    entry.result = result ? { p1: result.p1, p2: result.p2 } : null;
+    entry.result = result && !voided ? { p1: result.p1, p2: result.p2 } : null;
     entry.picks = eligible.map((member) => {
       const raw = stored[member.uid];
       const pick = pickValid(raw, lockMs) ? raw : null;

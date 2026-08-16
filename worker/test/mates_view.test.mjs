@@ -19,6 +19,12 @@ function lift(startsWith) {
   return APP.slice(start, end + 2);
 }
 
+function liftLine(startsWith) {
+  const start = APP.indexOf(startsWith);
+  if (start < 0) throw new Error(`not found in app.js: ${startsWith}`);
+  return APP.slice(start, APP.indexOf("\n", start));
+}
+
 function liftConst(name) {
   const start = APP.indexOf(`const ${name} =`);
   if (start < 0) throw new Error(`not found in app.js: ${name}`);
@@ -66,6 +72,10 @@ function view({ state = roundState(), ownPicks = {}, slate = null, viewer = VIEW
     const fetchState = fetch;
 
     let matesState = stateIn;
+    let roundState = null;
+    let roundStates = {};
+    const roundCacheKey = (code, period) => code + ":" + period;
+    const cachedRoundState = (code, period) => roundStates[roundCacheKey(code, period)] || null;
     let leagueState = { code: "AAA", currentPeriod: stateIn ? stateIn.period : null, currentSlate: slateIn };
     let activeLeague = "AAA";
     const picks = ownPicksIn;
@@ -80,6 +90,7 @@ function view({ state = roundState(), ownPicks = {}, slate = null, viewer = VIEW
 
     ${liftConst("MATES_ROWS_SHOWN")}
     ${liftConst("MATES_STATE_LINE")}
+    ${lift("function clientLockMs(fixture)")}
     ${lift("function sharedRankByUid(table)")}
     ${lift("function revealRows(entry, table, viewerUid)")}
     ${lift("function matesFixtureView(fixture, entry, table, viewerUid)")}
@@ -92,6 +103,9 @@ function view({ state = roundState(), ownPicks = {}, slate = null, viewer = VIEW
     ${lift("function matesFixtureCard(card)")}
     ${lift("function matesHeader(matrix)")}
     ${lift("function slateForPeriod(period)")}
+    ${liftLine("const matesPeriod =")}
+    ${lift("function matesUsable(state)")}
+    ${lift("function currentRoundReveal()")}
     ${lift("function fixtureRevealSection(match)")}
     ${lift("function lockHorizonOf(state)")}
 
@@ -102,6 +116,11 @@ function view({ state = roundState(), ownPicks = {}, slate = null, viewer = VIEW
       cardFor: (id) => matesMatrix(matesState).cards.find((card) => card.id === id),
       section: (id) => fixtureRevealSection(fixtureById(id)),
       horizon: () => lockHorizonOf(matesState),
+      // The three ways a current-round payload can already be in hand.
+      viaMates: (value) => { matesState = value; },
+      viaRound: (value) => { matesState = null; roundState = value; },
+      viaCache: (value) => { matesState = null; roundState = null; roundStates[roundCacheKey("AAA", value.period)] = value; },
+      setLeague: (code) => { activeLeague = code; },
       requests: () => requests,
     };
   `);
@@ -237,6 +256,20 @@ test("kicked off but unsettled shows picks and no points at all", () => {
   assert.doesNotMatch(html, /mates-score/, "and never a running score");
 });
 
+test("a void keeps its picks but shows no score and no points", () => {
+  const state = roundState({ revealedCount: 1, settled: 0 });
+  Object.assign(state.reveal[0], { voided: true, settled: false, result: null });
+  const app = view({ state });
+  const card = app.cardFor("f1");
+  assert.equal(card.state, "voided");
+  assert.ok(card.rows.length, "the picks stay out — the fixture did kick off");
+  const html = app.html();
+  assert.match(html, /Void — no points/);
+  assert.doesNotMatch(html, /mates-score/, "no final score for a game that never finished");
+  assert.doesNotMatch(html, /mates-pts/, "and nothing scored");
+  assert.match(html, /Adam/, "the names remain revealed");
+});
+
 // --- big leagues -----------------------------------------------------------
 
 test("a big league shows eight rows and offers the rest", () => {
@@ -285,6 +318,7 @@ test("an old worker's answer is unavailable after kick-off, normal before it", (
     });
     ${liftConst("MATES_ROWS_SHOWN")}
     ${liftConst("MATES_STATE_LINE")}
+    ${lift("function clientLockMs(fixture)")}
     ${lift("function sharedRankByUid(table)")}
     ${lift("function revealRows(entry, table, viewerUid)")}
     ${lift("function matesFixtureView(fixture, entry, table, viewerUid)")}
@@ -296,6 +330,8 @@ test("an old worker's answer is unavailable after kick-off, normal before it", (
     ${lift("function matesCardBody(card, viewerPicked)")}
     ${lift("function matesFixtureCard(card)")}
     ${lift("function slateForPeriod(period)")}
+    ${liftLine("const matesPeriod =")}
+    ${lift("function matesUsable(state)")}
     return { cards: () => matesMatrix(matesState).cards, html: () => matesMatrix(matesState).cards.map(matesFixtureCard).join("") };
   `)(state, slate);
 
@@ -326,6 +362,69 @@ test("expanding a fixture asks for nothing", () => {
   for (const id of ["f1", "f2", "f3", "f4"]) app.section(id);
   app.html();
   assert.equal(app.requests(), 0, "the card is drawn from what is already in memory");
+});
+
+// --- cross-league privacy, at the point of drawing --------------------------
+
+test("another league's payload renders nothing, not even a fixture it shares", () => {
+  // The blocker case: the same fixture id in both leagues. AAA's payload is
+  // still in the slot when the pill has already moved to BBB.
+  const state = roundState({ revealedCount: 1, total: 1 });
+  const app = view({ state });
+  assert.ok(app.html().includes("Adam"), "AAA's own view is fine while AAA is showing");
+
+  app.setLeague("BBB");
+  const matrix = app.matrix();
+  const wire = JSON.stringify(matrix.cards.map(({ fixture, ...rest }) => rest));
+  for (const leak of ["Adam", "Bex", "Cal", "u1", "u2", "u3"]) {
+    assert.doesNotMatch(wire, new RegExp(leak), `${leak} must not survive the switch`);
+  }
+  assert.doesNotMatch(app.html(), /\d-\d/, "and no prediction reaches the document");
+  assert.equal(app.section("f1"), "", "nor the fixture card, which shares the id");
+});
+
+// --- the fixture card without a prior visit ---------------------------------
+
+test("an ordinary current round reveals in a card without opening Mates' Picks", () => {
+  // The round the Weekly tab already loaded carries the field, so expanding a
+  // fixture works on first tap rather than needing the segment visited first.
+  const state = roundState({ revealedCount: 1, total: 2 });
+  for (const route of ["viaRound", "viaCache"]) {
+    const app = view({ state });
+    app[route](state);
+    assert.match(app.section("f1"), /Kicked off · Picks revealed/, route);
+    assert.match(app.section("f1"), /Adam/, route);
+    assert.match(app.section("f2"), /Mates' picks reveal at kick-off · 2 of 3 locked in/, route);
+    assert.doesNotMatch(app.section("f2"), /\d-\d/, route);
+    assert.equal(app.requests(), 0, `${route} must ask for nothing`);
+  }
+});
+
+test("a foreign or historic round is never used for a card", () => {
+  const state = roundState({ revealedCount: 1, total: 1 });
+  // Another league's round, sitting in the Weekly slot.
+  const foreign = view({ state });
+  foreign.viaRound({ ...state, code: "BBB" });
+  assert.equal(foreign.section("f1"), "", "another league's round is not this league's");
+  // A historic week of the right league.
+  const historic = view({ state });
+  historic.viaRound({ ...state, period: "1" });
+  assert.equal(historic.section("f1"), "", "and last week is not this week");
+});
+
+// --- the client's clock -----------------------------------------------------
+
+test("the client clock reads lockAt before startAt, like the server", () => {
+  const clock = lift("function clientLockMs(fixture)");
+  assert.match(clock, /fixture\?\.lockAt \|\| fixture\?\.startAt/);
+  assert.match(clock, /Number\.isFinite\(parsed\) \? parsed : NaN/);
+  // And it is only ever consulted to caption a fixture, never to show a pick.
+  const gate = lift("function matesFixtureView(fixture, entry, table, viewerUid)");
+  const beforeEntry = gate.slice(0, gate.indexOf("if (!entry)"));
+  assert.match(beforeEntry, /clientLockMs\(fixture\)/);
+  assert.match(gate, /if \(!entry\.revealed\)/, "the server's answer is what unlocks rows");
+  const revealing = gate.slice(gate.indexOf("const rows = revealRows"));
+  assert.doesNotMatch(revealing, /passed|lockMs/, "the client clock never authorises a reveal");
 });
 
 // --- the freshness horizon -------------------------------------------------

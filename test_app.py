@@ -2552,8 +2552,15 @@ class MatesPicksTests(unittest.TestCase):
         gate = self.logic[self.logic.index("export function buildRoundReveal("):]
         gate = gate[:gate.index("\n}")]
         self.assertIn("serverNow >= lockMs", gate)
-        self.assertNotIn("matchLocked", gate, "§5: never the edit-lock rule")
-        self.assertNotIn("status", gate, "nor the feed's status")
+        # The gate proper: everything above the line where predictions begin.
+        # Read without comments, since prose about status is not a use of it.
+        decision = re.sub(r"//[^\n]*", "", gate[:gate.index("if (!entry.revealed")])
+        self.assertNotIn("matchLocked", decision, "§5: never the edit-lock rule")
+        self.assertNotIn("status", decision, "nor the feed's status")
+        self.assertNotIn("result", decision, "nor the result")
+        # And a status can neither open the gate nor close it again: the void
+        # branch sits below it and only removes the score and the points.
+        self.assertIn("entry.result = result && !voided ? { p1: result.p1, p2: result.p2 } : null;", gate)
         # The one clock it may read, and its fail-closed answer.
         lock = self.logic[self.logic.index("export function fixtureLockMs(match)"):]
         lock = lock[:lock.index("\n}")]
@@ -2631,7 +2638,10 @@ class MatesPicksTests(unittest.TestCase):
         fn = fn[:fn.index("\n}")]
         for banned in ("await", "api(", "fetch", "loadMatesState"):
             self.assertNotIn(banned, fn, f"expanding a card must not {banned}")
-        self.assertIn("matesState.reveal", fn)
+        # It reads whatever current-round payload is already in hand, so an
+        # expanded card reveals without a prior visit to Mates' Picks.
+        self.assertIn("const state = currentRoundReveal();", fn)
+        self.assertIn("state.reveal", fn)
         self.assertIn("locked in", fn, "the pre-kick-off anticipation line")
         self.assertIn("fixtureRevealSection(match)", self.app, "and the card actually calls it")
 

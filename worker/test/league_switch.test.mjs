@@ -503,6 +503,10 @@ function switcher() {
     const cachedRoundState = () => null;
     const refreshLeague = async () => {};
     ${lift("function hydrateCachedLeague()")}
+    // Switching league drops Mates' Picks state, so this harness has to own
+    // the same three variables the real one does.
+    let matesState = null, matesRequest = 0, matesLockHorizon = Infinity;
+    ${lift("function forgetMatesState()")}
     ${lift("function setActiveLeague(code, refresh = true)")}
     return {
       flash: (m) => setFlash(m),

@@ -664,6 +664,76 @@ export function computeRoundWins(members, fixtures, picksByMatch, slatesByPeriod
 // behind them, whether or not anything has locked yet. (Before v1.5 a
 // replacement was substituted while the slate was still fully unlocked; that is
 // the behaviour this removes.)
+/**
+ * The ONE lock the Mates' Picks gate is allowed to read: a fixture's own
+ * scheduled kick-off, as a number.
+ *
+ * Deliberately not `matchLocked()`. That answers a different question — "may a
+ * pick still be edited?" — and answers yes to a postponement, an abandonment
+ * and anything a stale feed has marked live. A reveal must not move because a
+ * feed twitched, so this reads the clock and nothing else. A fixture with no
+ * parseable kick-off has no lock, and a fixture with no lock never reveals.
+ */
+export function fixtureLockMs(match) {
+  const parsed = Date.parse(match?.lockAt || match?.startAt);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+/**
+ * Every fixture in a round, gated for one viewer against ONE server timestamp.
+ *
+ * The filtering happens here, before serialization — a pick for a fixture that
+ * has not kicked off is not in the returned object at all, rather than present
+ * and marked hidden. Hidden has to mean undelivered: anything that reaches the
+ * client can be read off the wire no matter what the client then does with it.
+ *
+ * Eligibility is a member's own join time against that fixture's lock: someone
+ * who joined after a fixture locked never had the chance to predict it, so they
+ * are omitted from it entirely. "No pick" is kept for members who were there
+ * and did not use it.
+ */
+export function buildRoundReveal({ fixtures, picksByMatch, members, serverNow, includePicks }) {
+  return (fixtures || []).map((match) => {
+    const lockMs = fixtureLockMs(match);
+    const eligible = lockMs == null
+      ? []
+      : (members || []).filter((member) => !member.since || lockMs >= member.since);
+    const stored = (picksByMatch || {})[match.id] || {};
+    const entry = {
+      id: match.id,
+      lockAt: lockMs == null ? null : new Date(lockMs).toISOString(),
+      revealed: lockMs != null && serverNow >= lockMs,
+      eligible: eligible.length,
+      lockedIn: eligible.filter((member) => pickValid(stored[member.uid], lockMs)).length,
+    };
+    // The gate. Below this line predictions exist; above it they do not.
+    if (!entry.revealed || !includePicks) return entry;
+    const result = normaliseResult(match);
+    const voided = isVoided(match);
+    // Void is its own outcome, not a settled one: nothing scored, so nothing
+    // to show points for. The same distinction the season reveals already make.
+    entry.settled = !!result && !voided;
+    entry.voided = voided;
+    entry.result = result ? { p1: result.p1, p2: result.p2 } : null;
+    entry.picks = eligible.map((member) => {
+      const raw = stored[member.uid];
+      const pick = pickValid(raw, lockMs) ? raw : null;
+      const scored = scorePick(pick, result, voided);
+      return {
+        uid: member.uid,
+        nick: member.nick,
+        none: !pick,
+        p1: pick?.p1 ?? null,
+        p2: pick?.p2 ?? null,
+        pts: scored.settled ? scored.pts : null,
+        exact: scored.exact,
+        settled: scored.settled,
+      };
+    });
+    return entry;
+  });
+}
+
 export function reconcileSlate(slate, roundFixtures, nowMs) {
   if (!isPublishedSlate(slate) || slate?.mode !== "custom" || !slate.fixtureIds?.length) return null;
   const byId = new Map(roundFixtures.map((match) => [String(match.id), match]));

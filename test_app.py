@@ -489,7 +489,7 @@ class MatchweekTerminologyTests(unittest.TestCase):
             'class="tour-badge">Matchweek ',
             "Matchweek ${escapeHTML(period)} is open",
             "🏆 ${competition} ${week}",
-            'title="${escapeHTML(label)}">Weekly League \u25be',   # the week is the tooltip; the segment says what it is
+            'title="${escapeHTML(label)}">Weekly \u25be',   # the week is the tooltip; the segment says what it is
             "Share Matchweek ",
             "Loading matchweek",
             '"Choose a matchweek"',
@@ -2490,6 +2490,170 @@ class SeasonPodiumTests(unittest.TestCase):
         fn = fn[:fn.index("\n}")]
         self.assertIn("for (const [period, all] of groupByPeriod(fixtures, keyOf))", fn)
         self.assertNotIn("kvGet", fn)
+
+
+class MatesPicksTests(unittest.TestCase):
+    """v1.6.5 Phase 1: the Mates' Picks matrix and the fixture-card reveal.
+    Working spec v1.3.2 is the authority; these pin the parts of it that are
+    claims about the source rather than about behaviour."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = (ROOT / "app.js").read_text()
+        cls.css = (ROOT / "styles.css").read_text()
+        cls.worker = (ROOT / "worker/src/worker.js").read_text()
+        cls.logic = (ROOT / "worker/src/logic.js").read_text()
+
+    def test_the_segment_control_carries_three_labels(self):
+        # §9, binding: Weekly ▾ · Season · Mates' Picks.
+        toggle = self.app[self.app.index("function roundToggle()"):]
+        toggle = toggle[:toggle.index("\n}")]
+        for label in (">Weekly ▾<", ">Season<", ">Mates' Picks<"):
+            self.assertIn(label, toggle, label)
+        # The long labels are gone from the control itself. They survive in
+        # prose about the dropdown, which is not a label.
+        self.assertNotIn(">Weekly League", toggle)
+        self.assertNotIn(">Season League", toggle)
+        self.assertIn('data-round-tab="mates"', toggle)
+
+    def test_the_view_heading_names_the_feature(self):
+        header = self.app[self.app.index("function matesHeader(matrix)"):]
+        header = header[:header.index("\n}")]
+        self.assertIn("Mates' Picks", header)
+        self.assertIn("fixture${matrix.total === 1 ? \"\" : \"s\"} revealed", header)
+
+    def test_the_three_state_lines_are_the_spec_wording(self):
+        lines = self.app[self.app.index("const MATES_STATE_LINE = {"):]
+        lines = lines[:lines.index("\n};")]
+        self.assertIn('locked: "Mates\' picks reveal at kick-off"', lines)
+        self.assertIn('revealed: "Kicked off · Picks revealed"', lines)
+        self.assertIn('settled: "Picks & points"', lines)
+        # The unavailable sentence lives in the card body, not shouted in the
+        # small-caps state line, which stays factual.
+        self.assertIn('unavailable: "Kicked off"', lines)
+        self.assertIn('const MATES_UNAVAILABLE = "Picks unavailable — refresh or update the app.";', self.app)
+        for empty in ("Your pick is locked. Mates' picks reveal at kick-off.",
+                      "No mate picks for this fixture."):
+            self.assertIn(empty, self.app, empty)
+
+    def test_no_live_scores_or_minutes_anywhere_in_the_feature(self):
+        # §1, ruled 16 Aug: no in-play scores at any phase. A kicked-off,
+        # unsettled fixture shows picks and nothing else.
+        section = self.app[self.app.index("// --- Mates' Picks"):self.app.index("function leagueRevealsHtml")]
+        for banned in ("minute", "'", "in-play", "liveScore"):
+            if banned == "'":
+                continue
+            self.assertNotIn(banned, section.lower(), banned)
+        points = self.app[self.app.index("function matesPointsCell(row, card)"):]
+        points = points[:points.index("\n}")]
+        self.assertIn('card.state !== "settled"', points, "points only after settlement")
+
+    def test_the_server_gate_reads_the_clock_and_nothing_else(self):
+        gate = self.logic[self.logic.index("export function buildRoundReveal("):]
+        gate = gate[:gate.index("\n}")]
+        self.assertIn("serverNow >= lockMs", gate)
+        self.assertNotIn("matchLocked", gate, "§5: never the edit-lock rule")
+        self.assertNotIn("status", gate, "nor the feed's status")
+        # The one clock it may read, and its fail-closed answer.
+        lock = self.logic[self.logic.index("export function fixtureLockMs(match)"):]
+        lock = lock[:lock.index("\n}")]
+        self.assertIn("Number.isFinite(parsed) ? parsed : null", lock)
+
+    def test_the_server_captures_its_time_once_per_response(self):
+        fn = self.worker[self.worker.index("async function state(env, url)"):]
+        fn = fn[:fn.index("\nasync function")]
+        self.assertIn("const serverNow = Date.now();", fn)
+        # The round branch reads that one capture and never the clock again, so
+        # every fixture in a response is gated against the same instant.
+        branch = fn[fn.index("if (roundOnly) {"):fn.index("const slates = slateAware(league)")]
+        self.assertNotIn("Date.now()", branch)
+        self.assertIn("serverNow,", branch)
+
+    def test_the_reveal_is_additive_and_never_breaks_an_old_client(self):
+        fn = self.worker[self.worker.index("async function state(env, url)"):]
+        fn = fn[:fn.index("\nasync function")]
+        # Spread, so a viewer who is not a current member gets no field at all.
+        self.assertIn("...(viewerIsMember ? {", fn)
+        self.assertIn("const viewerIsMember = !!viewer && memberList.some((member) => member.uid === viewer);", fn)
+        # And never a rejection merely for arriving without a uid: the round
+        # branch has no status other than the 200 it has always returned.
+        branch = fn[fn.index("if (roundOnly) {"):fn.index("const slates = slateAware(league)")]
+        self.assertNotIn("403", re.sub(r"//[^\n]*|/\*.*?\*/", "", branch, flags=re.S))
+        self.assertIn("}, 200, env,", branch)
+
+    def test_only_the_answer_carrying_picks_is_kept_from_shared_caches(self):
+        fn = self.worker[self.worker.index("async function state(env, url)"):]
+        fn = fn[:fn.index("\nasync function")]
+        self.assertIn('viewerIsMember ? { "cache-control": "private, no-store" } : {}', fn)
+
+    def test_the_reveal_costs_no_additional_reads(self):
+        fn = self.worker[self.worker.index("async function state(env, url)"):]
+        fn = fn[:fn.index("\nasync function")]
+        reveal = fn[fn.index("buildRoundReveal({"):]
+        reveal = reveal[:reveal.index("})")]
+        for read in ("kvGet", "allPicks", "await"):
+            self.assertNotIn(read, reveal, f"{read} inside the reveal would be a new read")
+        self.assertIn("picksByMatch: picks", reveal, "it reuses the scoring pass's picks")
+
+    def test_mates_picks_keeps_its_own_state_apart_from_the_weekly_one(self):
+        self.assertIn("let matesState = null;", self.app)
+        self.assertIn("const matesPeriod = () => leagueState?.currentPeriod ?? null;", self.app)
+        loader = self.app[self.app.index("async function loadMatesState"):]
+        loader = loader[:loader.index("\n}")]
+        self.assertNotIn("selectedPeriod", loader)
+        self.assertNotIn("roundState =", loader)
+
+    def test_freshness_is_bounded_and_never_polled(self):
+        self.assertIn('document.addEventListener("visibilitychange"', self.app)
+        fn = self.app[self.app.index("async function refreshMatesOnForeground()"):]
+        fn = fn[:fn.index("\n}")]
+        self.assertIn("if (Date.now() < matesLockHorizon) return;", fn)
+        self.assertIn("matesLockHorizon = Infinity;", fn, "one crossing, one revalidation")
+        # The app's one timer predates this feature and refreshes fixtures, not
+        # picks. Mates' Picks adds no timer of its own.
+        self.assertEqual(self.app.count("setInterval"), 1)
+        timer = self.app[self.app.index("setInterval(async () => {"):]
+        self.assertIn("loadFixtures()", timer[:timer.index("}, 180000)")])
+        section = self.app[self.app.index("// --- Mates' Picks"):self.app.index("function leagueRevealsHtml")]
+        self.assertNotIn("setInterval", section)
+
+    def test_show_all_uncovers_rows_without_rebuilding_or_asking(self):
+        branch = self.app[self.app.index('const matesMore = event.target.closest("[data-mates-more]");'):]
+        branch = branch[:branch.index("return;\n  }") + len("return;\n  }")]
+        self.assertIn('rows.classList.add("is-all")', branch)
+        for banned in ("render()", "await", "api(", "fetch"):
+            self.assertNotIn(banned, branch, banned)
+        self.assertIn("MATES_ROWS_SHOWN = 8", self.app)
+        self.assertIn(".mates-rows:not(.is-all) .mates-row:nth-child(n+9)", self.css)
+
+    def test_the_fixture_card_reveal_reads_only_what_is_already_loaded(self):
+        fn = self.app[self.app.index("function fixtureRevealSection(match)"):]
+        fn = fn[:fn.index("\n}")]
+        for banned in ("await", "api(", "fetch", "loadMatesState"):
+            self.assertNotIn(banned, fn, f"expanding a card must not {banned}")
+        self.assertIn("matesState.reveal", fn)
+        self.assertIn("locked in", fn, "the pre-kick-off anticipation line")
+        self.assertIn("fixtureRevealSection(match)", self.app, "and the card actually calls it")
+
+    def test_the_export_card_is_not_offered_from_this_view(self):
+        # Phase 2. Offering the season card from under the matrix would be a
+        # button that does something other than what the screen is about.
+        fn = self.app[self.app.index("function shareCardState()"):]
+        fn = fn[:fn.index("\n}")]
+        self.assertIn('if (leagueTab === "mates") return { ready: false, hidden: true, label: "" };', fn)
+
+    def test_deferred_surfaces_are_absent(self):
+        # §3.3 and §6: member-row expansion, historic Mates' Picks and the
+        # export card are all deferred outright, not half-built.
+        for absent in ("data-mates-member", "matesHistory", "matesExportCard", "drawMatesCard"):
+            self.assertNotIn(absent, self.app, absent)
+
+    def test_the_app_privacy_position_is_unchanged(self):
+        # §5: picks are existing league-visible state; nothing new is collected
+        # or transmitted, so the feature adds no outbound call of its own.
+        section = self.app[self.app.index("// --- Mates' Picks"):self.app.index("function leagueRevealsHtml")]
+        for banned in ("fetch(", "api(", "navigator.sendBeacon", "XMLHttpRequest"):
+            self.assertNotIn(banned, section, banned)
 
 
 if __name__ == "__main__":

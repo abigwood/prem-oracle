@@ -3,6 +3,7 @@ import {
   applySlates,
   buildFixtureIcs,
   buildReveals,
+  buildRoundReveal,
   buildSlateSnapshot,
   canAdvanceSlate,
   computeCabinet,
@@ -1201,7 +1202,12 @@ async function pickerPreload(env, league, period, pool, stored) {
 }
 
 async function state(env, url) {
+  // ONE timestamp for the whole response. Gating fixture A at 14:59:59 and
+  // fixture B at 15:00:00 inside the same answer would make the reveal depend
+  // on how far down the list a fixture happened to sit.
+  const serverNow = Date.now();
   const code = String(url.searchParams.get("code") || "").toUpperCase();
+  const viewer = String(url.searchParams.get("uid") || "");
   const league = await kvGet(env, `league:${code}`);
   if (!league) return json({ error: "league not found" }, 404, env);
   const competitions = leagueCompetitions(league);
@@ -1266,6 +1272,16 @@ async function state(env, url) {
     const stored = roundStored;
     const slate = roundSlate;
     const pool = roundPool;
+    /**
+     * Mates' Picks is ADDITIVE and nothing more.
+     *
+     * Released 1.6.4 clients call this endpoint without a uid at all, so an
+     * unsigned or unrecognised request is a normal request — it gets the whole
+     * round response it has always got, minus a field it has never seen. The
+     * membership rule guards the new field; it is not a new door on the old one,
+     * and it never turns a legacy call into a 403.
+     */
+    const viewerIsMember = !!viewer && memberList.some((member) => member.uid === viewer);
     const scoped = applySlates(completed.filter((match) => match.period === period),
       slate ? { [period]: slate } : {});
     const table = computeTable(memberList, scoped, picks).map((row, index) => ({ ...row, rank: index + 1 }));
@@ -1286,7 +1302,25 @@ async function state(env, url) {
       complete: roundComplete(roundFixtures),
       winners: roundWinners(memberList, roundFixtures, picks),
       podium: computePodium(memberList, roundFixtures, picks),
-    }, 200, env);
+      // Mates' Picks rides on the picks this branch has already read to score
+      // the table, so the whole feature costs no additional KV read. The viewer
+      // is checked against the CURRENT membership list: someone who was removed
+      // is no longer in it, and never was is the same answer. Anyone else is
+      // simply not sent the field — `includePicks` below is the second lock on
+      // the same door, so a mistake here still cannot serialize a prediction.
+      ...(viewerIsMember ? {
+        reveal: buildRoundReveal({
+          fixtures: roundFixtures,
+          picksByMatch: picks,
+          members: memberList,
+          serverNow,
+          includePicks: true,
+        }),
+      } : {}),
+      // Only the answer that actually carries other people's predictions is
+      // withheld from shared caches. A response without the field is the same
+      // public round data it has always been, with the headers it always had.
+    }, 200, env, viewerIsMember ? { "cache-control": "private, no-store" } : {});
   }
 
   const slates = slateAware(league) ? await readSlates(env, code) : {};
@@ -1337,7 +1371,6 @@ async function state(env, url) {
   // A fixture dropped and later re-added is not dropped: the league is asking
   // for it again, and the member's original pick stands.
   const dropped = [...droppedFixtureIds].filter((id) => !lineup.includes(id));
-  const viewer = url.searchParams.get("uid") || "";
   return json({
     code,
     name: league.name,

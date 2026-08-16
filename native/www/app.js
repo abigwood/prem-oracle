@@ -1,6 +1,6 @@
 const SEASON_START = new Date("2026-08-21T20:00:00+01:00");
 const SEASON_START_DATE = "2026-08-21";
-const APP_BUILD = "20260805h";
+const APP_BUILD = "20260816a";
 const API = window.PREM_API || null;
 // Canonical public home of the web app. Inside the Capacitor shell the page is
 // served from premoracle://localhost, so location.origin can never be used to
@@ -217,6 +217,20 @@ let selectedPeriod = null;
 // league, which runs on windows and has no matchweek numbering to report.
 const selectedMatchday = () => (Number(selectedPeriod) || null);
 let roundState = null;
+/**
+ * Mates' Picks state, held APART from roundState.
+ *
+ * The two answer different questions: roundState is the week the viewer chose
+ * to look at, Mates' Picks is always the league's current active round. Sharing
+ * one slot would mean opening Mates' Picks silently moved the Weekly tab off
+ * the week the viewer had browsed to, and returning to Weekly is supposed to
+ * put them back where they were.
+ */
+let matesState = null;
+let matesRequest = 0;
+// The next kick-off this view is waiting on. A foreground return that crosses
+// it is the one moment the data can have gone stale without anything asking.
+let matesLockHorizon = Infinity;
 let matchdayPickerOpen = false;
 let busyMatch = "";
 let flashMessage = "";
@@ -697,7 +711,10 @@ function fetchState(path) {
 }
 
 const seasonStatePath = (code) => `/state?code=${encodeURIComponent(code)}&uid=${encodeURIComponent(uid())}`;
-const roundStatePath = (code, period) => `/state?code=${encodeURIComponent(code)}&period=${encodeURIComponent(period)}`;
+// The round read now names its viewer. The worker checks that name against the
+// league's current membership before it will serialize anybody's predictions,
+// so an unsigned round request gets the table and no picks.
+const roundStatePath = (code, period) => `/state?code=${encodeURIComponent(code)}&period=${encodeURIComponent(period)}&uid=${encodeURIComponent(uid())}`;
 
 let leagueStateRequest = 0;
 
@@ -823,6 +840,74 @@ async function loadRoundState(generation = navGeneration) {
     // A cached week already on screen is better than an error over the top.
     if (!cached) roundState = { error: error.message };
   }
+}
+
+/** The round Mates' Picks shows: always the league's current active one. */
+const matesPeriod = () => leagueState?.currentPeriod ?? null;
+
+/**
+ * The next kick-off still ahead of us, so a foreground return knows whether it
+ * missed anything. Infinity means every fixture in the round has kicked off and
+ * there is no boundary left to cross.
+ */
+function lockHorizonOf(state) {
+  const upcoming = (state?.reveal || [])
+    .map((entry) => Date.parse(entry.lockAt))
+    .filter((ms) => Number.isFinite(ms) && ms > Date.now());
+  return upcoming.length ? Math.min(...upcoming) : Infinity;
+}
+
+/**
+ * ONE revalidation of the round endpoint, coalesced.
+ *
+ * Called on entering the segment and on a foreground return that crossed a
+ * kick-off — the two moments the answer can have changed without the viewer
+ * doing anything. There is no polling behind this: if neither happens, no
+ * request happens. `fetchState` folds a concurrent Weekly read for the same
+ * week into the same flight, so opening Mates' Picks on the current week costs
+ * one request between them rather than one each.
+ */
+async function loadMatesState(generation = navGeneration) {
+  const code = activeLeague;
+  const period = matesPeriod();
+  if (!code || !API || period == null) { matesState = null; return; }
+  const ticket = ++matesRequest;
+  const view = currentView;
+  const superseded = () =>
+    ticket !== matesRequest || code !== activeLeague || generation !== navGeneration
+    || view !== currentView || String(period) !== String(matesPeriod());
+
+  const cached = cachedRoundState(code, period);
+  if (cached && !cached.error && !matesState) matesState = cached;
+
+  try {
+    const state = await fetchState(roundStatePath(code, period));
+    cacheRoundState(code, period, state);
+    if (superseded()) return;
+    matesState = state;
+    matesLockHorizon = lockHorizonOf(state);
+    bumpStamp(code);
+    dropRetainedPanels(code);
+  } catch (error) {
+    if (superseded()) return;
+    // A cached round already on screen beats an error drawn over the top of it.
+    if (!matesState) matesState = { error: error.message };
+  }
+}
+
+/**
+ * A return to the app that crossed a kick-off, and nothing else.
+ *
+ * Coming back to a screen whose next fixture is still an hour away asks for
+ * nothing — the picks it is showing cannot have changed. Crossing the horizon
+ * is the single case where they can.
+ */
+async function refreshMatesOnForeground() {
+  if (document.hidden || currentView !== "league" || leagueTab !== "mates") return;
+  if (Date.now() < matesLockHorizon) return;
+  matesLockHorizon = Infinity;          // one crossing, one revalidation
+  await loadMatesState();
+  await showResultsPanel();
 }
 
 async function loadKnownLeagueNames() {
@@ -1409,7 +1494,33 @@ function matchCard(match) {
       ${pick ? pickStatus(match, pick, open) : ""}
       ${scorePicker(match, open)}
     </div>
+    ${fixtureRevealSection(match)}
   </article>`;
+}
+
+/**
+ * The card's own reveal — surface two of Phase 1.
+ *
+ * Drawn from the matrix already in memory, so expanding a card costs nothing:
+ * no request, per-fixture or otherwise. A fixture outside the league's current
+ * round has no entry and gets no section at all, rather than an empty one.
+ */
+function fixtureRevealSection(match) {
+  if (!activeLeague || !matesState || matesState.error) return "";
+  const entry = (matesState.reveal || []).find((row) => String(row.id) === String(match.id));
+  const inRound = entry || (matesState.table && (slateForPeriod(matesState.period)?.fixtureIds || [])
+    .some((id) => String(id) === String(match.id)));
+  if (!inRound) return "";
+  const card = { id: String(match.id), ...matesFixtureView(match, entry, matesState.table, uid()) };
+  if (card.state === "locked") {
+    return `<section class="fixture-reveal">
+      <p class="mates-state">Mates' picks reveal at kick-off · ${card.lockedIn} of ${card.eligible} locked in</p>
+    </section>`;
+  }
+  return `<section class="fixture-reveal">
+    <p class="mates-state">${MATES_STATE_LINE[card.state]}</p>
+    ${matesCardBody(card, !!picks[match.id])}
+  </section>`;
 }
 
 /**
@@ -2057,7 +2168,11 @@ const stampFor = (code) => leagueStamps.get(code) ?? 0;
 const bumpStamp = (code) => leagueStamps.set(code, stampFor(code) + 1);
 
 function panelKey(tab, code = activeLeague, period = selectedPeriod) {
-  return `${code}|${stampFor(code)}|${tab}|${tab === "matchday" ? period : "-"}`;
+  // Mates' Picks is filed under the round it actually shows — the league's
+  // current one — so a week rolling over cannot leave last week's matrix
+  // reachable under this week's key.
+  const scope = tab === "matchday" ? period : tab === "mates" ? `m${matesPeriod()}` : "-";
+  return `${code}|${stampFor(code)}|${tab}|${scope}`;
 }
 
 function retainPanel(key, node) {
@@ -2102,6 +2217,30 @@ function seasonStages(state, isOwner) {
  */
 async function fillPanelProgressively(panel, capture) {
   const { state, isOwner, tab, stale } = capture;
+  if (tab === "mates") {
+    if (!matesState || matesState.error) {
+      panel.insertAdjacentHTML("beforeend", matesState?.error
+        ? `<div class="empty"><strong>${escapeHTML(matesState.error)}</strong></div>`
+        : pulsingStatus("Loading Mates' Picks…"));
+      return true;
+    }
+    const matrix = matesMatrix(matesState);
+    panel.insertAdjacentHTML("beforeend", matesHeader(matrix));
+    // A twenty-fixture week is twenty cards. Built four at a time with a real
+    // paint between, so no single task owns the main thread long enough to be
+    // felt — the same bounded-stage rule the Season panel runs on.
+    for (let index = 0; index < matrix.cards.length; index += 4) {
+      if (stale()) { traceTap("panel-discarded", { tab, reason: "mates-chunk" }); return false; }
+      const chunk = matrix.cards.slice(index, index + 4).map(matesFixtureCard).join("");
+      panel.insertAdjacentHTML("beforeend", chunk);
+      traceTap("chunk", { stage: "mates", chars: chunk.length });
+      await nextPaint();
+    }
+    if (!matrix.cards.length) {
+      panel.insertAdjacentHTML("beforeend", `<p class="muted">This week's fixtures aren't set yet.</p>`);
+    }
+    return !stale();
+  }
   if (tab === "matchday") {
     // Small by construction: one banner and one table.
     const html = !roundState
@@ -2180,7 +2319,9 @@ async function showResultsPanel({ status } = {}) {
     && !showing.classList?.contains("view-loading")
     && sameContext(code, tab, period);
   if (!valid) {
-    node.replaceChildren(pulsingNode(status ?? (tab === "season" ? "Loading season…" : `Loading ${weekLabelFor(period)}…`)));
+    node.replaceChildren(pulsingNode(status ?? (tab === "season" ? "Loading season…"
+      : tab === "mates" ? "Loading Mates' Picks…"
+        : `Loading ${weekLabelFor(period)}…`)));
     traceTap("results-shell-inserted", { tab });
   } else {
     traceTap("results-kept-visible", { tab });
@@ -2256,7 +2397,9 @@ function mountResults() {
 function syncShareLabel() {
   const button = document.querySelector("[data-export-league-table]");
   if (!button) return;
-  const { ready, label } = shareCardState();
+  const { ready, label, hidden } = shareCardState();
+  button.hidden = !!hidden;
+  if (hidden) return;
   button.textContent = label;
   button.disabled = !ready;
 }
@@ -2351,11 +2494,14 @@ function roundToggle() {
   // different controls.
   const week = weekNumberFor(period);
   const label = week == null ? periodLabel(period) : `Week ${week}`;
-  return `<div class="round-toggle" role="tablist">
+  // Three segments now, so the labels shorten to fit: Weekly ▾ · Season ·
+  // Mates' Picks. The week itself stays in the first segment's tooltip.
+  return `<div class="round-toggle round-toggle-three" role="tablist">
     <button type="button" role="tab" class="round-seg${leagueTab === "matchday" ? " active" : ""}"
       aria-selected="${leagueTab === "matchday"}" aria-expanded="${matchdayPickerOpen}"
-      data-round-tab="matchday" title="${escapeHTML(label)}">Weekly League ▾</button>
-    <button type="button" role="tab" class="round-seg${leagueTab === "season" ? " active" : ""}" aria-selected="${leagueTab === "season"}" data-round-tab="season">Season League</button>
+      data-round-tab="matchday" title="${escapeHTML(label)}">Weekly ▾</button>
+    <button type="button" role="tab" class="round-seg${leagueTab === "season" ? " active" : ""}" aria-selected="${leagueTab === "season"}" data-round-tab="season">Season</button>
+    <button type="button" role="tab" class="round-seg${leagueTab === "mates" ? " active" : ""}" aria-selected="${leagueTab === "mates"}" data-round-tab="mates">Mates' Picks</button>
   </div>`;
 }
 
@@ -2630,6 +2776,187 @@ function seasonTableHtml(state, isOwner, withWins) {
     <tbody>${(state.table || []).map((row, index) =>
       `<tr><td class="player-cell"><span class="player-name">${row.rank || index + 1}. ${escapeHTML(row.nick)}</span>${withWins ? medalLine(row) : ""}</td><td>${movementBadge(row)}</td><td>${row.pts}</td><td>${row.exact}</td>${isOwner ? `<td class="kick-cell">${row.uid && row.uid !== state.owner ? `<button class="kick-btn" type="button" data-kick-league="${state.code}" data-kick-uid="${escapeHTML(row.uid)}" aria-label="Remove ${escapeHTML(row.nick)}">×</button>` : ""}</td>` : ""}</tr>`
     ).join("")}</tbody></table>`;
+}
+
+// --- Mates' Picks ----------------------------------------------------------
+
+/**
+ * How many rows a fixture shows before it offers the rest. Spec §6: a league of
+ * thirty must not turn one fixture into a page of scrolling.
+ */
+const MATES_ROWS_SHOWN = 8;
+
+/**
+ * The week's rank, with ties SHARING a place.
+ *
+ * The round table ranks positionally — two players on 23 points are 1 and 2 —
+ * which is the right answer for a league table and the wrong one here, where
+ * the same score has to read as the same standing.
+ */
+function sharedRankByUid(table) {
+  const rows = table || [];
+  return new Map(rows.map((row) => [
+    row.uid,
+    rows.filter((other) => Number(other.pts || 0) > Number(row.pts || 0)).length + 1,
+  ]));
+}
+
+/**
+ * Reveal order, per spec §6 and §9: you first and highlighted, then the week's
+ * rank order with ties broken alphabetically, and anybody who never picked at
+ * the bottom — present, honest, quietly brutal.
+ */
+function revealRows(entry, table, viewerUid) {
+  const ranks = sharedRankByUid(table);
+  return (entry?.picks || [])
+    .map((pick) => ({
+      ...pick,
+      you: pick.uid === viewerUid,
+      rank: ranks.get(pick.uid) ?? Number.MAX_SAFE_INTEGER,
+    }))
+    .sort((a, b) =>
+      (a.you === b.you ? 0 : a.you ? -1 : 1)
+      || (a.none === b.none ? 0 : a.none ? 1 : -1)
+      || (a.rank - b.rank)
+      || String(a.nick || "").localeCompare(String(b.nick || "")));
+}
+
+/**
+ * What ONE fixture is showing, decided here rather than in the markup.
+ *
+ * `revealed` is the server's answer and the only one that can put predictions
+ * on screen. The client's own clock picks the treatment — and, when a worker
+ * too old to send a reveal field answers, tells the difference between "not yet"
+ * and "we cannot say", which are very different things to show a viewer.
+ */
+function matesFixtureView(fixture, entry, table, viewerUid) {
+  const lockMs = Date.parse(fixture?.startAt || "");
+  const passed = Number.isFinite(lockMs) && Date.now() >= lockMs;
+  if (!entry) {
+    // Pre-kick-off this is simply a fixture we have nothing to say about yet.
+    // After kick-off it means the answer did not carry picks at all.
+    return { state: passed ? "unavailable" : "locked", rows: [], lockedIn: 0, eligible: 0 };
+  }
+  if (!entry.revealed) {
+    return { state: "locked", rows: [], lockedIn: entry.lockedIn || 0, eligible: entry.eligible || 0 };
+  }
+  const rows = revealRows(entry, table, viewerUid);
+  return {
+    state: entry.settled ? "settled" : entry.voided ? "voided" : "revealed",
+    rows,
+    lockedIn: entry.lockedIn || 0,
+    eligible: entry.eligible || 0,
+    result: entry.result || null,
+    others: rows.filter((row) => !row.you).length,
+  };
+}
+
+/**
+ * The whole matrix as data. Pure, so the privacy claim can be tested on the
+ * view-model itself rather than inferred from what happened to be painted.
+ */
+function matesMatrix(state, viewerUid = uid()) {
+  const entries = new Map((state?.reveal || []).map((entry) => [String(entry.id), entry]));
+  const ids = (state?.reveal || []).length
+    ? (state.reveal || []).map((entry) => String(entry.id))
+    : slateForPeriod(state?.period)?.fixtureIds?.map(String) || [];
+  const fixturesShown = ids.map((id) => ({ id, fixture: fixtureById(id) })).filter((row) => row.fixture);
+  const cards = fixturesShown.map(({ id, fixture }) => ({
+    id,
+    fixture,
+    ...matesFixtureView(fixture, entries.get(id), state?.table, viewerUid),
+  }));
+  return {
+    period: state?.period ?? null,
+    total: cards.length,
+    revealed: cards.filter((card) => card.state !== "locked" && card.state !== "unavailable").length,
+    cards,
+  };
+}
+
+const MATES_STATE_LINE = {
+  locked: "Mates' picks reveal at kick-off",
+  revealed: "Kicked off · Picks revealed",
+  settled: "Picks & points",
+  voided: "Void — no points",
+  // A worker too old to send the reveal field. The state line stays factual —
+  // the fixture HAS kicked off — and the sentence explaining why there is
+  // nothing under it belongs in the body, not shouted in small caps.
+  unavailable: "Kicked off",
+};
+// Spec §10: never an error, never a stale or invented pick — just an honest
+// "we cannot say right now".
+const MATES_UNAVAILABLE = "Picks unavailable — refresh or update the app.";
+
+function matesPickCell(row) {
+  if (row.none) return `<span class="mates-pick is-none">No pick</span>`;
+  return `<span class="mates-pick">${row.p1}-${row.p2}</span>`;
+}
+
+function matesPointsCell(row, card) {
+  if (card.state !== "settled" || row.pts == null) return "";
+  return `<span class="mates-pts${row.exact ? " is-exact" : ""}">+${row.pts}</span>`;
+}
+
+function matesRow(row, card) {
+  return `<li class="mates-row${row.you ? " is-you" : ""}${row.none ? " is-none" : ""}">
+    <span class="mates-nick">${escapeHTML(row.nick)}${row.you ? ` <em>you</em>` : ""}</span>
+    ${matesPickCell(row)}${matesPointsCell(row, card)}
+  </li>`;
+}
+
+/**
+ * The rows, with the tail hidden rather than dropped.
+ *
+ * Everything here has already passed the server's gate, so holding the extra
+ * rows in the DOM reveals nothing that is not already revealed — and it makes
+ * "Show all" a class change instead of a rebuild.
+ */
+function matesRowList(card) {
+  const extra = card.rows.length - MATES_ROWS_SHOWN;
+  return `<ul class="mates-rows" data-mates-rows>${card.rows.map((row) => matesRow(row, card)).join("")}</ul>
+    ${extra > 0 ? `<button class="mates-more" type="button" data-mates-more="${escapeHTML(card.id)}">Show all ${card.rows.length}</button>` : ""}`;
+}
+
+function matesCardBody(card, viewerPicked) {
+  if (card.state === "unavailable") {
+    return `<p class="mates-empty">${MATES_UNAVAILABLE}</p>`;
+  }
+  if (card.state === "locked") {
+    // Spec §6: the pre-kick-off empty state reassures rather than looking broken.
+    const line = viewerPicked
+      ? "Your pick is locked. Mates' picks reveal at kick-off."
+      : "Mates' picks reveal at kick-off.";
+    return `<p class="mates-empty">${line}</p>
+      <p class="mates-count">${card.lockedIn} of ${card.eligible} locked in</p>`;
+  }
+  if (!card.rows.length || !card.others) {
+    return `${card.rows.length ? matesRowList(card) : ""}<p class="mates-empty">No mate picks for this fixture.</p>`;
+  }
+  return matesRowList(card);
+}
+
+function matesFixtureCard(card) {
+  const match = card.fixture;
+  const viewerPicked = !!picks[card.id];
+  const score = card.state === "settled" && card.result
+    ? `<span class="mates-score">${card.result.p1}-${card.result.p2}</span>`
+    : "";
+  return `<article class="mates-card mates-${card.state}" data-mates-fixture="${escapeHTML(card.id)}">
+    <div class="mates-head">
+      <span class="mates-teams">${escapeHTML(match.player1)} v ${escapeHTML(match.player2)}</span>
+      ${score}
+    </div>
+    <p class="mates-state">${MATES_STATE_LINE[card.state]}</p>
+    ${matesCardBody(card, viewerPicked)}
+  </article>`;
+}
+
+function matesHeader(matrix) {
+  return `<div class="round-banner mates-banner">
+    <strong>Mates' Picks</strong>
+    <span>${matrix.revealed} of ${matrix.total} fixture${matrix.total === 1 ? "" : "s"} revealed</span>
+  </div>`;
 }
 
 function leagueRevealsHtml(state) {
@@ -3187,6 +3514,10 @@ function weeklyCardReady() {
 
 /** What the share button says, and whether it does anything when pressed. */
 function shareCardState() {
+  // Mates' Picks has no card of its own — the matchweek export is Phase 2 — and
+  // offering to share the season table from under a matrix would be a button
+  // that does something other than what the screen is about.
+  if (leagueTab === "mates") return { ready: false, hidden: true, label: "" };
   if (leagueTab === "matchday" && leagueSupportsRounds(leagueState)) {
     if (roundState?.matchday != null) {
       return weeklyCardReady()
@@ -3806,7 +4137,7 @@ function leagueView() {
           ${isOwner ? `<button class="link-danger" type="button" data-delete-league="${state.code}">Delete league</button>` : ""}
           ${supportsRounds ? `${roundToggle()}<div class="picker-island" data-picker-island></div>` : ""}
           ${inner}
-          <button class="whatsapp-share wide" type="button" data-export-league-table="${state.code}"${share.ready ? "" : " disabled"}>${escapeHTML(share.label)}</button>
+          <button class="whatsapp-share wide" type="button" data-export-league-table="${state.code}"${share.ready ? "" : " disabled"}${share.hidden ? " hidden" : ""}>${escapeHTML(share.label)}</button>
         </section>`;
   return `<div class="section-head"><div><span class="eyebrow">Private predictor leagues</span><h2>League table</h2></div></div>${flash()}${leagueSwitcher()}${content}${controls}${restore}`;
 }
@@ -4447,6 +4778,18 @@ window.addEventListener("scroll", () => {
   if (window.scrollY || document.scrollingElement?.scrollTop) restoreViewport();
 }, { passive: true });
 
+/**
+ * The only clock Mates' Picks keeps.
+ *
+ * A phone in a pocket through a 15:00 kick-off comes back to a screen that
+ * genuinely is out of date, and nothing else would ever tell it. This is not
+ * polling: it fires on a return to the foreground, and only when that return
+ * crossed a kick-off the view was waiting on.
+ */
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) refreshMatesOnForeground();
+});
+
 // The keyboard closing shows up here as the visual viewport returning to full
 // height; that is the moment to put the page back.
 if (window.visualViewport) {
@@ -4599,6 +4942,19 @@ document.addEventListener("click", async (event) => {
     shareCardNow();
     return;
   }
+  // "Show all" is a class on rows already in the document — no rebuild, no
+  // render, and above all no request. Everything it uncovers is data the
+  // server had already released.
+  const matesMore = event.target.closest("[data-mates-more]");
+  if (matesMore) {
+    const card = matesMore.closest("[data-mates-fixture]");
+    const rows = card?.querySelector("[data-mates-rows]");
+    if (rows) {
+      rows.classList.add("is-all");
+      matesMore.remove();
+    }
+    return;
+  }
   const leagueCountStep = event.target.closest("[data-league-count-step]");
   if (leagueCountStep) {
     if (!countBusy) await changeWeeklyCount(Number(leagueCountStep.dataset.leagueCountStep));
@@ -4661,9 +5017,21 @@ document.addEventListener("click", async (event) => {
     traceTap("segment-acknowledged", { tab: wanted });
     const needsRound = wanted === "matchday"
       && (!roundState || roundState.error || String(roundState.period) !== String(selectedPeriod));
+    // Entering Mates' Picks: paint whatever is retained or cached first, then
+    // exactly one coalesced revalidation. Not zero — a matrix is only worth
+    // reading if a kick-off since last time is in it.
+    if (wanted === "mates" && !matesState) matesState = cachedRoundState(activeLeague, matesPeriod());
     showResultsPanel({
-      status: wanted === "season" ? "Loading season…" : `Loading ${weekLabelFor(selectedPeriod)}…`,
+      status: wanted === "season" ? "Loading season…"
+        : wanted === "mates" ? "Loading Mates' Picks…"
+          : `Loading ${weekLabelFor(selectedPeriod)}…`,
     }).then(async () => {
+      if (wanted === "mates") {
+        await loadMatesState();
+        if (leagueTab !== "mates") return;
+        await showResultsPanel();
+        return;
+      }
       if (!needsRound) return;
       await loadRoundState();
       dropRetainedPanels(activeLeague);

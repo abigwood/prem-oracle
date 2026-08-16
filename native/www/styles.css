@@ -718,6 +718,98 @@ th.wins-col { font-size: .92rem; }
   cursor: pointer;
 }
 .round-seg.active { color: var(--white); background: var(--purple); }
+/* Three segments at 663px (iPad) and 320px (SE) alike: the labels shrink
+   rather than the control wrapping onto two rows. */
+.round-toggle-three .round-seg { padding: 9px 6px; font-size: .72rem; }
+
+/* --- Mates' Picks -------------------------------------------------------- */
+.mates-banner strong { font-size: .95rem; }
+.mates-card {
+  margin: 10px 0;
+  padding: 12px 13px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--white);
+}
+.mates-head {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  justify-content: space-between;
+}
+.mates-teams { color: var(--ink); font-size: .86rem; font-weight: 800; }
+.mates-score { color: var(--purple); font-size: .95rem; font-weight: 900; }
+.mates-state {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: .7rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: .03em;
+}
+.mates-revealed .mates-state, .mates-settled .mates-state { color: var(--green); }
+.mates-unavailable .mates-state, .mates-voided .mates-state { color: var(--danger); }
+.mates-empty { margin: 8px 0 0; color: var(--muted); font-size: .76rem; }
+.mates-count { margin: 4px 0 0; color: var(--ink); font-size: .76rem; font-weight: 800; }
+.mates-rows { margin: 9px 0 0; padding: 0; list-style: none; }
+/* The tail is present but hidden until asked for — it is all revealed data,
+   so nothing is being withheld from the page that the page may not show. */
+.mates-rows:not(.is-all) .mates-row:nth-child(n+9) { display: none; }
+.mates-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 10px;
+  align-items: center;
+  padding: 7px 8px;
+  border-radius: 9px;
+}
+.mates-row + .mates-row { margin-top: 3px; }
+.mates-row:nth-child(odd) { background: var(--cream); }
+.mates-row.is-you { background: var(--purple-soft); }
+.mates-row.is-you .mates-nick { color: var(--purple); font-weight: 900; }
+.mates-row.is-none { opacity: .55; }
+.mates-nick {
+  overflow: hidden;
+  color: var(--ink);
+  font-size: .8rem;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mates-nick em {
+  margin-left: 4px;
+  color: var(--muted);
+  font-size: .66rem;
+  font-style: normal;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+.mates-pick { color: var(--ink); font-size: .84rem; font-weight: 900; font-variant-numeric: tabular-nums; }
+.mates-pick.is-none { color: var(--muted); font-size: .74rem; font-weight: 700; }
+.mates-pts {
+  min-width: 34px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  color: var(--muted);
+  background: var(--cream);
+  font-size: .72rem;
+  font-weight: 900;
+  text-align: center;
+}
+.mates-pts.is-exact { color: var(--white); background: var(--green); }
+.mates-more {
+  margin: 8px 0 0;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  color: var(--purple);
+  background: var(--white);
+  font-size: .74rem;
+  font-weight: 800;
+  cursor: pointer;
+}
+/* The same reveal, riding under an expanded fixture card. */
+.fixture-reveal { margin-top: 12px; padding-top: 11px; border-top: 1px solid var(--line); }
 .round-banner {
   margin: 12px 0;
   padding: 11px 13px;

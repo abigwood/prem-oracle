@@ -913,12 +913,16 @@ test("the Weekly League dropdown still reaches every week", () => {
 });
 
 test("the segments say what they are, and the dropdown reports its state", () => {
+  // v1.6.5: three segments, so the first two shorten to make room —
+  // "Weekly ▾ · Season · Mates' Picks". The week stays in the tooltip.
   const toggle = lift("function roundToggle()");
-  assert.match(toggle, />Weekly League ▾</);
-  assert.match(toggle, />Season League</);
+  assert.match(toggle, />Weekly ▾</);
+  assert.match(toggle, />Season</);
+  assert.match(toggle, />Mates' Picks</);
   assert.match(toggle, /aria-expanded="\$\{matchdayPickerOpen\}"/);
-  assert.match(toggle, /aria-selected="\$\{leagueTab === "matchday"\}"/);
-  assert.match(toggle, /aria-selected="\$\{leagueTab === "season"\}"/);
+  for (const tab of ["matchday", "season", "mates"]) {
+    assert.match(toggle, new RegExp(`aria-selected="\\$\\{leagueTab === "${tab}"\\}"`), tab);
+  }
 });
 
 // --- build 17 completion: real DOM, real staging -----------------------------

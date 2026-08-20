@@ -392,5 +392,58 @@
     "plan": "Workers Paid",
     "note": "Knowingly enabled. Supersedes the earlier zero-hard-cost ruling for the existing Workers baseline ONLY. No additional paid services and no incremental usage charges are authorised."
   },
-  "superseded_claim": "An earlier revision of this file concluded from usage alone that the account was not on Workers Free. That inference has been withdrawn: usage evidence reports observed limits, and only the account holder can state the plan."
+  "superseded_claim": "An earlier revision of this file concluded from usage alone that the account was not on Workers Free. That inference has been withdrawn: usage evidence reports observed limits, and only the account holder can state the plan.",
+  "account_headroom_rolling_31d": {
+    "captured_utc": "2026-08-20",
+    "window": "rolling 31 days (billing-cycle boundary unknown: token has no billing scope)",
+    "kv": {
+      "read": {
+        "used": 3479700,
+        "included_month": 10000000,
+        "pct": 34.8
+      },
+      "write": {
+        "used": 4370,
+        "included_month": 1000000,
+        "pct": 0.4
+      },
+      "delete": {
+        "used": 20810,
+        "included_month": 1000000,
+        "pct": 2.1
+      },
+      "list": {
+        "used": 14060,
+        "included_month": 1000000,
+        "pct": 1.4
+      }
+    },
+    "worker_requests": {
+      "observed_8d": 6402,
+      "projected_month": 24808,
+      "included_month": 10000000,
+      "pct": 0.25
+    },
+    "worker_cpu_us": {
+      "prem-oracle-window": {
+        "p50": 39045,
+        "p99": 699268,
+        "invocations_8d": 4292
+      },
+      "kickoff-oracle-window": {
+        "p50": 186,
+        "p99": 449,
+        "invocations_8d": 2110
+      },
+      "note": "percentiles only; bounded projection 0.65M-11.6M CPU-ms/month vs 30M included"
+    },
+    "queues_provisioned": 0,
+    "durable_object_namespaces_provisioned": 0,
+    "not_measured": [
+      "KV stored data",
+      "billing cycle boundary",
+      "any other product on the account"
+    ]
+  },
+  "claim_scope": "Scoped claim only: on the metrics measured here, the feature at its own caps cannot push the account past any included allowance. No absolute account-wide zero-cost claim is made."
 }

@@ -1,0 +1,391 @@
+{
+  "captured_utc": "2026-08-20",
+  "purpose": "Gate 0 blocker 1 - verify the Cloudflare account's Workers plan",
+  "account": {
+    "id": "c6e813c4f3da6f38b219967759c42fab",
+    "name": "Ops.ab80@gmail.com's Account",
+    "email": "ops.ab80@gmail.com"
+  },
+  "reproduce": {
+    "auth": "wrangler OAuth token at ~/Library/Preferences/.wrangler/config/default.toml (key: oauth_token)",
+    "endpoint": "POST https://api.cloudflare.com/client/v4/graphql",
+    "query": "query{viewer{accounts(filter:{accountTag:$ACC}){kvOperationsAdaptiveGroups(limit:200,filter:{datetimeHour_geq:\"2026-07-21T00:00:00Z\"},orderBy:[date_ASC]){sum{requests}dimensions{actionType date}}}}}"
+  },
+  "workers_free_kv_caps_per_day": {
+    "read": 100000,
+    "write": 1000,
+    "list": 1000,
+    "delete": 1000
+  },
+  "daily_kv_operations": [
+    {
+      "date": "2026-07-21",
+      "read": 1840,
+      "write": 200,
+      "list": 370,
+      "delete": 4620
+    },
+    {
+      "date": "2026-07-22",
+      "read": 20220,
+      "write": 310,
+      "list": 410,
+      "delete": 4480
+    },
+    {
+      "date": "2026-07-23",
+      "read": 2060,
+      "write": 340,
+      "list": 240,
+      "delete": 4390
+    },
+    {
+      "date": "2026-07-24",
+      "read": 13280,
+      "write": 250,
+      "list": 320,
+      "delete": 5070
+    },
+    {
+      "date": "2026-07-25",
+      "read": 2890,
+      "write": 110,
+      "list": 250,
+      "delete": 1840
+    },
+    {
+      "date": "2026-07-26",
+      "read": 4160,
+      "write": 80,
+      "list": 90,
+      "delete": 90
+    },
+    {
+      "date": "2026-07-27",
+      "read": 72750,
+      "write": 50,
+      "list": 240,
+      "delete": 0
+    },
+    {
+      "date": "2026-07-28",
+      "read": 8910,
+      "write": 80,
+      "list": 140,
+      "delete": 10
+    },
+    {
+      "date": "2026-07-29",
+      "read": 29790,
+      "write": 20,
+      "list": 130,
+      "delete": 0
+    },
+    {
+      "date": "2026-07-30",
+      "read": 18610,
+      "write": 10,
+      "list": 100,
+      "delete": 0
+    },
+    {
+      "date": "2026-07-31",
+      "read": 75840,
+      "write": 40,
+      "list": 220,
+      "delete": 10
+    },
+    {
+      "date": "2026-08-01",
+      "read": 71250,
+      "write": 110,
+      "list": 480,
+      "delete": 30
+    },
+    {
+      "date": "2026-08-02",
+      "read": 255860,
+      "write": 530,
+      "list": 760,
+      "delete": 160
+    },
+    {
+      "date": "2026-08-03",
+      "read": 576880,
+      "write": 270,
+      "list": 1100,
+      "delete": 20
+    },
+    {
+      "date": "2026-08-04",
+      "read": 113100,
+      "write": 110,
+      "list": 410,
+      "delete": 0
+    },
+    {
+      "date": "2026-08-05",
+      "read": 292450,
+      "write": 260,
+      "list": 880,
+      "delete": 70
+    },
+    {
+      "date": "2026-08-06",
+      "read": 77360,
+      "write": 40,
+      "list": 320,
+      "delete": 0
+    },
+    {
+      "date": "2026-08-07",
+      "read": 102070,
+      "write": 110,
+      "list": 370,
+      "delete": 0
+    },
+    {
+      "date": "2026-08-08",
+      "read": 147650,
+      "write": 40,
+      "list": 550,
+      "delete": 0
+    },
+    {
+      "date": "2026-08-09",
+      "read": 63230,
+      "write": 20,
+      "list": 400,
+      "delete": 0
+    },
+    {
+      "date": "2026-08-10",
+      "read": 72250,
+      "write": 0,
+      "list": 240,
+      "delete": 0
+    },
+    {
+      "date": "2026-08-11",
+      "read": 170170,
+      "write": 130,
+      "list": 680,
+      "delete": 0
+    },
+    {
+      "date": "2026-08-12",
+      "read": 126020,
+      "write": 80,
+      "list": 520,
+      "delete": 0
+    },
+    {
+      "date": "2026-08-13",
+      "read": 89770,
+      "write": 20,
+      "list": 230,
+      "delete": 0
+    },
+    {
+      "date": "2026-08-14",
+      "read": 301930,
+      "write": 110,
+      "list": 1140,
+      "delete": 0
+    },
+    {
+      "date": "2026-08-15",
+      "read": 200770,
+      "write": 150,
+      "list": 720,
+      "delete": 0
+    },
+    {
+      "date": "2026-08-16",
+      "read": 123100,
+      "write": 40,
+      "list": 730,
+      "delete": 0
+    },
+    {
+      "date": "2026-08-17",
+      "read": 166670,
+      "write": 80,
+      "list": 660,
+      "delete": 0
+    },
+    {
+      "date": "2026-08-18",
+      "read": 165530,
+      "write": 400,
+      "list": 710,
+      "delete": 10
+    },
+    {
+      "date": "2026-08-19",
+      "read": 73920,
+      "write": 260,
+      "list": 450,
+      "delete": 10
+    },
+    {
+      "date": "2026-08-20",
+      "read": 34010,
+      "write": 110,
+      "list": 160,
+      "delete": 0
+    }
+  ],
+  "free_tier_breaches": [
+    {
+      "date": "2026-07-21",
+      "metric": "delete",
+      "observed": 4620,
+      "free_cap": 1000,
+      "multiple": 4.62
+    },
+    {
+      "date": "2026-07-22",
+      "metric": "delete",
+      "observed": 4480,
+      "free_cap": 1000,
+      "multiple": 4.48
+    },
+    {
+      "date": "2026-07-23",
+      "metric": "delete",
+      "observed": 4390,
+      "free_cap": 1000,
+      "multiple": 4.39
+    },
+    {
+      "date": "2026-07-24",
+      "metric": "delete",
+      "observed": 5070,
+      "free_cap": 1000,
+      "multiple": 5.07
+    },
+    {
+      "date": "2026-07-25",
+      "metric": "delete",
+      "observed": 1840,
+      "free_cap": 1000,
+      "multiple": 1.84
+    },
+    {
+      "date": "2026-08-02",
+      "metric": "read",
+      "observed": 255860,
+      "free_cap": 100000,
+      "multiple": 2.56
+    },
+    {
+      "date": "2026-08-03",
+      "metric": "read",
+      "observed": 576880,
+      "free_cap": 100000,
+      "multiple": 5.77
+    },
+    {
+      "date": "2026-08-03",
+      "metric": "list",
+      "observed": 1100,
+      "free_cap": 1000,
+      "multiple": 1.1
+    },
+    {
+      "date": "2026-08-04",
+      "metric": "read",
+      "observed": 113100,
+      "free_cap": 100000,
+      "multiple": 1.13
+    },
+    {
+      "date": "2026-08-05",
+      "metric": "read",
+      "observed": 292450,
+      "free_cap": 100000,
+      "multiple": 2.92
+    },
+    {
+      "date": "2026-08-07",
+      "metric": "read",
+      "observed": 102070,
+      "free_cap": 100000,
+      "multiple": 1.02
+    },
+    {
+      "date": "2026-08-08",
+      "metric": "read",
+      "observed": 147650,
+      "free_cap": 100000,
+      "multiple": 1.48
+    },
+    {
+      "date": "2026-08-11",
+      "metric": "read",
+      "observed": 170170,
+      "free_cap": 100000,
+      "multiple": 1.7
+    },
+    {
+      "date": "2026-08-12",
+      "metric": "read",
+      "observed": 126020,
+      "free_cap": 100000,
+      "multiple": 1.26
+    },
+    {
+      "date": "2026-08-14",
+      "metric": "read",
+      "observed": 301930,
+      "free_cap": 100000,
+      "multiple": 3.02
+    },
+    {
+      "date": "2026-08-14",
+      "metric": "list",
+      "observed": 1140,
+      "free_cap": 1000,
+      "multiple": 1.14
+    },
+    {
+      "date": "2026-08-15",
+      "metric": "read",
+      "observed": 200770,
+      "free_cap": 100000,
+      "multiple": 2.01
+    },
+    {
+      "date": "2026-08-16",
+      "metric": "read",
+      "observed": 123100,
+      "free_cap": 100000,
+      "multiple": 1.23
+    },
+    {
+      "date": "2026-08-17",
+      "metric": "read",
+      "observed": 166670,
+      "free_cap": 100000,
+      "multiple": 1.67
+    },
+    {
+      "date": "2026-08-18",
+      "metric": "read",
+      "observed": 165530,
+      "free_cap": 100000,
+      "multiple": 1.66
+    }
+  ],
+  "breach_count": 20,
+  "peak_read_day": {
+    "date": "2026-08-03",
+    "read": 576880,
+    "write": 270,
+    "list": 1100,
+    "delete": 20
+  },
+  "conclusion": "KV read/list/delete volumes exceed Workers FREE plan daily caps on multiple days with zero reported errors on a live, working app. Workers Free enforces these caps by failing operations. The account is therefore NOT on Workers Free; it is on Workers Paid.",
+  "not_provable_here": "Direct billing confirmation: the wrangler OAuth token lacks billing scope (GET /accounts/{id}/billing/profile returns HTTP 403). Adam must confirm the subscription line item in dash.cloudflare.com > Manage Account > Billing > Subscriptions."
+}

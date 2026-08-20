@@ -1,14 +1,21 @@
 // EXECUTABLE SPECIFICATION — not shipped code, not Slice 1.
 //
-// Gate 0 blocker A: the previously described `INSERT ... ON CONFLICT DO NOTHING`
-// returns only newly-inserted rows, so a row left `claimed` by a crash could
-// never be reclaimed — which contradicted the retry trace built on top of it.
-//
-// This file is the corrected design, written as the real SQL it will become and
-// run against real SQLite so the traces are executed rather than asserted from
-// prose. It lives in docs/design because approving it is the point; nothing
-// imports it from worker/src.
+// The single design authority for the notification ledger. Every statement here
+// is the SQL that will be used, run against real SQLite by test/ledger.test.mjs,
+// so the traces are executed rather than asserted in prose. Nothing under
+// worker/src or app.js imports it.
 import { DatabaseSync } from "node:sqlite";
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/** ~80x the worst observed job, and far inside the 60-minute reminder window. */
+export const LEASE_MS = 120_000;
+/** Four queue deliveries plus one lease-expiry reclaim. */
+export const MAX_ATTEMPTS = 5;
+/** APNs ATTEMPTS per UTC day — failures included, because failures cost too. */
+export const APNS_ATTEMPT_CAP = 15_000;
 
 export const SCHEMA = `
 CREATE TABLE IF NOT EXISTS delivery (
@@ -16,37 +23,63 @@ CREATE TABLE IF NOT EXISTS delivery (
   fixture_id  TEXT    NOT NULL,
   league      TEXT    NOT NULL,
   state       TEXT    NOT NULL,          -- 'claimed' | 'sent' | 'failed' | 'dropped'
+  claim_gen   INTEGER NOT NULL,          -- fencing token: strictly increases per row
   claim_until INTEGER,                   -- epoch ms; meaningful only while 'claimed'
   attempts    INTEGER NOT NULL DEFAULT 0,
   sent_at     INTEGER,
+  drop_reason TEXT,
   kickoff_at  INTEGER NOT NULL,
   PRIMARY KEY (uid, fixture_id)
 );
 CREATE INDEX IF NOT EXISTS delivery_kickoff ON delivery (kickoff_at);
+
+CREATE TABLE IF NOT EXISTS budget (
+  day    TEXT    NOT NULL,
+  metric TEXT    NOT NULL,
+  used   INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (day, metric)
+);
+
+-- Bounded diagnostic: one row per (day, fixture, reason), counted not listed,
+-- so a bad day cannot turn the diagnostic into the storage problem.
+CREATE TABLE IF NOT EXISTS dropped_log (
+  day     TEXT    NOT NULL,
+  fixture TEXT    NOT NULL,
+  reason  TEXT    NOT NULL,
+  uids    INTEGER NOT NULL DEFAULT 0,
+  at      INTEGER NOT NULL,
+  PRIMARY KEY (day, fixture, reason)
+);
 `;
 
+// ---------------------------------------------------------------------------
+// Claim — the only way to acquire ownership
+// ---------------------------------------------------------------------------
+
 /**
- * Take a bounded lease on (uid, fixture).
+ * Take a bounded, FENCED lease on (uid, fixture).
  *
- * Returns ONLY the rows this caller now owns. The four outcomes are decided by
- * the conflict clause rather than by application logic, so they hold under
- * concurrency without a transaction around them:
+ * Every grant — initial or reclaim — bumps `claim_gen`, and every mutation below
+ * requires the generation it was granted. That is what stops a consumer whose
+ * lease expired from reaching into the claim that replaced it: its token is one
+ * generation behind and matches nothing.
  *
- *   absent                         -> inserted, leased           (returned)
- *   'sent'                         -> matches nothing            (never returned: terminal)
- *   'dropped'                      -> matches nothing            (never returned: terminal)
- *   'claimed' and lease still live -> WHERE fails                (not returned: cannot be stolen)
- *   'claimed' and lease expired    -> re-leased, attempts + 1    (returned)
- *   'failed'                       -> re-leased, attempts + 1    (returned immediately)
+ *   absent                         -> inserted, gen 1            (returned)
+ *   'sent'                         -> matches nothing            (terminal)
+ *   'dropped'                      -> matches nothing            (terminal)
+ *   'claimed' and lease still live -> WHERE fails                (cannot be stolen)
+ *   'claimed' and lease expired    -> re-leased, gen + 1         (returned)
+ *   'failed'                       -> re-leased, gen + 1         (returned at once)
  *
- * The lease is clamped to kick-off, so a lease can never outlive the window the
+ * The lease is clamped to kick-off, so it can never outlive the window the
  * reminder is allowed to be delivered in.
  */
 export const CLAIM_SQL = `
-INSERT INTO delivery (uid, fixture_id, league, state, claim_until, attempts, kickoff_at)
-VALUES (:uid, :fx, :league, 'claimed', MIN(:now + :lease, :kickoff), 1, :kickoff)
+INSERT INTO delivery (uid, fixture_id, league, state, claim_gen, claim_until, attempts, kickoff_at)
+VALUES (:uid, :fx, :league, 'claimed', 1, MIN(:now + :lease, :kickoff), 1, :kickoff)
 ON CONFLICT (uid, fixture_id) DO UPDATE SET
     state       = 'claimed',
+    claim_gen   = delivery.claim_gen + 1,
     claim_until = MIN(:now + :lease, delivery.kickoff_at),
     attempts    = delivery.attempts + 1,
     league      = excluded.league
@@ -54,45 +87,102 @@ ON CONFLICT (uid, fixture_id) DO UPDATE SET
       OR (delivery.state = 'claimed' AND delivery.claim_until <= :now))
     AND delivery.attempts < :maxAttempts
     AND :now < delivery.kickoff_at
-RETURNING uid, fixture_id, league, attempts;
+RETURNING uid, fixture_id, league, claim_gen, attempts;
 `;
+
+// ---------------------------------------------------------------------------
+// Mutations — all fenced on claim_gen
+// ---------------------------------------------------------------------------
 
 export const SENT_SQL = `
 UPDATE delivery SET state = 'sent', sent_at = :now, claim_until = NULL
- WHERE uid = :uid AND fixture_id = :fx AND state = 'claimed';
+ WHERE uid = :uid AND fixture_id = :fx
+   AND state = 'claimed' AND claim_gen = :gen;
 `;
 
-/** A transient failure: released at once so a retry need not wait out the lease. */
+/** Transient failure: released at once so a retry need not wait out the lease. */
 export const FAIL_SQL = `
 UPDATE delivery SET state = 'failed', claim_until = NULL
- WHERE uid = :uid AND fixture_id = :fx AND state = 'claimed';
+ WHERE uid = :uid AND fixture_id = :fx
+   AND state = 'claimed' AND claim_gen = :gen;
 `;
 
-/** Terminal give-up: attempts exhausted, budget exhausted, or past kick-off. */
+/** Terminal give-up by the current owner: budget exhausted, past kick-off, etc. */
 export const DROP_SQL = `
-UPDATE delivery SET state = 'dropped', claim_until = NULL
- WHERE uid = :uid AND fixture_id = :fx AND state IN ('claimed', 'failed');
+UPDATE delivery SET state = 'dropped', claim_until = NULL, drop_reason = :reason
+ WHERE uid = :uid AND fixture_id = :fx
+   AND state = 'claimed' AND claim_gen = :gen;
 `;
 
-/** Rows whose fixture has kicked off are never reclaimed; the sweep removes them. */
+/**
+ * Attempts exhausted -> 'dropped', never left as an ambiguous 'failed'.
+ * Unfenced by design: this is the sweep, not an owner, and it only touches rows
+ * that no live lease covers.
+ */
+export const EXHAUST_SQL = `
+UPDATE delivery SET state = 'dropped', claim_until = NULL, drop_reason = 'attempts-exhausted'
+ WHERE attempts >= :maxAttempts
+   AND (state = 'failed' OR (state = 'claimed' AND claim_until <= :now))
+RETURNING uid, fixture_id, league, attempts;
+`;
+
 export const PRUNE_SQL = `DELETE FROM delivery WHERE kickoff_at <= :now;`;
 
-export const LEASE_MS = 120_000;      // ~80x the worst observed job; << the 60-min window
-export const MAX_ATTEMPTS = 5;        // 4 queue deliveries + 1 lease-expiry reclaim
+export const LOG_DROP_SQL = `
+INSERT INTO dropped_log (day, fixture, reason, uids, at)
+VALUES (:day, :fixture, :reason, :uids, :at)
+ON CONFLICT (day, fixture, reason) DO UPDATE SET uids = dropped_log.uids + :uids, at = :at;
+`;
 
-/** A tiny harness so the traces read as the sequence of events they describe. */
+// ---------------------------------------------------------------------------
+// Budget — reserved BEFORE the work, so failures pay for themselves
+// ---------------------------------------------------------------------------
+
+const BUDGET_READ_SQL = `SELECT used FROM budget WHERE day = :day AND metric = :metric;`;
+const BUDGET_SET_SQL = `
+INSERT INTO budget (day, metric, used) VALUES (:day, :metric, :used)
+ON CONFLICT (day, metric) DO UPDATE SET used = :used;
+`;
+
+/**
+ * The whole reservation runs inside one Durable Object call, and a Durable
+ * Object is single-threaded, so read-compute-write here is atomic with respect
+ * to every other consumer. Two consumers cannot both see the same remaining
+ * headroom and both spend it.
+ *
+ * Partial grants are deliberate: a consumer asking for 45 attempts with 10 left
+ * gets 10 and drops the rest, rather than the whole job failing at the boundary.
+ */
+export function reserve(db, { day, metric, want, cap }) {
+  const row = db.prepare(BUDGET_READ_SQL).get({ day, metric });
+  const used = row?.used ?? 0;
+  const granted = Math.max(0, Math.min(want, cap - used));
+  if (granted > 0) db.prepare(BUDGET_SET_SQL).run({ day, metric, used: used + granted });
+  return { granted, used: used + granted, remaining: cap - (used + granted) };
+}
+
+// ---------------------------------------------------------------------------
+// Harness, so the traces read as the sequence of events they describe
+// ---------------------------------------------------------------------------
+
 export function ledger() {
   const db = new DatabaseSync(":memory:");
   db.exec(SCHEMA);
   const claim = db.prepare(CLAIM_SQL);
-  const api = {
+  return {
+    db,
     claim: (uid, fx, { now, kickoff, league = "AAA" }) =>
       claim.all({ uid, fx, league, now, lease: LEASE_MS, kickoff, maxAttempts: MAX_ATTEMPTS }),
-    sent: (uid, fx, now) => db.prepare(SENT_SQL).run({ uid, fx, now }).changes,
-    fail: (uid, fx) => db.prepare(FAIL_SQL).run({ uid, fx }).changes,
-    drop: (uid, fx) => db.prepare(DROP_SQL).run({ uid, fx }).changes,
+    sent: (uid, fx, gen, now) => db.prepare(SENT_SQL).run({ uid, fx, gen, now }).changes,
+    fail: (uid, fx, gen) => db.prepare(FAIL_SQL).run({ uid, fx, gen }).changes,
+    drop: (uid, fx, gen, reason = "budget") => db.prepare(DROP_SQL).run({ uid, fx, gen, reason }).changes,
+    exhaust: (now) => db.prepare(EXHAUST_SQL).all({ now, maxAttempts: MAX_ATTEMPTS }),
+    logDrop: (day, fixture, reason, uids, at) =>
+      db.prepare(LOG_DROP_SQL).run({ day, fixture, reason, uids, at }).changes,
+    drops: () => db.prepare("SELECT * FROM dropped_log ORDER BY fixture").all(),
     prune: (now) => db.prepare(PRUNE_SQL).run({ now }).changes,
-    row: (uid, fx) => db.prepare("SELECT * FROM delivery WHERE uid=:uid AND fixture_id=:fx").get({ uid, fx }),
+    reserve: (opts) => reserve(db, { cap: APNS_ATTEMPT_CAP, metric: "apns_attempts", ...opts }),
+    row: (uid, fx) =>
+      db.prepare("SELECT * FROM delivery WHERE uid=:uid AND fixture_id=:fx").get({ uid, fx }),
   };
-  return api;
 }

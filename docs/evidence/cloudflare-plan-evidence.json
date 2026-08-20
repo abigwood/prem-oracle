@@ -435,7 +435,8 @@
         "p99": 449,
         "invocations_8d": 2110
       },
-      "note": "percentiles only; bounded projection 0.65M-11.6M CPU-ms/month vs 30M included"
+      "note": "PERCENTILES ONLY. A p99 is not an upper bound, and multiplying every invocation by it does not produce one. Aggregate account CPU is NOT MEASURED and remains unknown until actual total usage is obtained.",
+      "aggregate_measured": false
     },
     "queues_provisioned": 0,
     "durable_object_namespaces_provisioned": 0,
@@ -445,5 +446,6 @@
       "any other product on the account"
     ]
   },
-  "claim_scope": "Scoped claim only: on the metrics measured here, the feature at its own caps cannot push the account past any included allowance. No absolute account-wide zero-cost claim is made."
+  "claim_scope": "Feature consumption is bounded: every feature metric is hard-capped below documented Free-tier quota levels and each cap is a small fraction of the Paid included allowance. Absolute account-wide zero additional cost CANNOT be guaranteed from this evidence and is not claimed \u2014 the billing-cycle boundary, aggregate Worker CPU and KV stored data are all outside it. A read-only billing and headroom check is required immediately before configuration is enabled.",
+  "execution_dependency": "The design's METERED USAGE is capped below Free-tier quota levels, but its EXECUTION PROFILE requires the Paid runtime: a consumer invocation's CPU does not plausibly fit Free's 10ms per-invocation limit. The confirmed Paid baseline is an explicit runtime dependency."
 }

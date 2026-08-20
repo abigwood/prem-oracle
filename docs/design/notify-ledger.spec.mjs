@@ -24,9 +24,15 @@ export const MAX_ATTEMPTS = 5;
  * planned later.
  */
 export const POOL = {
-  apns_initial: 10_000,   // first APNs attempt per (uid, fixture)
-  apns_retry: 5_000,      // every attempt after the first
-  kv_reads: 96_000,       // authoritative pre-send reads, reserved before reading
+  /**
+   * First APNs attempt per (uid, fixture), sized to the PRODUCT'S MAXIMUM
+   * SHAPE: the frozen authority's 20-fixture round, at the required
+   * 1,000-recipient scale, is 20,000 first attempts. Sizing this to a
+   * ten-fixture round protected only 500 recipients at that shape.
+   */
+  apns_initial: 20_000,
+  apns_retry: 5_000,      // every attempt after the first, separately bounded
+  kv_reads: 110_000,      // authoritative pre-send reads, reserved before reading
 };
 export const APNS_ATTEMPT_CAP = POOL.apns_initial + POOL.apns_retry;   // 15,000
 
@@ -156,6 +162,52 @@ UPDATE delivery SET apns_tried = 1
  WHERE uid = :uid AND fixture_id = :fx AND state = 'claimed' AND claim_gen = :gen;
 `;
 
+export const BUDGET_READ_SQL = `SELECT used FROM budget WHERE day = :day AND metric = :metric;`;
+export const BUDGET_SET_SQL = `
+INSERT INTO budget (day, metric, used) VALUES (:day, :metric, :used)
+ON CONFLICT (day, metric) DO UPDATE SET used = :used;
+`;
+
+const OWNER_SQL = `
+SELECT state, claim_gen, apns_tried FROM delivery WHERE uid = :uid AND fixture_id = :fx;
+`;
+
+/**
+ * Permission to make ONE APNs fetch — fenced, pool-selecting and atomic.
+ *
+ * Reserving from a pool and then separately marking the row tried is two
+ * writes with a gap between them. A crash in that gap spends INITIAL capacity
+ * without recording that it was spent, and the redelivery spends INITIAL
+ * again — which is exactly the first-attempt protection the pools exist for.
+ *
+ * So it is one transaction: verify the fence, choose the pool from apns_tried,
+ * reserve exactly one slot, set apns_tried, commit. Either all of it happened
+ * or none of it did. A stale generation spends nothing at all.
+ *
+ * `failAfterReserve` exists only so a test can crash inside the transaction and
+ * assert the rollback gives the slot back.
+ */
+export function grantAttempt(db, { uid, fx, gen, day, failAfterReserve = false }) {
+  const row = db.prepare(OWNER_SQL).get({ uid, fx });
+  if (!row || row.state !== "claimed" || row.claim_gen !== gen) {
+    return { granted: false, reason: "stale", pool: null };
+  }
+  const pool = row.apns_tried ? "apns_retry" : "apns_initial";
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const before = db.prepare(BUDGET_READ_SQL).get({ day, metric: pool })?.used ?? 0;
+    if (before + 1 > POOL[pool]) { db.exec("ROLLBACK"); return { granted: false, reason: "budget", pool }; }
+    db.prepare(BUDGET_SET_SQL).run({ day, metric: pool, used: before + 1 });
+    if (failAfterReserve) throw new Error("crash between reserve and mark");
+    db.prepare(MARK_TRIED_SQL).run({ uid, fx, gen });
+    db.exec("COMMIT");
+    return { granted: true, reason: null, pool };
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
 /** Terminal give-up by the current owner: budget exhausted, past kick-off, etc. */
 export const DROP_SQL = `
 UPDATE delivery SET state = 'dropped', claim_until = NULL, drop_reason = :reason
@@ -187,11 +239,7 @@ ON CONFLICT (day, fixture, reason) DO UPDATE SET uids = dropped_log.uids + :uids
 // Budget — reserved BEFORE the work, so failures pay for themselves
 // ---------------------------------------------------------------------------
 
-const BUDGET_READ_SQL = `SELECT used FROM budget WHERE day = :day AND metric = :metric;`;
-const BUDGET_SET_SQL = `
-INSERT INTO budget (day, metric, used) VALUES (:day, :metric, :used)
-ON CONFLICT (day, metric) DO UPDATE SET used = :used;
-`;
+
 
 /**
  * The whole reservation runs inside one Durable Object call, and a Durable
@@ -235,6 +283,8 @@ export function ledger() {
     /** First APNs fetch for this row draws INITIAL; every later one draws RETRY. */
     poolFor: (row) => (row.apns_tried ? "apns_retry" : "apns_initial"),
     markTried: (uid, fx, gen) => db.prepare(MARK_TRIED_SQL).run({ uid, fx, gen }).changes,
+    /** The single fenced atomic step: fence check + pool choice + reserve + mark. */
+    grantAttempt: (opts) => grantAttempt(db, opts),
     disposition: (uid, fx, now) =>
       disposition(db.prepare(DISPOSITION_SQL).get({ uid, fx }), now),
     spent: (day) => Object.fromEntries(Object.keys(POOL).map((m) => [m,
@@ -272,11 +322,16 @@ export function deliverMessage(l, {
   eligible = () => true,         // authoritative check, run only after step 1
   apns = () => true,             // true = APNs accepted
 }) {
-  const out = { action: "ack", attempted: 0, sent: 0, dropped: 0, reads: 0, deferred: 0 };
+  const out = {
+    action: "ack", attempted: 0, sent: 0, dropped: 0, reads: 0, deferred: 0,
+    stale: 0, budget_refused: 0, claimed: 0, do_calls: 0,
+    pools: { apns_initial: 0, apns_retry: 0 },
+  };
 
   // 1. Worst-case read allowance for the whole message, before touching KV.
   const wantReads = triples.length * kvReadsPerTriple + kvReadsFixed;
   const readGrant = l.reserve({ day, pool: "kv_reads", want: wantReads });
+  out.do_calls++;                                      // call 1: reserve + claim batch
   if (readGrant.granted < wantReads) {
     // 2. Not enough: ack and drop, having read nothing at all.
     out.dropped = triples.length;
@@ -286,6 +341,7 @@ export function deliverMessage(l, {
 
   for (const [uid, fx] of triples) {
     const claimed = l.claim(uid, fx, { now, kickoff });
+    if (claimed.length) out.claimed++;
     if (!claimed.length) {
       const how = l.disposition(uid, fx, now);
       if (how === "retry") { out.deferred++; out.action = "retry"; }
@@ -300,19 +356,26 @@ export function deliverMessage(l, {
       continue;
     }
 
-    // 4. The exact attempt, from the pool this row belongs in.
-    const pool = l.poolFor(row);
-    if (l.reserve({ day, pool, want: 1 }).granted < 1) {
-      l.drop(uid, fx, row.claim_gen, "budget-exhausted");
+    // 4. The exact attempt: ONE fenced atomic step that verifies the fence,
+    //    picks the pool, reserves the slot and marks the row tried.
+    const grant = l.grantAttempt({ uid, fx, gen: row.claim_gen, day });
+    if (!grant.granted) {
+      l.drop(uid, fx, row.claim_gen, grant.reason === "stale" ? "stale-owner" : "budget-exhausted");
       out.dropped++;
+      out[grant.reason === "stale" ? "stale" : "budget_refused"]++;
       continue;
     }
-    l.markTried(uid, fx, row.claim_gen);
+    out.pools[grant.pool]++;
     out.attempted++;                                   // 5. reserved, spent either way
 
     if (apns(uid, fx)) { l.sent(uid, fx, row.claim_gen, now); out.sent++; }
     else { l.fail(uid, fx, row.claim_gen); out.action = "retry"; }
   }
+  // A working delivery costs THREE Durable Object round trips, not two:
+  //   1. reserve the read allowance and claim the batch
+  //   2. the batched atomic attempt grants, after eligibility
+  //   3. record the sent/failed/dropped outcomes, after APNs
+  if (out.claimed > 0) out.do_calls += 2;
   return out;
 }
 

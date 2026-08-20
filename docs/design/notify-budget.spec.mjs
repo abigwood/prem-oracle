@@ -46,19 +46,29 @@ export const DESIGN = {
   QUEUE_WRITE: 1,
   QUEUE_DELETE: 1,
   CRON_TICKS: 96,
-  FIXTURES_PER_WINDOW: 10,
+  /**
+   * The PRODUCT'S MAXIMUM SHAPE. The frozen authority's executed worst case is
+   * a 20-fixture round, and league rules permit up to 20 published fixtures.
+   * Modelling ten understated every downstream figure by half.
+   */
+  FIXTURES_PER_WINDOW: 20,
   CONSUMER_CPU_MS: 10,
   CRON_CPU_MS: 50,
+  DO_CALLS_PER_DELIVERY: 3,
+  DIAGNOSTIC_ROWS_PER_DAY: 40,
   DO_MEM_GB: 0.128,
   DO_CALL_MS: 10,
   DAYS: 31,
 };
 
-/** Two pools, so a retry can never starve a recipient's first attempt. */
+/**
+ * Two pools, so a retry can never starve a recipient's first attempt.
+ * INITIAL is sized to the maximum shape: 20 fixtures x 1,000 recipients.
+ */
 export const POOL = {
-  apns_initial: 10_000,
+  apns_initial: 20_000,
   apns_retry: 5_000,
-  kv_reads: 96_000,
+  kv_reads: 110_000,
 };
 export const APNS_ATTEMPT_CAP = POOL.apns_initial + POOL.apns_retry;
 
@@ -81,32 +91,65 @@ const readsPerDelivery = D.JOB_TRIPLES * D.KV_READS_PER_TRIPLE + D.KV_READS_FIXE
  */
 export function modelDay({ planned, deliveriesPerMessage = 1 }) {
   const messages = Math.ceil(planned / D.JOB_TRIPLES);
-  const deliveries = messages * deliveriesPerMessage;
 
   // Attempts, drawn from the pool each one belongs in.
-  const wantInitial = planned;
-  const initial = Math.min(wantInitial, POOL.apns_initial);
+  const initial = Math.min(planned, POOL.apns_initial);
   const wantRetry = planned * (deliveriesPerMessage - 1);
   const retry = Math.min(wantRetry, POOL.apns_retry);
+  const attempts = initial + retry;
+
+  /**
+   * Deliveries. A message whose remainder is budget-dropped is ACKED, so it
+   * stops coming back: redelivery is bounded by the retry budget, not by
+   * max_retries alone. The ceiling modelled is the first pass, plus the retry
+   * deliveries the pool can actually fund, plus one final pass per message
+   * that returns and finds nothing left — capped by max_retries throughout.
+   */
+  const retryWorking = Math.ceil(retry / D.JOB_TRIPLES);
+  const finalDropPass = deliveriesPerMessage > 1 ? messages : 0;
+  const deliveries = Math.min(messages * deliveriesPerMessage,
+    messages + retryWorking + finalDropPass);
 
   // Reads are reserved per delivery, capped by their own pool.
   const affordableDeliveries = Math.min(deliveries, Math.floor(POOL.kv_reads / readsPerDelivery));
   const kvReads = affordableDeliveries * readsPerDelivery;
 
-  const attempts = initial + retry;
-  const doCalls = deliveries * 2 + D.FIXTURES_PER_WINDOW * 2;
+  /**
+   * Durable Object calls. A WORKING delivery is three round trips:
+   *   1. reserve the read allowance and claim the batch
+   *   2. the batched atomic attempt grants, after eligibility
+   *   3. record sent/failed/dropped outcomes, after APNs
+   * A delivery refused its read allowance costs one.
+   */
+  const doCalls = deliveries * D.DO_CALLS_PER_DELIVERY + D.FIXTURES_PER_WINDOW * 2;
+
+  /**
+   * Rows written. The old `attempts * 2 + deliveries` understated the case
+   * where work is claimed and then dropped without an APNs attempt at all.
+   * Every write is now named:
+   */
+  const claimed = Math.min(deliveries * D.JOB_TRIPLES, planned * deliveriesPerMessage);
+  const droppedNoAttempt = Math.max(0, claimed - attempts);
+  const rowsWritten =
+      claimed                       // claims and reclaims
+    + attempts                      // apns_tried
+    + attempts                      // sent | failed outcome
+    + droppedNoAttempt              // dropped outcome, no attempt made
+    + deliveries * 2                // budget rows: read reservation + attempt grants
+    + D.DIAGNOSTIC_ROWS_PER_DAY;    // bounded dropped_log
+
   const queueReads = deliveriesPerMessage === 1 ? 1 : D.QUEUE_READS_MAX;
 
   return {
-    planned, messages, deliveries,
+    planned, messages, deliveries, claimed, dropped_no_attempt: droppedNoAttempt,
     apns_initial: initial,
     apns_retry: retry,
     apns_attempts: attempts,
     unmet_retry: wantRetry - retry,
     queue_ops: messages * (D.QUEUE_WRITE + queueReads + D.QUEUE_DELETE),
     do_requests: doCalls,
-    do_rows_written: attempts * 2 + deliveries,
-    do_rows_read: attempts * 5,
+    do_rows_written: rowsWritten,
+    do_rows_read: attempts * 5 + claimed,
     do_duration_gbs: +(doCalls * D.DO_CALL_MS / 1000 * D.DO_MEM_GB).toFixed(2),
     worker_requests: D.CRON_TICKS + deliveries,
     worker_cpu_ms: deliveries * D.CONSUMER_CPU_MS + D.CRON_TICKS * D.CRON_CPU_MS,
@@ -120,9 +163,10 @@ export function modelDay({ planned, deliveriesPerMessage = 1 }) {
  * worst       — nobody has saved a pick, so every candidate is planned
  * max_retry   — worst shape, every message delivered the full four times
  */
-export const CANDIDATES = 10_000;
+export const RECIPIENTS = 1_000;
+export const CANDIDATES = RECIPIENTS * D.FIXTURES_PER_WINDOW;    // 20,000
 export const SCENARIOS = {
-  normal: { day: modelDay({ planned: 3_000 }), days: 20 },
+  normal: { day: modelDay({ planned: Math.round(CANDIDATES * 0.3) }), days: 20 },
   worst: { day: modelDay({ planned: CANDIDATES }), days: D.DAYS },
   max_retry: { day: modelDay({ planned: CANDIDATES, deliveriesPerMessage: D.DELIVERIES }), days: D.DAYS },
 };
@@ -130,19 +174,19 @@ export const SCENARIOS = {
 export const MONTHLY_CAP = {
   queue_ops: 232_500,
   do_requests: 232_500,
-  do_rows_written: 1_488_000,
-  do_rows_read: 4_960_000,
+  do_rows_written: 4_000_000,
+  do_rows_read: 6_200_000,
   do_duration_gbs: 9_920,
   worker_requests: 148_800,
   worker_cpu_ms: 1_798_000,
   kv_reads: POOL.kv_reads * D.DAYS,
-  kv_writes: 17_980,
+  kv_writes: 35_960,
   apns_attempts: APNS_ATTEMPT_CAP * D.DAYS,
 };
 export const DAILY_CAP = Object.fromEntries(
   Object.entries(MONTHLY_CAP).map(([k, v]) => [k, Math.floor(v / D.DAYS)]));
 
-export const KV_WRITES_PER_DAY = 357;
+export const KV_WRITES_PER_DAY = 714;   // 20 fixtures per slate, not 10
 
 export const monthly = (name, metric) => {
   const { day, days } = SCENARIOS[name];

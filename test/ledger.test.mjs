@@ -275,24 +275,25 @@ test("budget · exhaustion drops the remaining work and records why", () => {
 
 test("A · the pools sum to the hard ceiling and are separately capped", () => {
   assert.equal(POOL.apns_initial + POOL.apns_retry, APNS_ATTEMPT_CAP);
-  assert.equal(APNS_ATTEMPT_CAP, 15_000);
+  assert.equal(POOL.apns_initial, 20_000, "INITIAL must cover 1,000 recipients x 20 fixtures");
+  assert.equal(APNS_ATTEMPT_CAP, 25_000);
 });
 
 test("A · a first attempt draws INITIAL, every later one draws RETRY", () => {
   const l = ledger();
   const [a] = l.claim("u1", "f1", ctx);
-  assert.equal(l.poolFor(a), "apns_initial");
-  l.markTried("u1", "f1", a.claim_gen);
+  assert.equal(l.grantAttempt({ uid: "u1", fx: "f1", gen: a.claim_gen, day: DAY }).pool, "apns_initial");
   l.fail("u1", "f1", a.claim_gen);
   const [b] = l.claim("u1", "f1", { ...ctx, now: T0 + 1 });
-  assert.equal(l.poolFor(b), "apns_retry", "a retry drew from the first-attempt pool");
+  assert.equal(l.grantAttempt({ uid: "u1", fx: "f1", gen: b.claim_gen, day: DAY }).pool, "apns_retry",
+    "a retry drew from the first-attempt pool");
 });
 
 test("A · ADVERSARIAL: retries arriving first cannot consume first-attempt capacity", () => {
   const l = ledger();
   // 5,000 retry attempts land before any of the later first deliveries.
   let retriesTaken = 0;
-  for (let i = 0; i < 8_000; i++) {
+  for (let i = 0; i < 9_000; i++) {
     if (l.reserve({ day: DAY, pool: "apns_retry", want: 1 }).granted) retriesTaken++;
   }
   assert.equal(retriesTaken, POOL.apns_retry, "the retry pool was not capped at 5,000");
@@ -302,7 +303,8 @@ test("A · ADVERSARIAL: retries arriving first cannot consume first-attempt capa
   for (let i = 0; i < POOL.apns_initial; i++) {
     if (l.reserve({ day: DAY, pool: "apns_initial", want: 1 }).granted) firstTaken++;
   }
-  assert.equal(firstTaken, 10_000, "retries starved first delivery");
+  assert.equal(firstTaken, POOL.apns_initial, "retries starved first delivery");
+  assert.equal(firstTaken, 20_000);
 
   const spent = l.spent(DAY);
   assert.equal(spent.apns_initial + spent.apns_retry, APNS_ATTEMPT_CAP,
@@ -314,7 +316,7 @@ test("A · ADVERSARIAL: retries arriving first cannot consume first-attempt capa
 test("A · interleaved first attempts and retries never exceed either pool", () => {
   const l = ledger();
   let first = 0, retry = 0;
-  for (let round = 0; round < 12_000; round++) {
+  for (let round = 0; round < 21_000; round++) {
     if (l.reserve({ day: DAY, pool: "apns_initial", want: 1 }).granted) first++;
     if (l.reserve({ day: DAY, pool: "apns_retry", want: 1 }).granted) retry++;
   }
@@ -323,17 +325,17 @@ test("A · interleaved first attempts and retries never exceed either pool", () 
   assert.equal(first + retry, APNS_ATTEMPT_CAP);
 });
 
-test("A · the honest capacity arithmetic", () => {
-  const FIXTURES = 10, DELIVERIES = 4;
-  // One attempt each across ten fixtures.
-  assert.equal(APNS_ATTEMPT_CAP / FIXTURES, 1_500);
-  // All four deliveries across ten fixtures is FORTY attempts per user.
-  assert.equal(APNS_ATTEMPT_CAP / (FIXTURES * DELIVERIES), 375);
-  // The INITIAL pool is what actually protects first delivery.
+test("A · the honest capacity arithmetic at the MAXIMUM shape", () => {
+  const FIXTURES = 20, DELIVERIES = 4;
+  // The INITIAL pool is what protects first delivery, and it covers exactly
+  // the required 1,000-recipient scale at a full 20-fixture round.
   assert.equal(POOL.apns_initial / FIXTURES, 1_000);
-  // At 1,000 users, first attempts exactly consume INITIAL; RETRY holds 5,000.
   assert.equal(1_000 * FIXTURES, POOL.apns_initial);
-  assert.equal(POOL.apns_retry, 5_000);
+  // Four deliveries across twenty fixtures is EIGHTY attempts per user.
+  assert.equal(FIXTURES * DELIVERIES, 80);
+  assert.equal(Math.floor(APNS_ATTEMPT_CAP / 80), 312);
+  // 10,000 recipients would want 200,000 first attempts: ten times the pool.
+  assert.equal(10_000 * FIXTURES / POOL.apns_initial, 10);
 });
 
 // ==========================================================================
@@ -490,11 +492,16 @@ test("C · wholesale failure: every attempt is charged and the message retries",
 test("C · concurrent consumers cannot exceed the KV-read budget", () => {
   const l = ledger();
   let granted = 0;
-  for (let i = 0; i < 2_000; i++) {
-    const want = 96;
-    if (l.reserve({ day: DAY, pool: "kv_reads", want }).granted === want) granted += want;
+  let full = 0;
+  for (let i = 0; i < 3_000; i++) {
+    const g = l.reserve({ day: DAY, pool: "kv_reads", want: 96 }).granted;
+    granted += g;
+    if (g === 96) full++;
   }
+  // The pool is not a whole number of 96-read deliveries, so the last grant is
+  // a partial one. What must hold is that the total is exactly the cap.
   assert.equal(granted, POOL.kv_reads, `spent ${granted}, cap is ${POOL.kv_reads}`);
+  assert.equal(full, Math.floor(POOL.kv_reads / 96));
   assert.equal(l.reserve({ day: DAY, pool: "kv_reads", want: 1 }).granted, 0);
 });
 
@@ -513,4 +520,221 @@ test("C · the planner reserves worst-case unavoidable cost before enqueueing", 
   // Once a message is on the queue its write is already charged and up to four
   // deliveries follow whatever the consumer decides.
   assert.deepEqual(PER_MESSAGE_WORST_CASE, { queue_ops: 7, worker_requests: 4, do_requests: 8 });
+});
+
+// ==========================================================================
+// B · the atomic attempt grant
+// ==========================================================================
+
+test("B · one atomic step verifies the fence, picks the pool, reserves and marks", () => {
+  const l = ledger();
+  const [a] = l.claim("u1", "f1", ctx);
+  const g = l.grantAttempt({ uid: "u1", fx: "f1", gen: a.claim_gen, day: DAY });
+  assert.deepEqual({ ...g }, { granted: true, reason: null, pool: "apns_initial" });
+  assert.equal(l.row("u1", "f1").apns_tried, 1, "the row was not marked in the same step");
+  assert.equal(l.spent(DAY).apns_initial, 1);
+});
+
+test("B · a stale generation spends NOTHING", () => {
+  const l = ledger();
+  const [a] = l.claim("u1", "f1", ctx);
+  const [b] = l.claim("u1", "f1", { ...ctx, now: T0 + LEASE_MS });   // B reclaims
+  assert.equal(b.claim_gen, 2);
+  const stale = l.grantAttempt({ uid: "u1", fx: "f1", gen: a.claim_gen, day: DAY });
+  assert.equal(stale.granted, false);
+  assert.equal(stale.reason, "stale");
+  assert.deepEqual(l.spent(DAY), { apns_initial: 0, apns_retry: 0, kv_reads: 0 },
+    "a stale owner spent budget");
+  assert.equal(l.row("u1", "f1").apns_tried, 0, "a stale owner marked the row tried");
+});
+
+test("B · CRASH BOUNDARY: a crash inside the grant spends nothing", () => {
+  const l = ledger();
+  const [a] = l.claim("u1", "f1", ctx);
+  assert.throws(() => l.grantAttempt({
+    uid: "u1", fx: "f1", gen: a.claim_gen, day: DAY, failAfterReserve: true,
+  }), /crash between reserve and mark/);
+  // The rollback gave the slot back AND left the row unmarked, so the two can
+  // never disagree — which was the whole defect.
+  assert.equal(l.spent(DAY).apns_initial, 0, "INITIAL capacity was spent but not recorded");
+  assert.equal(l.row("u1", "f1").apns_tried, 0);
+  // The redelivery therefore still draws from INITIAL, exactly once.
+  const retry = l.grantAttempt({ uid: "u1", fx: "f1", gen: a.claim_gen, day: DAY });
+  assert.equal(retry.pool, "apns_initial");
+  assert.equal(l.spent(DAY).apns_initial, 1);
+});
+
+test("B · a grant refused for budget does not mark the row tried", () => {
+  const l = ledger();
+  l.reserve({ day: DAY, pool: "apns_initial", want: POOL.apns_initial });
+  const [a] = l.claim("u1", "f1", ctx);
+  const g = l.grantAttempt({ uid: "u1", fx: "f1", gen: a.claim_gen, day: DAY });
+  assert.equal(g.granted, false);
+  assert.equal(g.reason, "budget");
+  assert.equal(g.pool, "apns_initial");
+  assert.equal(l.row("u1", "f1").apns_tried, 0, "a refused grant still marked the row");
+});
+
+test("B · concurrent grants cannot overshoot either pool", () => {
+  const l = ledger();
+  const rows = [];
+  for (let i = 0; i < 300; i++) {
+    const [g] = l.claim(`u${i}`, "f1", ctx);
+    rows.push([`u${i}`, g.claim_gen]);
+  }
+  l.reserve({ day: DAY, pool: "apns_initial", want: POOL.apns_initial - 100 });
+  let granted = 0;
+  for (const [uid, gen] of rows) {
+    if (l.grantAttempt({ uid, fx: "f1", gen, day: DAY }).granted) granted++;
+  }
+  assert.equal(granted, 100, "the pool boundary was overrun by concurrent grants");
+  assert.equal(l.spent(DAY).apns_initial, POOL.apns_initial);
+});
+
+// ==========================================================================
+// D · the true maximum production sequence
+// ==========================================================================
+
+const FIXTURES = 20;
+const RECIPIENTS = 1_000;
+
+/** Every planned triple for a full 20-fixture round at the required scale. */
+function maximumShape() {
+  const triples = [];
+  for (let f = 0; f < FIXTURES; f++) {
+    for (let u = 0; u < RECIPIENTS; u++) triples.push([`u${u}`, `f${f}`]);
+  }
+  return triples;
+}
+
+/** Split into queue messages of 45 triples, as the planner would. */
+const intoMessages = (triples, size = 45) => {
+  const out = [];
+  for (let i = 0; i < triples.length; i += size) out.push(triples.slice(i, i + size));
+  return out;
+};
+
+test("D · MAXIMUM SHAPE: all 20,000 first attempts are protected", () => {
+  const l = ledger();
+  const messages = intoMessages(maximumShape());
+  assert.equal(messages.length, 445);
+  let attempted = 0, sent = 0, dropped = 0;
+  for (const triples of messages) {
+    const out = deliverMessage(l, { day: DAY, now: T0, kickoff: KICK, triples });
+    attempted += out.attempted; sent += out.sent; dropped += out.dropped;
+  }
+  assert.equal(attempted, RECIPIENTS * FIXTURES, "some first attempts were refused");
+  assert.equal(sent, 20_000);
+  assert.equal(dropped, 0);
+  const spent = l.spent(DAY);
+  assert.equal(spent.apns_initial, POOL.apns_initial, "INITIAL was not exactly consumed");
+  assert.equal(spent.apns_retry, 0, "first delivery drew from the retry pool");
+  assert.ok(spent.kv_reads <= POOL.kv_reads, `KV reads ${spent.kv_reads} exceeded the pool`);
+});
+
+test("D · ADVERSARIAL: retries arriving first cannot consume INITIAL", () => {
+  const l = ledger();
+  // A retry storm from an earlier window lands before the round is planned.
+  for (let i = 0; i < 9_000; i++) l.reserve({ day: DAY, pool: "apns_retry", want: 1 });
+  assert.equal(l.spent(DAY).apns_retry, POOL.apns_retry);
+
+  // Every first attempt of the full 20-fixture round still succeeds.
+  let attempted = 0;
+  for (const triples of intoMessages(maximumShape())) {
+    attempted += deliverMessage(l, { day: DAY, now: T0, kickoff: KICK, triples }).attempted;
+  }
+  assert.equal(attempted, 20_000, "a retry storm starved first delivery");
+  const spent = l.spent(DAY);
+  assert.equal(spent.apns_initial + spent.apns_retry, APNS_ATTEMPT_CAP);
+});
+
+test("D · wholesale APNs failure respects RETRY, KV and every cap", () => {
+  const l = ledger();
+  const messages = intoMessages(maximumShape());
+  // First pass: everything fails at APNs.
+  let firstAttempts = 0;
+  for (const triples of messages) {
+    firstAttempts += deliverMessage(l, {
+      day: DAY, now: T0, kickoff: KICK, triples, apns: () => false,
+    }).attempted;
+  }
+  assert.equal(firstAttempts, 20_000);
+  assert.equal(l.spent(DAY).apns_initial, POOL.apns_initial);
+
+  // Redelivery: every retry now draws from RETRY, and stops at its cap.
+  let retryAttempts = 0, retryDropped = 0;
+  for (const triples of messages) {
+    const out = deliverMessage(l, {
+      day: DAY, now: T0 + 1_000, kickoff: KICK, triples, apns: () => false,
+    });
+    retryAttempts += out.attempted; retryDropped += out.dropped;
+  }
+  assert.equal(retryAttempts, POOL.apns_retry, "the retry pool was overrun");
+  assert.ok(retryDropped > 0, "nothing was dropped once the retry pool ran out");
+  const spent = l.spent(DAY);
+  assert.equal(spent.apns_initial + spent.apns_retry, APNS_ATTEMPT_CAP);
+  assert.ok(spent.kv_reads <= POOL.kv_reads, `KV reads ${spent.kv_reads} exceeded the pool`);
+});
+
+test("D · crash between claim and APNs permission loses nothing", () => {
+  const l = ledger();
+  l.claim("u1", "f1", ctx);                       // claimed, then the isolate dies
+  assert.equal(l.spent(DAY).apns_initial, 0, "an attempt was charged before permission");
+  const out = deliverMessage(l, {
+    day: DAY, now: T0 + RETRY_DELAY_S * 1000, kickoff: KICK, triples: [["u1", "f1"]],
+  });
+  assert.equal(out.sent, 1, "the reminder was lost");
+  assert.equal(l.spent(DAY).apns_initial, 1, "the redelivery did not draw from INITIAL");
+  assert.equal(l.spent(DAY).apns_retry, 0);
+});
+
+test("D · crash immediately after permission but before fetch", () => {
+  const l = ledger();
+  const [a] = l.claim("u1", "f1", ctx);
+  l.grantAttempt({ uid: "u1", fx: "f1", gen: a.claim_gen, day: DAY });   // permission taken
+  // The isolate dies here: no fetch happened, but the attempt is spent. That is
+  // the deliberate trade — a reservation that could be handed back would let a
+  // crash loop spend INITIAL forever.
+  assert.equal(l.spent(DAY).apns_initial, 1);
+  assert.equal(l.row("u1", "f1").apns_tried, 1);
+  const out = deliverMessage(l, {
+    day: DAY, now: T0 + RETRY_DELAY_S * 1000, kickoff: KICK, triples: [["u1", "f1"]],
+  });
+  assert.equal(out.sent, 1, "the reminder was lost");
+  // The redelivery is correctly a RETRY, not a second first attempt.
+  assert.equal(l.spent(DAY).apns_initial, 1, "a redelivery was charged to first delivery");
+  assert.equal(l.spent(DAY).apns_retry, 1);
+});
+
+test("D · a stale consumer cannot spend either pool", () => {
+  const l = ledger();
+  const [a] = l.claim("u1", "f1", ctx);
+  l.claim("u1", "f1", { ...ctx, now: T0 + LEASE_MS });        // B reclaims
+  for (const gen of [a.claim_gen, a.claim_gen + 5, 0]) {
+    assert.equal(l.grantAttempt({ uid: "u1", fx: "f1", gen, day: DAY }).granted, false);
+  }
+  assert.deepEqual(l.spent(DAY), { apns_initial: 0, apns_retry: 0, kv_reads: 0 });
+});
+
+test("D · when a cap prevents work the remainder is acked, recorded and counted", () => {
+  const l = ledger();
+  l.reserve({ day: DAY, pool: "apns_initial", want: POOL.apns_initial - 20 });
+  const triples = Array.from({ length: 45 }, (_, i) => [`u${i}`, "f1"]);
+  const out = deliverMessage(l, { day: DAY, now: T0, kickoff: KICK, triples });
+
+  assert.equal(out.action, "ack", "the message was retried instead of acknowledged");
+  assert.equal(out.attempted, 20);
+  assert.equal(out.dropped, 25);
+
+  // Terminally recorded, not left ambiguous.
+  for (let i = 20; i < 45; i++) {
+    const row = l.row(`u${i}`, "f1");
+    assert.equal(row.state, "dropped", `u${i} was not terminally recorded`);
+    assert.equal(row.drop_reason, "budget-exhausted");
+  }
+  // And diagnostically counted, in one bounded row.
+  l.logDrop(DAY, "f1", "budget-exhausted", out.dropped, T0);
+  const drops = l.drops();
+  assert.equal(drops.length, 1);
+  assert.equal(drops[0].uids, 25);
 });

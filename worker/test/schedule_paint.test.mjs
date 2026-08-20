@@ -189,7 +189,7 @@ test("a row says when and who, and nothing heavier", () => {
   assert.match(row, /fixture-row-when/);
   assert.match(row, /fixture-row-teams/);
   // The card is mounted only for the fixture being looked at.
-  assert.match(row, /\$\{open \? matchCard\(fixture\) : ""\}/);
+  assert.match(row, /\$\{open \? matchCard\(fixture, \{ resultFirst: true \}\) : ""\}/);
   // And it announces itself as expandable.
   assert.match(row, /aria-expanded="\$\{open \? "true" : "false"\}"/);
   assert.match(row, /aria-controls="fx-/);
@@ -200,7 +200,7 @@ test("only one rich card is ever mounted", () => {
   // Opening another unmounts the previous, and collapsing removes the markup
   // rather than merely hiding it.
   assert.match(fn, /body\.innerHTML = "";/);
-  assert.match(fn, /body\.innerHTML = fixture \? matchCard\(fixture\) : "";/);
+  assert.match(fn, /body\.innerHTML = fixture \? matchCard\(fixture, \{ resultFirst: true \}\) : "";/);
   assert.match(fn, /head\.setAttribute\("aria-expanded", "false"\)/);
   assert.match(fn, /head\.setAttribute\("aria-expanded", "true"\)/);
   // A DOM edit, not a re-render: browsing never rebuilds the board.
@@ -382,6 +382,9 @@ function island({ buildMs = 0 } = {}) {
     const pulsingStatus = (m) => '<p class="view-loading is-pulsing">' + m + "</p>";
     const roundBanner = () => "<rbanner>";
     const roundTableHtml = () => "<roundtable>";
+    // v1.6.6 D3's third surface. Stubbed like its neighbours: this island is
+    // about panel lifecycle, and the cards themselves are covered by slice 2.
+    const weeklyFixtureCards = () => "<weeklyfixtures>";
 
     ${lift("const weekLabelFor = (period) => {")}
     const RETAINED_PANEL_LIMIT = 8;

@@ -23,6 +23,7 @@ const STORAGE = {
   syncedName: "prem_oracle_synced_name",
   fixtureRevisions: "prem_oracle_fixture_revisions",
   roundStates: "prem_oracle_round_states",
+  leagueSettings: "prem_oracle_league_settings",
 };
 
 function isNativeApp() {
@@ -192,6 +193,8 @@ const VENUE_OUTLOOK = {
 let fixtures = [];
 let currentView = "today";
 let matchdayFilter = "all";
+// D1: the Schedule opens on what the viewer's leagues actually asked for.
+let scheduleScope = "league";
 let picks = readJSON(STORAGE.picks, {});
 let playerName = localStorage.getItem(STORAGE.name) || "";
 let leagueCodes = readJSON(STORAGE.leagues, []);
@@ -248,6 +251,7 @@ let expandedFixtureId = null;
 // open, so only the closed ones are worth remembering — and remembering them
 // means a long list stays the shape they left it in.
 let collapsedPickSections = new Set(readJSON(STORAGE.pickSections, []));
+let leagueSettingsOpen = readJSON(STORAGE.leagueSettings, false) === true;
 let updateReloading = false;
 let pendingUpdateReload = false;
 // Custom Mix host Fixture Picker. Held outside the view functions because the
@@ -1360,6 +1364,137 @@ function resultText(match) {
   return "Predictions open";
 }
 
+// --- D3: result-first settled cards -----------------------------------------
+// After full time a card's job changes completely. Before kick-off it is a
+// control for making a prediction; afterwards it is a record of what happened,
+// and the forecast, form and venue that helped somebody decide are noise. The
+// five states below are the whole vocabulary — anything not settled, not
+// started and not void is still a pre-match card and keeps its controls.
+
+const VOID_STATUSES = ["postponed", "cancelled", "abandoned"];
+
+const isVoidFixture = (match) =>
+  VOID_STATUSES.includes(String(match?.status || "").toLowerCase());
+
+/** The final score as [p1, p2], or null when the fixture has not settled. */
+function finalScore(match) {
+  const result = Array.isArray(match?.result)
+    ? match.result
+    : match?.result && [match.result.p1, match.result.p2];
+  if (!result || result.length !== 2) return null;
+  if (result[0] == null || result[1] == null) return null;
+  return [Number(result[0]), Number(result[1])];
+}
+
+/**
+ * The client's copy of the league scoring function.
+ *
+ * A port, not a reinvention: worker/src/logic.js scorePick() is the authority
+ * that settles the table, and a card that disagreed with it by even a point
+ * would be worse than a card showing nothing. The test suite scores every
+ * pick/result pair in a 0-4 goal matrix through both and asserts they agree.
+ */
+function scorePickLocal(pick, actual, voided = false) {
+  if (voided || !actual || actual.p1 == null || actual.p2 == null)
+    return { pts: 0, exact: false, hit: false, settled: false };
+  if (!pick || pick.p1 == null || pick.p2 == null)
+    return { pts: 0, exact: false, hit: false, settled: true };
+  if (pick.p1 === actual.p1 && pick.p2 === actual.p2)
+    return { pts: 5, exact: true, hit: true, settled: true };
+  const sign = (a, b) => (a > b ? 1 : a < b ? -1 : 0);
+  const predictedOutcome = sign(pick.p1, pick.p2);
+  const actualOutcome = sign(actual.p1, actual.p2);
+  if (predictedOutcome === 0 && actualOutcome === 0)
+    return { pts: 2, exact: false, hit: true, settled: true };
+  if (predictedOutcome === actualOutcome && pick.p1 - pick.p2 === actual.p1 - actual.p2)
+    return { pts: 2, exact: false, hit: true, settled: true };
+  if (predictedOutcome === actualOutcome)
+    return { pts: 1, exact: false, hit: true, settled: true };
+  return { pts: 0, exact: false, hit: false, settled: true };
+}
+
+/**
+ * Which of D3's five states this fixture is in for this viewer.
+ *
+ * Order matters: void beats a score, because an abandoned match can carry a
+ * partial one and it must never be presented as a result. "Started" is read
+ * from the clock rather than a status field, so a feed that goes quiet mid-match
+ * says "awaiting final score" instead of inventing one.
+ */
+function resultState(match, pick = picks[match?.id]) {
+  if (!match) return "pre-match";
+  if (isVoidFixture(match)) return "void";
+  if (finalScore(match)) return pick ? "completed" : "completed-no-pick";
+  if (match.startAt && Date.now() >= Date.parse(match.startAt)) return "started-unsettled";
+  return "pre-match";
+}
+
+const RESULT_FIRST_STATES = ["completed", "completed-no-pick", "started-unsettled", "void"];
+
+/** Does this fixture get the result-first treatment on a result-first surface? */
+const isSettledCard = (match, pick = picks[match?.id]) =>
+  RESULT_FIRST_STATES.includes(resultState(match, pick));
+
+/** The status badge: the one piece of chrome that survives full time. */
+function resultBadge(state) {
+  if (state === "completed" || state === "completed-no-pick")
+    return `<span class="result-badge" role="status">FINAL</span>`;
+  if (state === "void")
+    return `<span class="result-badge result-badge-void" role="status">VOID</span>`;
+  return `<span class="result-badge result-badge-pending" role="status">IN PLAY</span>`;
+}
+
+/**
+ * The line under the score. Every state says what it knows and nothing more —
+ * "Awaiting final score" is an honest answer and a fabricated scoreline is not.
+ */
+function resultPickLine(match, state, pick) {
+  if (state === "completed-no-pick")
+    return `<p class="result-pick result-pick-empty">No pick made · 0 points</p>`;
+  if (state === "void")
+    return `<p class="result-pick">${pick
+      ? `Your pick ${pick.p1}-${pick.p2} · Void — no points`
+      : "Void — no points"}</p>`;
+  if (state === "started-unsettled")
+    return `<p class="result-pick">${pick
+      ? `Your pick ${pick.p1}-${pick.p2} · Awaiting final score`
+      : "No pick made · Awaiting final score"}</p>`;
+  const actual = finalScore(match);
+  const { pts, exact } = scorePickLocal(pick, { p1: actual[0], p2: actual[1] });
+  return `<p class="result-pick">Your pick ${pick.p1}-${pick.p2} · <b>${countPhrase(pts, pts === 1 ? "point" : "points")}</b>${exact ? " · exact" : ""}</p>`;
+}
+
+/**
+ * The settled card. Teams, a large final score, the pick and the points — and
+ * deliberately none of the pre-match apparatus: no form, no forecast, no venue,
+ * no score picker. The reveal section stays, because seeing what everybody else
+ * said is the reason to open a settled card at all (D3, R3).
+ */
+function resultCard(match) {
+  const pick = picks[match.id];
+  const state = resultState(match, pick);
+  const actual = finalScore(match);
+  const score = actual ? `${actual[0]}<span class="result-sep">–</span>${actual[1]}` : `<span class="result-sep">–</span>`;
+  const label = actual
+    ? `${match.player1} ${actual[0]}, ${match.player2} ${actual[1]}${state === "void" ? ", void" : ", final score"}`
+    : state === "void"
+      ? `${match.player1} against ${match.player2}, void, no points`
+      : `${match.player1} against ${match.player2}, awaiting final score`;
+  return `<article class="match-card result-card" data-match-card="${match.id}" data-result-state="${state}">
+    <div class="result-head">
+      <span class="tour-badge">Matchweek ${match.matchday}</span>
+      ${resultBadge(state)}
+    </div>
+    <div class="result-score" role="group" aria-label="${escapeHTML(label)}">
+      <div class="result-team">${teamBadge(match.player1)}<span class="player-name">${escapeHTML(match.player1)}</span></div>
+      <div class="result-figure" aria-hidden="true">${score}</div>
+      <div class="result-team">${teamBadge(match.player2)}<span class="player-name">${escapeHTML(match.player2)}</span></div>
+    </div>
+    ${resultPickLine(match, state, pick)}
+    ${fixtureRevealSection(match)}
+  </article>`;
+}
+
 function pickStatus(match, pick, open) {
   if (!pick) return "";
   const status = open
@@ -1572,7 +1707,8 @@ function scorePicker(match, open) {
   </div>`;
 }
 
-function matchCard(match) {
+function matchCard(match, { resultFirst = false } = {}) {
+  if (resultFirst && isSettledCard(match)) return resultCard(match);
   const pick = picks[match.id];
   const open = matchOpen(match);
   const calendar = calendarLink(match);
@@ -1719,7 +1855,7 @@ function fixtureRow(fixture) {
       <span class="fixture-row-teams">${escapeHTML(fixture.player1)} v ${escapeHTML(fixture.player2)}</span>
       <span class="fixture-row-mark">${picked ? `${picked.p1}-${picked.p2}` : ""}</span>
     </button>
-    <div class="fixture-row-body" id="fx-${escapeHTML(id)}">${open ? matchCard(fixture) : ""}</div>
+    <div class="fixture-row-body" id="fx-${escapeHTML(id)}">${open ? matchCard(fixture, { resultFirst: true }) : ""}</div>
   </div>`;
 }
 
@@ -1749,7 +1885,7 @@ function expandFixture(id) {
     if (!body || !head) continue;
     if (rowId === wanted) {
       const fixture = fixtureById(rowId);
-      body.innerHTML = fixture ? matchCard(fixture) : "";
+      body.innerHTML = fixture ? matchCard(fixture, { resultFirst: true }) : "";
       row.classList.add("is-open");
       head.setAttribute("aria-expanded", "true");
     } else if (body.innerHTML) {
@@ -2024,19 +2160,64 @@ const scheduleFilters = (shown = null) =>
   `<div class="filters filters-week"><button class="filter${matchdayFilter === "all" ? " active" : ""}" data-filter="all">${isMixedActive() ? "All weeks" : "All rounds"}</button></div>
    ${weekStrip(matchdayFilter, "data-filter", shown)}`;
 
+/**
+ * D1 — every fixture the viewer's leagues have actually asked for.
+ *
+ * The union of every league's published line-up, deduplicated: a fixture two
+ * leagues both picked is one fixture here, not two. lineupFixtureIds is already
+ * the union of that league's published slates, so this costs no request and no
+ * read — it is a Set built over state the app is holding anyway.
+ */
+function leagueSlateFixtureIds(contexts = leaguePickContexts()) {
+  const ids = new Set();
+  for (const league of contexts) for (const id of league.lineup) ids.add(String(id));
+  return ids;
+}
+
+const scheduleScopeToggle = () =>
+  `<div class="filters filters-scope" role="group" aria-label="Which fixtures to show">
+    <button class="filter${scheduleScope === "league" ? " active" : ""}" type="button" data-schedule-scope="league"${scheduleScope === "league" ? ' aria-pressed="true"' : ' aria-pressed="false"'}>Your league fixtures</button>
+    <button class="filter${scheduleScope === "all" ? " active" : ""}" type="button" data-schedule-scope="all"${scheduleScope === "all" ? ' aria-pressed="true"' : ' aria-pressed="false"'}>All fixtures</button>
+  </div>`;
+
 function scheduleView() {
   const current = leagueState?.currentPeriod ?? currentPeriodKey();
   const filtered = fixtures.filter((fixture) => matchdayFilter === "all" || String(periodOfFixture(fixture)) === String(matchdayFilter));
-  const awaiting = leagueCodes.length && current != null && !slateForPeriod(current);
   const shown = scheduleWindow(periodsInOrder(), current);
   const inWindow = filtered.filter((fixture) => shown.some((period) => String(period) === String(periodOfFixture(fixture))));
   const hidden = periodsInOrder().length - shown.length;
+
+  // No leagues at all: this is the All Fixtures season planner it has always
+  // been, with no toggle to explain and nothing to scope to.
+  const hasLeagues = leagueCodes.length > 0;
+  if (!hasLeagues) {
+    return `${scheduleHead()}
+      ${scheduleFilters(shown)}
+      ${groupedPeriods(inWindow, current)}
+      ${scheduleMore(hidden)}`;
+  }
+
+  const slateIds = leagueSlateFixtureIds();
+  const scoped = inWindow.filter((fixture) => slateIds.has(String(fixture.id)));
+  const scoping = scheduleScope === "league";
+  // Joined, but nothing published inside the window yet. It says so and offers
+  // the other view — it never quietly shows the whole card as if the league had
+  // chosen it.
+  const unpublished = scoping && !scoped.length;
+  const list = scoping ? scoped : inWindow;
+
   return `${scheduleHead()}
-    ${awaiting ? `<div class="launch-card"><p>No picks due yet — fixtures will appear here when your host publishes this week's slate.</p></div>` : ""}
+    ${scheduleScopeToggle()}
+    ${unpublished ? `<div class="launch-card"><p>No fixtures published for these weeks yet — your host picks them each week. You'll see them here as soon as they do.</p>
+      <button class="secondary wide" type="button" data-schedule-scope="all">Show all fixtures</button></div>` : ""}
     ${scheduleFilters(shown)}
-    ${groupedPeriods(inWindow, current)}
-    ${hidden > 0 ? `<button class="secondary wide" type="button" data-full-season>Show full season<span class="muted-count"> · ${hidden} more ${hidden === 1 ? "week" : "weeks"}</span></button>` : ""}`;
+    ${groupedPeriods(list, current)}
+    ${scheduleMore(hidden)}`;
 }
+
+const scheduleMore = (hidden) => (hidden > 0
+  ? `<button class="secondary wide" type="button" data-full-season>Show full season<span class="muted-count"> · ${hidden} more ${hidden === 1 ? "week" : "weeks"}</span></button>`
+  : "");
 
 // --- My Predictions ---------------------------------------------------------
 // One section per league, then everything else. A pick is only ever HIDDEN, and
@@ -2124,7 +2305,7 @@ function pickWeekGroups(list, mixed) {
 }
 
 function pickEntry(fixture, note) {
-  return `<div class="pick-entry">${matchCard(fixture)}${note}</div>`;
+  return `<div class="pick-entry">${matchCard(fixture, { resultFirst: true })}${note}</div>`;
 }
 
 /**
@@ -2328,6 +2509,13 @@ async function fillPanelProgressively(panel, capture) {
         : pulsingStatus("Loading Mates' Picks…"));
       return true;
     }
+    // Nothing is published yet: say so, rather than drawing the whole round.
+    // Twenty-two cards for fixtures nobody has been asked to predict reads as a
+    // week that is already under way, which is the opposite of the truth.
+    if (!slateForPeriod(matesState?.period)) {
+      panel.insertAdjacentHTML("beforeend", matesAwaitingSlate());
+      return !stale();
+    }
     const matrix = matesMatrix(matesState);
     panel.insertAdjacentHTML("beforeend", matesHeader(matrix));
     // A twenty-fixture week is twenty cards. Built four at a time with a real
@@ -2351,7 +2539,7 @@ async function fillPanelProgressively(panel, capture) {
       ? pulsingStatus(`Loading ${escapeHTML(weekLabelFor(capture.period))}…`)
       : roundState.error
         ? `<div class="empty"><strong>${escapeHTML(roundState.error)}</strong></div>`
-        : `${roundBanner(roundState)}${roundTableHtml(roundState)}`;
+        : `${roundBanner(roundState)}${roundTableHtml(roundState)}${weeklyFixtureCards(roundState)}`;
     traceTap("chunk", { stage: "week", chars: html.length });
     panel.insertAdjacentHTML("beforeend", html);
     return true;
@@ -2844,6 +3032,26 @@ function roundBanner(round) {
   return `<div class="round-banner is-pending"><strong>${place}${escapeHTML(round.status)}</strong>${roundSlateLine(round)}</div>`;
 }
 
+/**
+ * The active round's fixtures, beneath its table (D3's third surface).
+ *
+ * Rows, not cards: the same lazy shape the Schedule uses, so a twenty-fixture
+ * week costs one row each until somebody actually opens one — and what opens is
+ * matchCard's result-first path, so there is exactly one settled-card renderer
+ * in the app rather than two that can drift.
+ */
+function weeklyFixtureCards(round) {
+  if (!round || round.error) return "";
+  const current = leagueState?.currentPeriod ?? currentPeriodKey();
+  if (current == null || String(round.period) !== String(current)) return "";
+  const ids = (slateForPeriod(round.period)?.fixtureIds || []).map(String);
+  const list = ids.map(fixtureById).filter(Boolean).sort(byKickoffAsc);
+  if (!list.length) return "";
+  return `<section class="weekly-fixtures" aria-label="This week's fixtures">
+    ${list.map(fixtureRow).join("")}
+  </section>`;
+}
+
 function roundTableHtml(round) {
   const awards = new Map((round.complete ? round.podium || [] : []).map((entry) => [entry.uid, entry.place]));
   return `<table class="table round-standings"><thead><tr><th>Player</th><th>Pts</th><th>Exact</th></tr></thead>
@@ -3082,6 +3290,22 @@ function matesFixtureCard(card) {
     <p class="mates-state">${MATES_STATE_LINE[card.state]}</p>
     ${matesCardBody(card, viewerPicked)}
   </article>`;
+}
+
+/**
+ * D6 — the pre-publication empty state. The member is told what is happening;
+ * the host is told the same thing and handed the control that ends it, because
+ * they are the only person who can.
+ */
+function matesAwaitingSlate(period = matesState?.period ?? leagueState?.currentPeriod) {
+  const host = isLeagueHost();
+  return `<div class="empty mates-awaiting">
+    <strong>${host
+      ? "Waiting for you to select this week's fixtures."
+      : "Waiting for the host to select this week's fixtures."}</strong>
+    <p>Mates' picks appear here once the line-up is published.</p>
+    ${host && period != null ? `<button class="primary wide" type="button" data-open-picker="${escapeHTML(String(period))}">Select fixtures</button>` : ""}
+  </div>`;
 }
 
 function matesHeader(matrix) {
@@ -4222,6 +4446,32 @@ function hostSlateControl(state) {
   </div>`;
 }
 
+/**
+ * D4 — the administrative half of the League screen, collapsed.
+ *
+ * Code, invite, rename, weekly fixture count and delete are all things somebody
+ * does once and then never again, and they were sitting above the table that is
+ * read every week. A <details> gives the open/closed state to assistive tech for
+ * free (A2); the state persists so a host who works with it open is not made to
+ * re-open it every visit.
+ */
+function leagueSettings(state, isOwner) {
+  if (!state || state.error) return "";
+  const open = leagueSettingsOpen;
+  return `<details class="league-settings" data-league-settings${open ? " open" : ""}>
+    <summary class="league-settings-head">
+      <span>League settings</span>
+    </summary>
+    <div class="league-settings-body">
+      <div class="league-code"><span>League code</span><strong>${state.code}</strong></div>
+      <button class="secondary wide" type="button" data-share-league="${state.code}">Invite mates</button>
+      <button class="secondary wide" type="button" data-league-nick="${state.code}">Change my name in this league</button>
+      ${weeklyCountControl(state)}
+      ${isOwner ? `<button class="link-danger" type="button" data-delete-league="${state.code}">Delete league</button>` : ""}
+    </div>
+  </details>`;
+}
+
 function leagueView() {
   const recovery = localStorage.getItem(STORAGE.recovery);
   const joinDefault = inviteCode && !leagueCodes.includes(inviteCode) ? inviteCode : "";
@@ -4261,15 +4511,11 @@ function leagueView() {
       : `<section class="league-card">
           <span class="eyebrow">${escapeHTML(leagueSummaryLine(state))}</span>
           <h2>${escapeHTML(state.name)}</h2>
-          <div class="league-code"><span>League code</span><strong>${state.code}</strong></div>
-          <div class="slate-slot">${hostSlateControl(state)}</div>
-          ${weeklyCountControl(state)}
-          <button class="secondary wide" type="button" data-share-league="${state.code}">Invite mates</button>
-          <button class="secondary wide" type="button" data-league-nick="${state.code}">Change my name in this league</button>
-          ${isOwner ? `<button class="link-danger" type="button" data-delete-league="${state.code}">Delete league</button>` : ""}
           ${supportsRounds ? `${roundToggle()}<div class="picker-island" data-picker-island></div>` : ""}
+          <div class="slate-slot">${hostSlateControl(state)}</div>
           ${inner}
           <button class="whatsapp-share wide" type="button" data-export-league-table="${state.code}"${share.ready ? "" : " disabled"}${share.hidden ? " hidden" : ""}>${escapeHTML(share.label)}</button>
+          ${leagueSettings(state, isOwner)}
         </section>`;
   return `<div class="section-head"><div><span class="eyebrow">Private predictor leagues</span><h2>League table</h2></div></div>${flash()}${leagueSwitcher()}${content}${controls}${restore}`;
 }
@@ -4279,7 +4525,7 @@ function rulesView() {
     <span class="eyebrow">Scoring</span>
     <h2>How Prem Oracle works</h2>
     <ul class="rules-list">
-      <li>Predict the <strong>final Premier League scoreline</strong> for every fixture.</li>
+      <li>Predict the <strong>final scoreline</strong> for each fixture selected for your league.</li>
       <li><strong>Exact score = 5 points.</strong></li>
       <li><strong>Correct draw, wrong score = 2 points.</strong></li>
       <li><strong>Correct winner and goal difference = 2 points.</strong></li>
@@ -5114,6 +5360,12 @@ document.addEventListener("click", async (event) => {
   }
   if (await handleWizardClick(event)) return;
   if (await handlePickerClick(event)) return;
+  const scope = event.target.closest("[data-schedule-scope]");
+  if (scope) {
+    scheduleScope = scope.dataset.scheduleScope === "all" ? "all" : "league";
+    render();
+    return;
+  }
   const filter = event.target.closest("[data-filter]");
   if (filter) {
     matchdayFilter = filter.dataset.filter;
@@ -5368,6 +5620,16 @@ document.addEventListener("submit", async (event) => {
 });
 
 document.addEventListener("toggle", (event) => {
+  const settings = event.target.closest?.("[data-league-settings]");
+  if (settings) {
+    leagueSettingsOpen = settings.open;
+    try {
+      localStorage.setItem(STORAGE.leagueSettings, JSON.stringify(leagueSettingsOpen));
+    } catch {
+      // As with pick sections: a full quota costs persistence, not the control.
+    }
+    return;
+  }
   const section = event.target.closest?.("[data-pick-section]");
   if (section) {
     const key = section.dataset.pickSection;

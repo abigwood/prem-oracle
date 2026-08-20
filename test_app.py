@@ -1788,7 +1788,9 @@ class MyPredictionsTests(unittest.TestCase):
     def test_one_pick_per_fixture_is_still_the_model(self):
         # Sections render the same matchCard, which reads and writes the one
         # picks[matchId] entry — so editing in either section is one edit.
-        self.assertIn("return `<div class=\"pick-entry\">${matchCard(fixture)}${note}</div>`;", self.app)
+        self.assertIn(
+            "return `<div class=\"pick-entry\">${matchCard(fixture, { resultFirst: true })}${note}</div>`;",
+            self.app)
         saver = self.app[self.app.index("async function savePick(matchId, p1, p2)"):]
         saver = saver[:saver.index("document.addEventListener(\"submit\"")]
         self.assertIn("picks[matchId] = { p1, p2, savedAt: Date.now() };", saver)
@@ -2403,9 +2405,19 @@ class NamesAndViewportTests(unittest.TestCase):
         self.assertIn("flex: 1;", lock)
         self.assertIn("margin: 0 !important;", lock)
 
-        # The slot sits above the action buttons, which is the whole point.
-        self.assertLess(view.index("slate-slot"), view.index("data-share-league"))
-        self.assertLess(view.index("slate-slot"), view.index("data-league-nick"))
+        # The slot sits above the results and the settings collapse, which is
+        # the whole point: line-up control is deadline-bound and belongs beside
+        # Weekly, while invite and rename are administration (D4).
+        # ${inner} is the results placeholder; data-league-results is declared
+        # above the template, so the template's own order is what to compare.
+        self.assertLess(view.index("slate-slot"), view.index("${inner}"))
+        self.assertLess(view.index("slate-slot"), view.index("leagueSettings(state, isOwner)"))
+        settings = self.app[self.app.index("function leagueSettings(state, isOwner)"):]
+        settings = settings[:settings.index("\n}")]
+        for control in ("league-code", "data-share-league", "data-league-nick",
+                        "weeklyCountControl", "data-delete-league"):
+            self.assertIn(control, settings)
+        self.assertNotIn("slate-slot", settings)
 
     # --- C. the nav -------------------------------------------------------
 

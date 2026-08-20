@@ -29,7 +29,7 @@ test("the 60-minute reminder window is preserved exactly", () => {
 
 // --- league selection -----------------------------------------------------
 
-test("a recipient in several leagues is notified once, through the smallest code", () => {
+test("N1 · a recipient in several leagues is notified once, through the smallest code", () => {
   const membersByLeague = new Map([
     ["ZZZ", [uid(0)]], ["AAA", [uid(0)]], ["MMM", [uid(0)]],
   ]);
@@ -41,7 +41,7 @@ test("a recipient in several leagues is notified once, through the smallest code
   assert.equal(triples[0].league, "AAA");
 });
 
-test("discovery order cannot change the league chosen", () => {
+test("N1 · discovery order cannot change the league chosen", () => {
   const build = (codes) => triplesForFixture({
     match: fixture("f1", new Date(KICK).toISOString()),
     leagueCodes: codes,
@@ -52,7 +52,7 @@ test("discovery order cannot change the league chosen", () => {
   assert.equal(build(["ZZZ", "AAA", "MMM"]), "AAA");
 });
 
-test("every triple carries an explicit league code, never a default", () => {
+test("N1 · every triple carries an explicit league code, never a default", () => {
   const triples = triplesForFixture({
     match: fixture("f1", new Date(KICK).toISOString()),
     leagueCodes: ["QRS"],
@@ -99,7 +99,7 @@ test("a job never carries more than 45 triples", () => {
 
 // --- discovery costs no value reads ---------------------------------------
 
-test("league discovery and membership read KEY NAMES only", async () => {
+test("N5 · league discovery and membership read KEY NAMES only", async () => {
   const seed = {};
   seedLeague(seed, { code: "AAA", size: 50, fixtureIds: ["f1"] });
   const kv = kvShim(seed);
@@ -262,4 +262,54 @@ test("a fixture in two leagues yields both codes, sorted", async () => {
   const L = ledgerObject();
   const deps = harnessDeps({ kv, client: L.client, now: () => T0, sends: [] });
   assert.deepEqual(await deps.leaguesForFixture("f1"), ["AAA", "ZZZ"]);
+});
+
+// --- N5 · the read-plan claim, counted rather than asserted ----------------
+
+test("N5 · the cron performs ZERO per-member and per-member-fixture reads", async () => {
+  const fixtures = Array.from({ length: 20 }, (_, i) => `f${i}`);
+  const seed = {};
+  seedLeague(seed, { code: "AAA", size: 1_000, fixtureIds: fixtures });
+  for (const id of fixtures) seed[`picks:${id}`] = {};
+  const kv = kvShim(seed);
+  const L = ledgerObject();
+  const deps = harnessDeps({ kv, client: L.client, now: () => T0, sends: [] });
+
+  const before = { ...kv.counts };
+  for (const id of fixtures) {
+    await planFixture({
+      match: fixture(id, new Date(KICK).toISOString()),
+      competition: "PL", env, ledger: L.client, deps, now: T0,
+    });
+  }
+  const reads = kv.counts.get - before.get;
+  const lists = kv.counts.list - before.list;
+
+  // 20 fixtures x 1,000 recipients = 20,000 candidate pairs. The planner's
+  // value reads are ONE picks: read per fixture and nothing else.
+  assert.equal(reads, fixtures.length,
+    `the planner made ${reads} value reads for 20,000 candidate pairs`);
+  assert.equal(lists, fixtures.length * 2,
+    "discovery should be one league list and one member list per fixture");
+  assert.ok(reads < 1_000, "the planner is nowhere near a per-recipient read profile");
+});
+
+test("N5 · planner reads do not grow with the number of recipients", async () => {
+  const cost = async (size) => {
+    const seed = {};
+    seedLeague(seed, { code: "AAA", size, fixtureIds: ["f1"] });
+    seed["picks:f1"] = {};
+    const kv = kvShim(seed);
+    const L = ledgerObject();
+    const deps = harnessDeps({ kv, client: L.client, now: () => T0, sends: [] });
+    const before = kv.counts.get;
+    await planFixture({
+      match: fixture("f1", new Date(KICK).toISOString()),
+      competition: "PL", env, ledger: L.client, deps, now: T0,
+    });
+    return kv.counts.get - before;
+  };
+  const [small, large] = [await cost(10), await cost(1_000)];
+  assert.equal(small, large, `10 recipients cost ${small} reads, 1,000 cost ${large}`);
+  assert.equal(large, 1, "planning one fixture should cost exactly one picks read");
 });

@@ -11,13 +11,13 @@ import { PAYLOAD_VERSION, reminderPayload } from "../src/notify/copy.js";
 
 const SOURCE = readFileSync(new URL("../src/worker.js", import.meta.url), "utf8");
 
-test("the D2 path is gated on the bindings existing", () => {
+test("X1 · the D2 path is gated on the bindings existing", () => {
   assert.match(SOURCE, /const notifyEnabled = \(env\) => !!\(env\.NOTIFY_QUEUE && env\.NOTIFY_LEDGER\);/);
   assert.match(SOURCE,
     /ctx\.waitUntil\(notifyEnabled\(env\) \? planKickoffReminders\(env, nowMs\) : notifyKickoffs\(env\)\)/);
 });
 
-test("without the bindings the cron does exactly what it does today", async () => {
+test("X1 · without the bindings the cron does exactly what it does today", async () => {
   const calls = [];
   const env = {};   // no NOTIFY_QUEUE, no NOTIFY_LEDGER, no APNs secrets
   const ctx = { waitUntil: (p) => calls.push(p) };
@@ -54,7 +54,7 @@ test("no queue or Durable Object configuration is added by this slice", () => {
 
 // --- X1 · payload compatibility -------------------------------------------
 
-test("X1 · the payload is additive: an old client sees the alert it always saw", () => {
+test("N4 · the payload is additive: an old client sees the alert it always saw", () => {
   const payload = reminderPayload({
     match: { id: "f1", player1: "Home", player2: "Away", startAt: "2026-09-12T14:00:00Z" },
     leagueCode: "AAA",
@@ -69,7 +69,7 @@ test("X1 · the payload is additive: an old client sees the alert it always saw"
   assert.deepEqual(Object.keys(legacyView), ["aps"]);
 });
 
-test("X1 · a stale or malformed routing block cannot be mistaken for a good one", () => {
+test("N4 · a stale or malformed routing block cannot be mistaken for a good one", () => {
   const payload = reminderPayload({
     match: { id: "f1", player1: "Home", player2: "Away", startAt: "2026-09-12T14:00:00Z" },
     leagueCode: "AAA",

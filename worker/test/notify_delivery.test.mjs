@@ -55,7 +55,7 @@ test("the reads reserved are the message's worst case, not what it used", async 
 
 // --- eligibility rechecked immediately before APNs ------------------------
 
-test("eligibility is rechecked at send time, not planning time", async () => {
+test("N2 · eligibility is rechecked at send time, not planning time", async () => {
   for (const [mutate, reason] of [
     [(w) => w.kv.store.set("picks:f1", JSON.stringify({ [uid(0)]: { p1: 1, p2: 0 } })), "already-picked"],
     [(w) => w.kv.store.delete(`push:${uid(0)}`), "no-token"],
@@ -73,7 +73,7 @@ test("eligibility is rechecked at send time, not planning time", async () => {
   }
 });
 
-test("a fixture that has kicked off is never notified", async () => {
+test("N2 · a fixture that has kicked off is never notified", async () => {
   const w = world({ now: KICK });
   const t = triple({ uid: uid(0), fixtureId: "f1", league: "AAA", kickoffAt: KICK });
   const { stats } = await deliverJob(job([t]), env, w.deps);
@@ -84,7 +84,7 @@ test("a fixture that has kicked off is never notified", async () => {
 
 // --- copy, collapse id and league code ------------------------------------
 
-test("the lock screen says Your league and never a league name", async () => {
+test("N1 · the lock screen says Your league and never a league name", async () => {
   const w = world();
   w.kv.store.set("league:AAA", JSON.stringify({ code: "AAA", name: "Dave's Banter League" }));
   const t = triple({ uid: uid(0), fixtureId: "f1", league: "AAA", kickoffAt: KICK });
@@ -125,14 +125,14 @@ test("the payload refuses to be built without an explicit league code", () => {
   assert.throws(() => reminderPayload({ match, leagueCode: "" }), /explicit league code/);
 });
 
-test("league selection is deterministic and never a harness default", async () => {
+test("N1 · league selection is deterministic and never a harness default", async () => {
   assert.equal(chooseLeagueCode(["ZZZ", "AAA", "MMM"]), "AAA");
   assert.equal(chooseLeagueCode(["MMM", "AAA", "ZZZ"]), "AAA", "order of discovery changed the answer");
   assert.equal(chooseLeagueCode([]), null);
   assert.equal(chooseLeagueCode(["BBB", "BBB"]), "BBB");
 });
 
-test("the selected league survives into the ledger row and the diagnostic", async () => {
+test("N1 · the selected league survives into the ledger row and the diagnostic", async () => {
   const w = world({ leagues: [["ZZZ", 1, ["f1"]], ["AAA", 1, ["f1"]]] });
   // The same person is in both; the planner chose AAA, and nothing may re-choose.
   w.kv.store.set(`member:AAA:${uid(0)}`, JSON.stringify({ nick: "x", since: 0 }));
@@ -144,7 +144,7 @@ test("the selected league survives into the ledger row and the diagnostic", asyn
 
 // --- success-only marker semantics ----------------------------------------
 
-test("only a successful delivery is marked sent; a failure stays retryable", async () => {
+test("N6 · only a successful delivery is marked sent; a failure stays retryable", async () => {
   const w = world({ sendResult: (token) => token.endsWith("00000")
     ? { ok: true, status: 200 } : { ok: false, status: 503 } });
   const triples = [0, 1].map((n) => triple({ uid: uid(n), fixtureId: "f1", league: "AAA", kickoffAt: KICK }));
@@ -155,7 +155,7 @@ test("only a successful delivery is marked sent; a failure stays retryable", asy
   assert.equal(w.L.row(uid(1), "f1").state, "failed");
 });
 
-test("redelivery re-sends only the unsent", async () => {
+test("N6 · redelivery re-sends only the unsent", async () => {
   const w = world({ sendResult: (token) => token.endsWith("00000")
     ? { ok: true, status: 200 } : { ok: false, status: 503 } });
   const triples = [0, 1].map((n) => triple({ uid: uid(n), fixtureId: "f1", league: "AAA", kickoffAt: KICK }));
@@ -166,7 +166,7 @@ test("redelivery re-sends only the unsent", async () => {
   assert.equal(w.sends[0].token, `tok-${uid(1)}`);
 });
 
-test("a 410 drops the registration and never retries that recipient", async () => {
+test("N6 · a 410 drops the registration and never retries that recipient", async () => {
   const w = world({ sendResult: () => ({ ok: false, status: 410 }) });
   const t = triple({ uid: uid(0), fixtureId: "f1", league: "AAA", kickoffAt: KICK });
   const { ack } = await deliverJob(job([t]), env, w.deps);

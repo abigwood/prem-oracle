@@ -4803,6 +4803,77 @@ function scrollAppToTop() {
   appScroller()?.scrollTo({ top: 0, behavior: "smooth" });
 }
 
+// --- D2 · opening the fixture a reminder was about -------------------------
+//
+// The payload carries a private routing block: { v, f, l }. Everything about
+// reading it is defensive, because the alternative to "fall back safely" is
+// opening the wrong league — which is worse than opening nothing.
+
+const NOTIFY_PAYLOAD_VERSION = 1;
+
+/**
+ * The routing block, or null.
+ *
+ * Rejects anything it does not recognise rather than guessing: a version it was
+ * not written for, a missing fixture, a league this device does not play. A tap
+ * that fails these checks still opens the app; it just opens it normally.
+ */
+function readNotificationRoute(data) {
+  const route = data?.po ?? data?.notification?.data?.po ?? null;
+  const block = typeof route === "string" ? safeParseJSON(route) : route;
+  if (!block || Number(block.v) !== NOTIFY_PAYLOAD_VERSION) return null;
+  const fixtureId = block.f == null ? "" : String(block.f);
+  const league = block.l == null ? "" : String(block.l).toUpperCase();
+  if (!fixtureId || !league) return null;
+  return { fixtureId, league };
+}
+
+function safeParseJSON(value) {
+  try { return JSON.parse(value); } catch { return null; }
+}
+
+/**
+ * Follow a tap to the exact fixture card.
+ *
+ * Activates the league the worker chose — the device cannot be told which
+ * league it had selected, so the payload's is the only one either side agrees
+ * on — then opens the Schedule on that fixture's week and expands its card.
+ *
+ * Every failure is a fallback, never an error: a league that was left, a
+ * fixture amended out, a payload from a version this build predates. In each
+ * case the app opens where it always opened.
+ */
+async function openNotificationTarget(route) {
+  if (!route) { currentView = "today"; render({ scrollTop: true }); return "fallback:no-route"; }
+  const { fixtureId, league } = route;
+  if (leagueCodes.includes(league) && activeLeague !== league) {
+    setActiveLeague(league, false);
+  }
+  await navigateToView("schedule");
+  const match = fixtureById(fixtureId);
+  if (!match) return "fallback:unknown-fixture";
+  const period = periodOfFixture(match);
+  if (period != null) openScheduleDates.add(`md-${period}`);
+  matchdayFilter = "all";
+  render();
+  await nextPaint();
+  const row = document.querySelector(`[data-fixture-row="${cssEscape(fixtureId)}"]`);
+  if (!row) return "fallback:not-on-screen";
+  expandFixture(fixtureId);
+  row.scrollIntoView({ block: "center", behavior: "smooth" });
+  return "opened";
+}
+
+/**
+ * Attribute selectors need escaping; fixture ids are feed-supplied.
+ *
+ * The fallback class is written with escape sequences rather than a literal
+ * quote so the pattern stays readable next to the selector it protects.
+ */
+const cssEscape = (value) => (window.CSS?.escape
+  ? window.CSS.escape(String(value))
+  : String(value).replace(/[\u0022\u005C]/g, "\\$&"));
+
 function rememberMatchDay(matchId) {
   const match = fixtures.find((fixture) => fixture.id === matchId);
   if (match?.matchday) openScheduleDates.add(`md-${match.matchday}`);
@@ -6088,9 +6159,16 @@ async function setupNativePushNotifications() {
   try {
     await push.addListener("registration", registerPushToken);
     await push.addListener("registrationError", () => {});
-    await push.addListener("pushNotificationActionPerformed", () => {
-      currentView = "today";
-      render({ scrollTop: true });
+    await push.addListener("pushNotificationActionPerformed", async (event) => {
+      // Foreground, background and closed all arrive here; the payload is the
+      // same in each case, so there is one path rather than three.
+      const data = event?.notification?.data ?? event?.data ?? null;
+      try {
+        await openNotificationTarget(readNotificationRoute(data));
+      } catch {
+        currentView = "today";
+        render({ scrollTop: true });
+      }
     });
     let permission = await push.checkPermissions();
     if (permission.receive === "prompt") permission = await push.requestPermissions();

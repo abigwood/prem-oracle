@@ -63,16 +63,25 @@ export async function buildToken(env, nowMs = Date.now()) {
 
 // POSTs an alert payload to APNs and resolves with the raw Response so callers
 // can react to status codes (e.g. 410 Unregistered => drop the stale token).
-export async function sendPush(deviceToken, payload, env) {
+//
+// `collapseId` and `expiration` are how a kick-off reminder stays honest under
+// retry: Apple REPLACES a notification carrying a collapse id it has already
+// shown, which is the mitigation for the one window where a crashed consumer
+// can re-send; and an expiration of kick-off means Apple discards rather than
+// stores a reminder that has been overtaken by the match starting.
+export async function sendPush(deviceToken, payload, env, { collapseId, expiration } = {}) {
   const token = await buildToken(env);
+  const headers = {
+    authorization: `bearer ${token}`,
+    "apns-topic": APNS_TOPIC,
+    "apns-push-type": "alert",
+    "content-type": "application/json",
+  };
+  if (collapseId) headers["apns-collapse-id"] = String(collapseId);
+  if (Number.isFinite(expiration)) headers["apns-expiration"] = String(Math.floor(expiration));
   return fetch(`${APNS_HOST}/3/device/${deviceToken}`, {
     method: "POST",
-    headers: {
-      authorization: `bearer ${token}`,
-      "apns-topic": APNS_TOPIC,
-      "apns-push-type": "alert",
-      "content-type": "application/json",
-    },
+    headers,
     body: JSON.stringify(payload),
   });
 }

@@ -47,6 +47,12 @@ import {
   validateSlate,
 } from "./logic.js";
 import { apnsConfigured, sendPush } from "./apns.js";
+import { NotifyLedger, utcDay } from "./notify/ledger.js";
+import {
+  dueFixtures, planFixture, slateFixtureKey, slateFixturePrefix,
+} from "./notify/planner.js";
+import { deliverJob } from "./notify/consumer.js";
+import { RETRY_DELAY_S as NOTIFY_RETRY_DELAY_S } from "./notify/ledger.js";
 import { autoSettleResults, feedForCompetition } from "./results_feed.js";
 import {
   COMPETITIONS,
@@ -171,6 +177,40 @@ const randomBytes = (n) => crypto.getRandomValues(new Uint8Array(n));
 const leagueMemberPrefix = (code) => `member:${code}:`;
 const leagueMemberKey = (code, uid) => `${leagueMemberPrefix(code)}${uid}`;
 const CUSTOM_MIX_INDEX = "index:custom_mix";
+
+/**
+ * The published-slate reverse index: slatefx:<fixtureId>:<leagueCode>.
+ *
+ * One key per (fixture, league) pair, written only by the league that owns the
+ * slate — so concurrent publishes touch disjoint keys and cannot lose each
+ * other's updates. Discovery reads the league code out of the KEY NAME, so
+ * finding "who published this fixture" costs a list and no value reads at all.
+ *
+ * It is a DISCOVERY HINT and never an authority: the consumer re-reads the real
+ * slate before sending, so a stale entry costs a wasted job, never a wrong send.
+ */
+async function syncSlateFixtureIndex(env, code, { added = [], removed = [], period }) {
+  if (!env.KV) return;
+  await Promise.all([
+    ...added.map((id) => kvPut(env, slateFixtureKey(String(id), code), { period: String(period) })),
+    ...removed.map((id) => env.KV.delete(slateFixtureKey(String(id), code))),
+  ]);
+}
+
+/** Every league whose published slate currently lists this fixture. */
+async function leaguesForFixture(env, fixtureId) {
+  if (!env.KV?.list) return [];
+  const prefix = slateFixturePrefix(String(fixtureId));
+  const codes = [];
+  let cursor;
+  for (;;) {
+    const page = await env.KV.list({ prefix, cursor });
+    for (const key of page.keys) codes.push(key.name.slice(prefix.length));
+    if (page.list_complete) break;
+    cursor = page.cursor;
+  }
+  return codes.sort();
+}
 
 // A league reads its slates when it publishes one every week (v1.5: any league
 // with a stored weekly rule), when it is running Custom Mix, or when it ever
@@ -676,6 +716,7 @@ async function publishSlate(env, league, period, { fixtureIds, mode, ruleSource,
     }],
   };
   await kvPut(env, slateKey(code, period), slate);
+  await syncSlateFixtureIndex(env, code, { added: fixtureIds, period });
   if (!league.hadSlates) {
     league.hadSlates = true;
     await kvPut(env, `league:${code}`, league);
@@ -723,6 +764,10 @@ async function amendSlate(env, league, period, { fixtureIds, mode, setBy, pool, 
     setBy,
   });
   await kvPut(env, slateKey(code, period), next);
+  // The delta the amendment already computed is exactly the index delta.
+  await syncSlateFixtureIndex(env, code, {
+    added: delta.added, removed: delta.removed, period,
+  });
 
   // One push per committed amendment, deduped on league + period + version so
   // a retry cannot double-notify.
@@ -923,7 +968,16 @@ async function deleteLeague(env, body) {
   await Promise.all(memberList.map(({ uid: memberUid }) => env.KV.delete(leagueMemberKey(code, memberUid))));
   if (env.KV.list) {
     const slateKeys = await listAllKeys(env, `custom_slate:${code}:`);
-    await Promise.all(slateKeys.map((key) => env.KV.delete(key)));
+    // Every fixture this league published stops being this league's business.
+    const published = new Set();
+    for (const key of slateKeys) {
+      const slate = await kvGet(env, key);
+      for (const id of slate?.fixtureIds || []) published.add(String(id));
+    }
+    await Promise.all([
+      ...slateKeys.map((key) => env.KV.delete(key)),
+      ...[...published].map((id) => env.KV.delete(slateFixtureKey(id, code))),
+    ]);
   }
   await updateCustomMixIndex(env, code, false);
   await env.KV.delete(`league:${code}`);
@@ -1530,6 +1584,109 @@ async function notifyKickoffs(env) {
   }
 }
 
+/**
+ * Slice 1, D2 — the planner, and the switch that decides whether it runs.
+ *
+ * The new path needs a queue and a Durable Object namespace. Neither exists
+ * until the configuration step, which is gated on Adam's approval and a
+ * read-only billing check. So the switch is the BINDINGS: with them the D2 path
+ * runs, without them the worker keeps doing exactly what it does today. That is
+ * X1's "degrades to current behaviour", and it means this code can land, be
+ * reviewed and be tested long before any infrastructure is enabled.
+ */
+const notifyEnabled = (env) => !!(env.NOTIFY_QUEUE && env.NOTIFY_LEDGER);
+
+/**
+ * One RPC per call to the single global ledger object. The object is a
+ * singleton by name: delivery state has to be strongly consistent across every
+ * consumer, which is the whole reason it is not in KV.
+ */
+export function ledgerClient(env, name = "notify-ledger") {
+  const stub = env.NOTIFY_LEDGER.get(env.NOTIFY_LEDGER.idFromName(name));
+  return {
+    async call(op, args = {}) {
+      const response = await stub.fetch("https://notify-ledger/rpc", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ op, ...args }),
+      });
+      if (!response.ok) throw new Error(`ledger ${op} failed: ${response.status}`);
+      return response.json();
+    },
+  };
+}
+
+/** Everything the planner and consumer need from KV, in one place. */
+function notifyDeps(env, nowMs) {
+  return {
+    now: () => nowMs ?? Date.now(),
+    ledger: () => ledgerClient(env),
+    // Injected rather than imported, so a test can drive delivery outcomes
+    // without reaching for module mocking.
+    sendPush,
+    leaguesForFixture: (fixtureId) => leaguesForFixture(env, fixtureId),
+    readPicks: async (fixtureId) => (await kvGet(env, `picks:${fixtureId}`)) || {},
+    readPush: (uid) => kvGet(env, `push:${uid}`),
+    dropPushToken: (uid) => env.KV.delete(`push:${uid}`),
+    isMember: async (code, uid) => !!(await kvGet(env, leagueMemberKey(code, uid))),
+    stillInSlate: async (code, fixtureId) => {
+      const hint = await kvGet(env, slateFixtureKey(String(fixtureId), code));
+      if (!hint?.period) return false;
+      const slate = await readPublishedSlate(env, code, hint.period);
+      return !!slate && (slate.fixtureIds || []).map(String).includes(String(fixtureId));
+    },
+    /**
+     * Membership from KEY NAMES only. One list per due league, no value reads,
+     * and no per-member fan-out anywhere in the cron invocation.
+     */
+    membersByLeague: async (codes) => {
+      const out = new Map();
+      for (const code of codes) {
+        const prefix = leagueMemberPrefix(code);
+        const uids = [];
+        let cursor;
+        for (;;) {
+          const page = await env.KV.list({ prefix, cursor });
+          for (const key of page.keys) uids.push(key.name.slice(prefix.length));
+          if (page.list_complete) break;
+          cursor = page.cursor;
+        }
+        out.set(code, uids);
+      }
+      return out;
+    },
+  };
+}
+
+/**
+ * The D2 planning pass. Plans, enqueues, and sends nothing itself.
+ *
+ * Everything that decides WHO is notified is settled here from bounded reads;
+ * everything that decides whether they still SHOULD be is re-read by the
+ * consumer immediately before APNs, because that is the only moment at which
+ * the answer is not already stale.
+ */
+async function planKickoffReminders(env, nowMs = Date.now()) {
+  if (!notifyEnabled(env) || !apnsConfigured(env)) return { planned: 0, jobs: 0 };
+  const day = utcDay(nowMs);
+  const ledger = ledgerClient(env);
+  const deps = notifyDeps(env, nowMs);
+  const due = dueFixtures(await allFixtures(env), nowMs);
+  let planned = 0;
+  let enqueued = 0;
+  for (const match of due) {
+    const competition = competitionOfFixture(match.id) || DEFAULT_COMPETITION;
+    const result = await planFixture({ match, competition, env, ledger, deps, now: nowMs });
+    planned += result.triples;
+    for (const job of result.jobs) {
+      await env.NOTIFY_QUEUE.send(job);
+      enqueued++;
+    }
+  }
+  await ledger.call("sweep", { day, now: nowMs });
+  return { planned, jobs: enqueued };
+}
+
 // A host who never answers must not ambush their league with a full card two
 // hours before kick-off, so the fallback runs a clear day out: once the next
 // matchweek is inside 24 hours and still has no slate, the whole card unlocks
@@ -1709,6 +1866,9 @@ async function reconcilePostponements(env, league, slate, period, roundFixtures,
     ...(snapshot ? { snapshot } : {}),
     revisedAt: new Date().toISOString(),
   });
+  if (change) {
+    await syncSlateFixtureIndex(env, league.code, { removed: change.dropped, period });
+  }
   if (!change) return;  // A time change alone is display; it is not news.
   const byId = new Map(roundFixtures.map((match) => [String(match.id), match]));
   const gone = change.dropped.map((id) => fixtureLabel(byId.get(id))).join(", ");
@@ -1887,7 +2047,9 @@ export default {
     // Cron events carry the moment they were meant to fire. Using it rather than
     // the wall clock keeps a delayed sweep judging the week it was scheduled for.
     const nowMs = event?.scheduledTime ?? Date.now();
-    ctx.waitUntil(notifyKickoffs(env));
+    // One or the other, never both: the D2 planner replaces the broadcast the
+    // moment its infrastructure exists, and nothing changes until it does.
+    ctx.waitUntil(notifyEnabled(env) ? planKickoffReminders(env, nowMs) : notifyKickoffs(env));
     ctx.waitUntil(autoSettle(env));
     ctx.waitUntil(weeklyLoop(env, nowMs));
     ctx.waitUntil(podiumAnnouncements(env));
@@ -1896,7 +2058,30 @@ export default {
     if (request.method === "OPTIONS") return applyCors(new Response(null, { headers: cors(env) }), env, request);
     return applyCors(await route(request, env), env, request);
   },
+  /**
+   * The queue consumer. max_batch_size is 1, so one batch is one job and a
+   * consumer batch can never exceed 45 APNs requests.
+   *
+   * A message is acked when nothing is still owed, and retried when something
+   * is — a transient APNs failure, or a triple another consumer's live lease
+   * still holds. Acking there would silently lose the reminder.
+   */
+  async queue(batch, env) {
+    const deps = notifyDeps(env);
+    for (const message of batch.messages) {
+      try {
+        const { ack } = await deliverJob(message.body, env, deps);
+        if (ack) message.ack();
+        else message.retry({ delaySeconds: NOTIFY_RETRY_DELAY_S });
+      } catch {
+        // Fail closed: no ack, so the queue redelivers rather than losing it.
+        message.retry({ delaySeconds: NOTIFY_RETRY_DELAY_S });
+      }
+    }
+  },
 };
+
+export { NotifyLedger };
 
 async function route(request, env) {
   const url = new URL(request.url);

@@ -382,9 +382,6 @@ function island({ buildMs = 0 } = {}) {
     const pulsingStatus = (m) => '<p class="view-loading is-pulsing">' + m + "</p>";
     const roundBanner = () => "<rbanner>";
     const roundTableHtml = () => "<roundtable>";
-    // v1.6.6 D3's third surface. Stubbed like its neighbours: this island is
-    // about panel lifecycle, and the cards themselves are covered by slice 2.
-    const weeklyFixtureCards = () => "<weeklyfixtures>";
 
     ${lift("const weekLabelFor = (period) => {")}
     const RETAINED_PANEL_LIMIT = 8;

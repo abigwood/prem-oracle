@@ -120,6 +120,8 @@ function cards({ native = false } = {}) {
     ${lift("function drawCardRowPlate(ctx, y, height, index, place)")}
     ${lift("function drawCardHonours(ctx, x, y, counts)")}
     ${lift("function drawCardFooter(ctx, y, model)")}
+    ${lift("function sharedRankByUid(table)")}
+    ${liftConst("weeklyRanks")}
     ${lift("function weeklyCardModel(state, round)")}
     ${lift("function drawWeeklyResultCard(state, round)")}
     ${lift("function seasonCardModel(state)")}

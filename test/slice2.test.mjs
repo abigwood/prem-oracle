@@ -66,19 +66,43 @@ test("R1 · COMPLETED-NO-PICK carries the exact pinned copy", () => {
 
 test("R1 · card points match the worker's scoring function on every scoreline", () => {
   const s = load(D3);
+  // The full supported range, not a sample: validFootballScore admits 0-9, so
+  // 0-4 left three quarters of the space unchecked.
+  const MAX = 9;
   let checked = 0;
-  for (let a1 = 0; a1 <= 4; a1++) for (let a2 = 0; a2 <= 4; a2++)
-    for (let p1 = 0; p1 <= 4; p1++) for (let p2 = 0; p2 <= 4; p2++) {
+  let rendered = 0;
+  for (let a1 = 0; a1 <= MAX; a1++) for (let a2 = 0; a2 <= MAX; a2++)
+    for (let p1 = 0; p1 <= MAX; p1++) for (let p2 = 0; p2 <= MAX; p2++) {
       const mine = s.scorePickLocal({ p1, p2 }, { p1: a1, p2: a2 });
       const theirs = scorePick({ p1, p2 }, { p1: a1, p2: a2 });
       assert.deepEqual(plain(mine), theirs, `pick ${p1}-${p2} v result ${a1}-${a2}`);
-      // And the number the card actually prints is that number.
-      s.picks = { m1: { p1, p2 } };
-      const html = s.resultCard(fx({ result: [a1, a2] }));
-      assert.ok(html.includes(`>${theirs.pts} point`), `card shows ${theirs.pts}`);
       checked++;
     }
-  assert.equal(checked, 625);
+  assert.equal(checked, 10000);
+
+  // And the number the card PRINTS is that number. Rendering all ten thousand
+  // cards is a minute of string building for no extra coverage, so this walks
+  // the diagonal band that produces every distinct outcome instead.
+  for (let a1 = 0; a1 <= MAX; a1++) for (let a2 = 0; a2 <= MAX; a2++)
+    for (const [p1, p2] of [[a1, a2], [a2, a1], [a1 + 1, a2], [a1, a2 + 1], [0, 0], [MAX, 0]]) {
+      if (p1 > MAX || p2 > MAX) continue;
+      const theirs = scorePick({ p1, p2 }, { p1: a1, p2: a2 });
+      s.picks = { m1: { p1, p2 } };
+      const html = s.resultCard(fx({ result: [a1, a2] }));
+      const word = theirs.pts === 1 ? "point" : "points";
+      assert.ok(html.includes(`>${theirs.pts} ${word}</span>`),
+        `card for pick ${p1}-${p2} v ${a1}-${a2} did not print ${theirs.pts}`);
+      rendered++;
+    }
+  assert.ok(rendered >= 500, `only ${rendered} cards rendered`);
+  // Every outcome the scorer can return was actually exercised on a card.
+  const seen = new Set();
+  for (let a1 = 0; a1 <= MAX; a1++) for (let a2 = 0; a2 <= MAX; a2++)
+    for (const [p1, p2] of [[a1, a2], [a2, a1], [a1 + 1, a2], [a1, a2 + 1], [0, 0], [MAX, 0]]) {
+      if (p1 > MAX || p2 > MAX) continue;
+      seen.add(scorePick({ p1, p2 }, { p1: a1, p2: a2 }).pts);
+    }
+  assert.deepEqual([...seen].sort(), [0, 1, 2, 5]);
 });
 
 test("R1 · no pick and a void fixture both score zero, as the worker does", () => {
@@ -104,20 +128,18 @@ test("R1 · all three named surfaces route through the one result-first path", (
   assert.match(sourceOf("pickEntry"), /matchCard\(fixture, \{ resultFirst: true \}\)/);
   assert.match(sourceOf("fixtureRow"), /matchCard\(fixture, \{ resultFirst: true \}\)/);
   assert.match(sourceOf("expandFixture"), /matchCard\(fixture, \{ resultFirst: true \}\)/);
-  assert.match(sourceOf("weeklyFixtureCards"), /fixtureRow/);
   assert.match(sourceOf("matchCard"), /if \(resultFirst && isSettledCard\(match\)\) return resultCard\(match\);/);
 });
 
-test("R1 · the Weekly surface is the ACTIVE round only", () => {
-  const s = load(["weeklyFixtureCards"], {
-    leagueState: { currentPeriod: 7 },
-    slateForPeriod: () => ({ fixtureIds: ["m1"] }),
-    fixtureById: () => fx(),
-    byKickoffAsc: () => 0,
-    fixtureRow: () => "<row>",
-  });
-  assert.equal(s.weeklyFixtureCards({ period: 6 }), "", "a past week draws no cards");
-  assert.ok(s.weeklyFixtureCards({ period: 7 }).includes("<row>"));
+test("R1 · D3 has exactly two surfaces, and Weekly is not one of them", () => {
+  // League -> Weekly had no fixture card to restyle. Adding one would have been
+  // a second fixture surface, not a treatment: Weekly stays banner + standings.
+  assert.ok(!APP.includes("weeklyFixtureCards"), "the invented Weekly list is back");
+  const fill = sourceOf("fillPanelProgressively");
+  const weekly = fill.slice(fill.indexOf('if (tab === "matchday")'));
+  assert.match(weekly, /\$\{roundBanner\(roundState\)\}\$\{roundTableHtml\(roundState\)\}/);
+  assert.ok(!weekly.includes("fixtureRow"), "Weekly grew a fixture list");
+  assert.ok(!weekly.includes("matchCard"), "Weekly grew a fixture card");
 });
 
 // --- R2 -------------------------------------------------------------------
@@ -194,8 +216,10 @@ test("S1 · no leagues gets All Fixtures with no toggle and no explanation", () 
 test("S1 · joined-but-unpublished explains itself and never silently falls back", () => {
   const view = sourceOf("scheduleView");
   assert.match(view, /const unpublished = scoping && !scoped\.length;/);
-  assert.match(view, /No fixtures published for these weeks yet/);
-  assert.match(view, /data-schedule-scope="all">Show all fixtures/);
+  // Exact pinned wording.
+  assert.match(view, /<strong>No league fixtures selected yet\.<\/strong>/);
+  assert.match(view, /<p>Your league fixtures will appear here when this week's line-up is published\.<\/p>/);
+  assert.match(view, /data-schedule-scope="all">View all fixtures<\/button>/);
   // The list stays scoped while the notice is up: it does not quietly widen.
   assert.match(view, /const list = scoping \? scoped : inWindow;/);
 });

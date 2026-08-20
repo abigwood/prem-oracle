@@ -2218,8 +2218,9 @@ function scheduleView() {
 
   return `${scheduleHead()}
     ${scheduleScopeToggle()}
-    ${unpublished ? `<div class="launch-card"><p>No fixtures published for these weeks yet — your host picks them each week. You'll see them here as soon as they do.</p>
-      <button class="secondary wide" type="button" data-schedule-scope="all">Show all fixtures</button></div>` : ""}
+    ${unpublished ? `<div class="launch-card"><strong>No league fixtures selected yet.</strong>
+      <p>Your league fixtures will appear here when this week's line-up is published.</p>
+      <button class="secondary wide" type="button" data-schedule-scope="all">View all fixtures</button></div>` : ""}
     ${scheduleFilters(shown)}
     ${groupedPeriods(list, current)}
     ${scheduleMore(hidden)}`;
@@ -2379,21 +2380,68 @@ function pickWeekSummary(code, period) {
   return { pts: Number(week.pts || 0), place: week.place || null };
 }
 
-function pickWeekRow(group, code, body) {
+/**
+ * A folded week: a summary row, and NOTHING ELSE until somebody opens it.
+ *
+ * A full season is 38 of these per league. Building their cards up front — even
+ * into a closed <details> — is the same work as never having folded them, which
+ * is the whole point of folding. So a closed week emits an empty placeholder and
+ * the cards are built on first expansion, from data already in memory.
+ *
+ * Once built, the body stays built: re-collapsing hides it, it does not discard
+ * it, so opening a week twice costs the work once.
+ */
+function pickWeekRow(group, code, buildBody) {
   const key = pickWeekKey(code, group.period);
   const open = openPickWeeks.has(key);
   const { pts, place } = pickWeekSummary(code, group.period);
   const medal = place
     ? ` <span class="crown" aria-label="${escapeHTML(place)} place">${PLACE_EMOJI[place]}</span>`
     : "";
-  const points = pts == null ? "" : ` · ${pts} ${pts === 1 ? "point" : "points"}`;
-  return `<details class="pick-week pick-week-folded" data-pick-week="${escapeHTML(key)}"${open ? " open" : ""}>
+  const points = pts == null ? "" : `${pts} ${pts === 1 ? "point" : "points"}`;
+  const count = group.matches.length;
+  return `<details class="pick-week pick-week-folded" data-pick-week="${escapeHTML(key)}"
+    data-week-code="${escapeHTML(code || "")}" data-week-period="${escapeHTML(String(group.period))}"${open ? " open" : ""}>
     <summary class="pick-week-summary">
       <span class="pick-week-label">${escapeHTML(group.label)}</span>
-      <span class="pick-week-score">${escapeHTML(points.replace(" · ", ""))}${medal}</span>
+      <span class="pick-week-score">${escapeHTML(points)}${medal}</span>
     </summary>
-    <div class="pick-week-body">${body}</div>
+    ${open
+      ? `<div class="pick-week-body">${buildBody()}</div>`
+      : `<div class="pick-week-body" data-lazy-week="${escapeHTML(String(count))}"></div>`}
   </details>`;
+}
+
+/**
+ * The fixtures of one folded week, rebuilt on demand from what the app holds.
+ *
+ * No request, and no second grouping rule: it runs the same pickWeekGroups the
+ * section was drawn with, so an expanded week cannot disagree with its own
+ * summary row.
+ */
+function pickWeekMatches(code, period, contexts = leaguePickContexts()) {
+  const visible = visiblePickedFixtures(hiddenPickIds(contexts));
+  const league = contexts.find((entry) => entry.code === code);
+  const mine = code
+    ? visible.filter((fixture) => league?.lineup.has(String(fixture.id)))
+    : visible.filter((fixture) => !contexts.some((entry) => entry.lineup.has(String(fixture.id))));
+  const state = leagueState?.code === code ? leagueState : leagueStates[code];
+  const mixed = code ? (state?.competitions || []).length > 1 : isMixedActive();
+  return pickWeekGroups(mine, mixed)
+    .find((group) => String(group.period) === String(period))?.matches || [];
+}
+
+/** First expansion of a folded week: build its cards, then leave them built. */
+function fillPickWeek(details) {
+  const body = details.querySelector("[data-lazy-week]");
+  if (!body) return;
+  body.removeAttribute("data-lazy-week");
+  const code = details.dataset.weekCode || null;
+  const period = details.dataset.weekPeriod;
+  const contexts = leaguePickContexts();
+  body.innerHTML = pickWeekMatches(code, period, contexts)
+    .map((fixture) => pickEntry(fixture, code ? sharedLeagueNote(fixture.id, contexts, code) : ""))
+    .join("");
 }
 
 function pickSection(title, subtitle, groups, contexts, code) {
@@ -2411,16 +2459,16 @@ function pickSection(title, subtitle, groups, contexts, code) {
     </summary>
     <div class="pick-section-body">
       ${groups.map((group) => {
-        const body = group.matches
+        // Deliberately a thunk: a folded week must not pay to build cards that
+        // nobody has asked to see. The current week is the only one built up
+        // front, because it is the one being played.
+        const body = () => group.matches
           .map((fixture) => pickEntry(fixture, code ? sharedLeagueNote(fixture.id, contexts, code) : ""))
           .join("");
-        // The current week stays open while it is being played; every week
-        // behind it folds to a single row. Nothing is removed either way — the
-        // cards are still in the document, one tap away (F6).
         return isCurrentPickWeek(code, group.period)
           ? `<div class="pick-week">
         <span class="pick-week-label">${escapeHTML(group.label)}</span>
-        ${body}
+        ${body()}
       </div>`
           : pickWeekRow(group, code, body);
       }).join("")}
@@ -2632,7 +2680,7 @@ async function fillPanelProgressively(panel, capture) {
       ? pulsingStatus(`Loading ${escapeHTML(weekLabelFor(capture.period))}…`)
       : roundState.error
         ? `<div class="empty"><strong>${escapeHTML(roundState.error)}</strong></div>`
-        : `${roundBanner(roundState)}${roundTableHtml(roundState)}${weeklyFixtureCards(roundState)}`;
+        : `${roundBanner(roundState)}${roundTableHtml(roundState)}`;
     traceTap("chunk", { stage: "week", chars: html.length });
     panel.insertAdjacentHTML("beforeend", html);
     return true;
@@ -3125,26 +3173,6 @@ function roundBanner(round) {
   return `<div class="round-banner is-pending"><strong>${place}${escapeHTML(round.status)}</strong>${roundSlateLine(round)}</div>`;
 }
 
-/**
- * The active round's fixtures, beneath its table (D3's third surface).
- *
- * Rows, not cards: the same lazy shape the Schedule uses, so a twenty-fixture
- * week costs one row each until somebody actually opens one — and what opens is
- * matchCard's result-first path, so there is exactly one settled-card renderer
- * in the app rather than two that can drift.
- */
-function weeklyFixtureCards(round) {
-  if (!round || round.error) return "";
-  const current = leagueState?.currentPeriod ?? currentPeriodKey();
-  if (current == null || String(round.period) !== String(current)) return "";
-  const ids = (slateForPeriod(round.period)?.fixtureIds || []).map(String);
-  const list = ids.map(fixtureById).filter(Boolean).sort(byKickoffAsc);
-  if (!list.length) return "";
-  return `<section class="weekly-fixtures" aria-label="This week's fixtures">
-    ${list.map(fixtureRow).join("")}
-  </section>`;
-}
-
 // --- D7: weekly movement arrows ---------------------------------------------
 // The season table has always carried arrows; the weekly one did not, and a
 // week is where the movement is actually felt. Everything below is DERIVED from
@@ -3242,18 +3270,29 @@ function weeklyMovementBadge(value) {
   return `<span class="movement movement-flat" role="img" aria-label="No change">–</span>`;
 }
 
+/**
+ * The weekly rank a row is DRAWN with — points only, shared by ties, and the
+ * same map weeklyMovement() ranks against.
+ *
+ * A worker that still sends index-based ranks is corrected here rather than
+ * rendered against arrows computed a different way: a row must never move
+ * position while showing a dash, or hold position while showing an arrow.
+ */
+const weeklyRanks = (table) => sharedRankByUid(table || []);
+
 function roundTableHtml(round) {
   const awards = new Map((round.complete ? round.podium || [] : []).map((entry) => [entry.uid, entry.place]));
   const slateIds = round.slate?.fixtureIds
     ? new Set(round.slate.fixtureIds.map(String))
     : null;
+  const ranks = weeklyRanks(round.table);
   const movement = weeklyMovement(round.table, round.reveal, slateIds);
   return `<table class="table round-standings"><thead><tr><th>Player</th><th>Pts</th><th>Exact</th></tr></thead>
     <tbody>${(round.table || []).map((row, index) => {
       const place = awards.get(row.uid);
       const medal = place ? ` <span class="crown" aria-label="Matchweek ${place}">${PLACE_EMOJI[place]}</span>` : "";
       const move = movement.has(row.uid) ? weeklyMovementBadge(movement.get(row.uid)) : "";
-      return `<tr><td>${move}${row.rank || index + 1}. ${escapeHTML(row.nick)}${medal}</td><td>${row.pts}</td><td>${row.exact}</td></tr>`;
+      return `<tr><td>${move}${ranks.get(row.uid) ?? index + 1}. ${escapeHTML(row.nick)}${medal}</td><td>${row.pts}</td><td>${row.exact}</td></tr>`;
     }).join("")}</tbody></table>`;
 }
 
@@ -3845,6 +3884,7 @@ function weeklyCardModel(state, round) {
     .map((place) => ({ place, entries: (round.podium || []).filter((entry) => entry.place === place) }))
     .filter((group) => group.entries.length);
   const champions = groups.find((group) => group.place === "gold")?.entries || [];
+  const ranks = weeklyRanks(round.table);
   const names = winnerNames(round) || champions.map((entry) => entry.nick).join(" & ");
   const pts = champions[0]?.pts ?? (round.table || [])[0]?.pts ?? 0;
   return {
@@ -3855,7 +3895,9 @@ function weeklyCardModel(state, round) {
     heroLine: `${week} champion · ${pts} pts`,
     podium: groups,
     rows: (round.table || []).map((row, index) => ({
-      rank: row.rank || index + 1,
+      // The same weekly rank the table draws — a shared card that disagreed
+      // with the screen it was shared from would be worse than no card.
+      rank: ranks.get(row.uid) ?? index + 1,
       nick: row.nick,
       pts: row.pts,
       exact: row.exact,
@@ -5818,8 +5860,13 @@ document.addEventListener("toggle", (event) => {
   const week = event.target.closest?.("[data-pick-week]");
   if (week) {
     const key = week.dataset.pickWeek;
-    if (week.open) openPickWeeks.add(key);
-    else openPickWeeks.delete(key);
+    if (week.open) {
+      fillPickWeek(week);
+      openPickWeeks.add(key);
+    } else {
+      // Collapsing hides the cards; it does not throw them away.
+      openPickWeeks.delete(key);
+    }
     persistPickWeeks();
     return;
   }

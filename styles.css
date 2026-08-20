@@ -1940,7 +1940,6 @@ body.picker-open { overflow: hidden; }
 
 /* --- D1: which fixtures the Schedule is showing -------------------------- */
 .filters-scope { margin-bottom: 4px; }
-.weekly-fixtures { margin-top: 14px; }
 
 @media (prefers-reduced-motion: reduce) {
   .pick-section-head::after,

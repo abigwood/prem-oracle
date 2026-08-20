@@ -12,6 +12,7 @@ import {
   computePodiumTotals,
   computeTable,
   computeTableWithMovement,
+  withSharedRank,
   fixturesByMatchweek,
   fixturesNeedingNotification,
   isDraftSlate,
@@ -1284,7 +1285,8 @@ async function state(env, url) {
     const viewerIsMember = !!viewer && memberList.some((member) => member.uid === viewer);
     const scoped = applySlates(completed.filter((match) => match.period === period),
       slate ? { [period]: slate } : {});
-    const table = computeTable(memberList, scoped, picks).map((row, index) => ({ ...row, rank: index + 1 }));
+    // Ordered by the full tie-break, ranked on points alone — see withSharedRank.
+    const table = withSharedRank(computeTable(memberList, scoped, picks));
     return json({
       code,
       name: league.name,

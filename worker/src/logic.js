@@ -123,6 +123,21 @@ export function roundWinners(members, roundFixtures, picksByMatch) {
 
 export const PODIUM_PLACES = ["gold", "silver", "bronze"];
 
+/**
+ * Competition ranking on POINTS ONLY, shared by ties.
+ *
+ * The weekly table's DISPLAYED rank and its movement arrows have to agree, and
+ * they can only agree if they are the same definition. Ordering may still break
+ * ties on exact, then correct, then name — that is presentation, and it decides
+ * which row sits above which. It must not decide the NUMBER printed beside them,
+ * or two players level on points show different ranks and one of them appears to
+ * have moved when nothing changed.
+ */
+export const withSharedRank = (rows) => (rows || []).map((row) => ({
+  ...row,
+  rank: (rows || []).filter((other) => Number(other.pts || 0) > Number(row.pts || 0)).length + 1,
+}));
+
 // Competition ranking on POINTS ONLY. The season table's exact/correct
 // tie-breakers order rows for display but must never split a podium place:
 // 9-9-7 is gold, gold, bronze; 9-7-7 is gold, silver, silver and no bronze;

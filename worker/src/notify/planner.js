@@ -13,6 +13,7 @@
  */
 import { PER_MESSAGE_WORST_CASE, utcDay } from "./ledger.js";
 import { chooseLeagueCode } from "./copy.js";
+import { MAX_FIXTURES_PER_JOB, MAX_LEAGUES_PER_JOB } from "./consumer.js";
 
 /** Triples per queue message, so a consumer batch can never exceed 45 APNs. */
 export const JOB_TRIPLES = 45;
@@ -41,8 +42,14 @@ export function dueFixtures(matches, now, windowMs = REMINDER_WINDOW_MS) {
  * eligibility re-check, the ledger row, the notification payload and the
  * diagnostic. Nothing downstream is allowed to pick one for itself, because a
  * second guess is how a tap opens the wrong league.
+ *
+ * The PERIOD travels with it for a duller reason: without it the consumer would
+ * have to read the index to find the slate, turning one authoritative read into
+ * two on a budget that allows one.
  */
-export function triplesForFixture({ match, leagueCodes, membersByLeague, picks, competition }) {
+export function triplesForFixture({
+  match, leagueCodes, membersByLeague, periodsByLeague, picks, competition,
+}) {
   const kickoffAt = Date.parse(match.startAt);
   const byUid = new Map();
   for (const code of leagueCodes) {
@@ -59,11 +66,13 @@ export function triplesForFixture({ match, leagueCodes, membersByLeague, picks, 
   const triples = [];
   for (const [uid, codes] of byUid) {
     const league = chooseLeagueCode(codes);
-    if (!league) continue;
+    const period = periodsByLeague?.get(league);
+    if (!league || period == null) continue;
     triples.push({
       uid,
       fixtureId: String(match.id),
       league,
+      period: String(period),
       kickoffAt,
       competition,
       match: {
@@ -78,66 +87,98 @@ export function triplesForFixture({ match, leagueCodes, membersByLeague, picks, 
   return triples.sort((a, b) => a.uid.localeCompare(b.uid));
 }
 
-export function intoJobs(triples, size = JOB_TRIPLES) {
+/**
+ * Pack triples into jobs ACROSS fixtures.
+ *
+ * Packing per fixture leaves a part-full message at the end of every one of
+ * them — twenty fixtures at a thousand recipients is 460 messages rather than
+ * the 445 the cost model was built on, and at margins of 1.10x that difference
+ * is not rounding. Packing across fixtures closes the gap.
+ *
+ * The bound the consumer depends on is enforced here and nowhere else: at most
+ * three distinct fixtures and three distinct leagues per job, which is what
+ * makes its fixed read cost a constant.
+ */
+export function packJobs(triples, {
+  size = JOB_TRIPLES,
+  maxFixtures = MAX_FIXTURES_PER_JOB,
+  maxLeagues = MAX_LEAGUES_PER_JOB,
+} = {}) {
   const jobs = [];
-  for (let i = 0; i < triples.length; i += size) {
-    jobs.push({ v: 1, triples: triples.slice(i, i + size) });
+  let current = [];
+  let fixtures = new Set();
+  let leagues = new Set();
+  const flush = () => {
+    if (current.length) jobs.push({ v: 1, triples: current });
+    current = [];
+    fixtures = new Set();
+    leagues = new Set();
+  };
+  for (const t of triples) {
+    const wouldExceed = current.length >= size
+      || (!fixtures.has(t.fixtureId) && fixtures.size >= maxFixtures)
+      || (!leagues.has(t.league) && leagues.size >= maxLeagues);
+    if (wouldExceed) flush();
+    current.push(t);
+    fixtures.add(t.fixtureId);
+    leagues.add(t.league);
   }
+  flush();
   return jobs;
 }
 
 /**
- * Book each message's UNAVOIDABLE worst case before `sendBatch`.
+ * Book the messages ATOMICALLY across every pool their worst case will spend.
  *
- * Once a message is on the queue Cloudflare has already charged its write, and
- * up to four deliveries with their reads, deletes and Durable Object calls
- * follow whatever the consumer decides. Reserving afterwards would be checking
- * a bill that has already been run up — so the planner reserves first and only
- * enqueues what it could pay for.
+ * Reserving each pool in turn means a short third pool leaves the first two
+ * charged for messages that were never enqueued. One operation grants the same
+ * whole-message count from all three, or grants none.
  */
 export async function reserveForJobs(ledger, day, jobCount) {
-  const asked = {
-    queue_ops: jobCount * PER_MESSAGE_WORST_CASE.queue_ops,
-    worker_requests: jobCount * PER_MESSAGE_WORST_CASE.worker_requests,
-    do_requests: jobCount * PER_MESSAGE_WORST_CASE.do_requests,
-  };
-  const granted = {};
-  for (const [metric, want] of Object.entries(asked)) {
-    granted[metric] = (await ledger.call("reserve", { day, metric, want })).granted;
-  }
-  // Whole messages only: a half-funded message would enqueue work whose worst
-  // case is not covered, which is the thing the reservation exists to prevent.
-  const affordable = Math.min(...Object.entries(asked).map(([metric, want]) =>
-    want === 0 ? jobCount : Math.floor(granted[metric] / (want / jobCount))));
-  return { affordable: Math.max(0, Math.min(jobCount, affordable)), asked, granted };
+  if (jobCount === 0) return { affordable: 0, refused: 0 };
+  return ledger.call("reserveMessages", {
+    day, count: jobCount, perMessage: { ...PER_MESSAGE_WORST_CASE },
+  });
 }
 
 /**
- * One planning pass. Returns what it enqueued rather than sending anything, so
- * the cron path stays testable without a queue.
+ * One planning pass over every due fixture.
+ *
+ * Collects across fixtures first, packs once, reserves once, and returns the
+ * jobs rather than sending them, so the cron path stays testable without a
+ * queue. Whatever it could not fund is made TERMINAL — a triple the planner
+ * merely declined to enqueue is a triple it will offer again next tick.
  */
-export async function planFixture({ match, competition, env, ledger, deps, now }) {
+export async function planWindow({ matches, competitionOf, ledger, deps, now }) {
   const day = utcDay(now);
-  const leagueCodes = await deps.leaguesForFixture(match.id);
-  if (!leagueCodes.length) return { jobs: [], triples: 0, skipped: "no-league" };
+  const all = [];
+  const skipped = [];
+  for (const match of matches) {
+    const leagueCodes = await deps.leaguesForFixture(match.id);
+    if (!leagueCodes.length) { skipped.push({ id: match.id, why: "no-league" }); continue; }
+    const periodsByLeague = await deps.periodsForFixture(match.id, leagueCodes);
+    const membersByLeague = await deps.membersByLeague(leagueCodes);
+    const picks = await deps.readPicks(String(match.id));
+    all.push(...triplesForFixture({
+      match, leagueCodes, membersByLeague, periodsByLeague, picks,
+      competition: competitionOf(match),
+    }));
+  }
+  if (!all.length) return { jobs: [], triples: 0, refused: 0, skipped };
 
-  const membersByLeague = await deps.membersByLeague(leagueCodes);
-  const picks = await deps.readPicks(String(match.id));
-  const triples = triplesForFixture({ match, leagueCodes, membersByLeague, picks, competition });
-  if (!triples.length) return { jobs: [], triples: 0, skipped: "nobody-owes" };
-
-  const jobs = intoJobs(triples);
+  const jobs = packJobs(all);
   const { affordable } = await reserveForJobs(ledger, day, jobs.length);
   const enqueued = jobs.slice(0, affordable);
-  const refused = jobs.length - enqueued.length;
-  if (refused > 0) {
-    // Never silently: what could not be funded is counted where it can be read.
-    await ledger.call("recordOutcomes", {
-      day, now,
-      outcomes: jobs.slice(affordable).flatMap((job) => job.triples.map((t) => ({
-        uid: t.uid, fixtureId: t.fixtureId, gen: 0, result: "dropped", reason: "plan-budget-exhausted",
+  const unfunded = jobs.slice(affordable);
+  if (unfunded.length) {
+    // Never silently: what could not be funded stops being work, and is
+    // counted where it can be read.
+    await ledger.call("terminatePlanned", {
+      day, now, reason: "plan-budget-exhausted",
+      triples: unfunded.flatMap((job) => job.triples.map((t) => ({
+        uid: t.uid, fixtureId: t.fixtureId, league: t.league, kickoffAt: t.kickoffAt,
       }))),
     });
   }
-  return { jobs: enqueued, triples: triples.length, refused };
+  return { jobs: enqueued, triples: all.length, refused: unfunded.length, skipped };
 }

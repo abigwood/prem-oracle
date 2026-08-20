@@ -12,36 +12,66 @@
  *   5. a failed fetch keeps its reservation: failures cost what they cost
  *   6. unused read allowance stays consumed; conservative beats optimistic
  *
- * Three Durable Object round trips for a working delivery, one for a refused
- * one, and never a fourth.
+ * EXACTLY three Durable Object round trips for a working delivery, one for a
+ * refused one. Never a fourth, and never one per triple — the reservation is
+ * only meaningful if the real call count is the one it was sized against.
  */
 import { utcDay } from "./ledger.js";
 import { reminderPayload, collapseId, apnsExpiration } from "./copy.js";
 
-/** Per-triple reads: push:<uid> and member:<code>:<uid>. */
+/** Per-recipient reads: push:<uid> and member:<code>:<uid>. Nothing else. */
 export const KV_READS_PER_TRIPLE = 2;
-/** Per-message reads: up to 3 picks: and up to 3 custom_slate:. */
-export const KV_READS_FIXED = 6;
+/**
+ * Per-message reads: one picks: per distinct fixture and one custom_slate: per
+ * distinct (league, period). The packer bounds a job to three of each, which is
+ * what makes this a constant rather than a per-recipient cost.
+ */
+export const MAX_FIXTURES_PER_JOB = 3;
+export const MAX_LEAGUES_PER_JOB = 3;
+export const KV_READS_FIXED = MAX_FIXTURES_PER_JOB + MAX_LEAGUES_PER_JOB;
 
 export const worstCaseReads = (count) => count * KV_READS_PER_TRIPLE + KV_READS_FIXED;
 
 /**
+ * The shared context a job's recipients are all judged against.
+ *
+ * Loaded ONCE per message and then held in memory. Reading the pick map or the
+ * published slate per recipient would be five reads each against a reservation
+ * of two, which is the gap between what the budget was told and what it spent.
+ */
+async function loadContext(deps, triples) {
+  const picks = new Map();
+  const slates = new Map();
+  for (const t of triples) {
+    if (!picks.has(t.fixtureId)) picks.set(t.fixtureId, await deps.readPicks(t.fixtureId));
+    // The period rides in the triple, chosen by the planner, so the slate is
+    // one read rather than a hint read plus a slate read.
+    const key = `${t.league}|${t.period}`;
+    if (!slates.has(key)) slates.set(key, await deps.readSlate(t.league, t.period));
+  }
+  return { picks, slates };
+}
+
+/**
  * Is this recipient still owed this reminder?
  *
- * Every value here is read at SEND time, not planning time. D2 requires the
- * re-check immediately before APNs precisely because the interesting failures
- * happen in between: a pick saved, a mute set, a member removed, a fixture
- * amended out of the slate.
+ * Every per-recipient value here is read at SEND time, not planning time. D2
+ * requires the re-check immediately before APNs precisely because the
+ * interesting failures happen in between: a pick saved, a mute set, a member
+ * removed, a fixture amended out of the slate.
  */
-export async function stillEligible(deps, triple) {
-  const { uid, fixtureId, league, competition } = triple;
+export async function stillEligible(deps, context, triple) {
+  const { uid, fixtureId, league, competition, period } = triple;
   const push = await deps.readPush(uid);
   if (!push?.token) return { ok: false, reason: "no-token" };
   if (Array.isArray(push.mute) && push.mute.includes(competition)) return { ok: false, reason: "muted" };
   if (!(await deps.isMember(league, uid))) return { ok: false, reason: "not-member" };
-  const picks = await deps.readPicks(fixtureId);
+  const picks = context.picks.get(fixtureId);
   if (picks && picks[uid]) return { ok: false, reason: "already-picked" };
-  if (!(await deps.stillInSlate(league, fixtureId))) return { ok: false, reason: "amended-out" };
+  const slate = context.slates.get(`${league}|${period}`);
+  const listed = slate?.status === "published"
+    && (slate.fixtureIds || []).map(String).includes(String(fixtureId));
+  if (!listed) return { ok: false, reason: "amended-out" };
   return { ok: true, token: push.token };
 }
 
@@ -59,43 +89,32 @@ export async function deliverJob(job, env, deps) {
   const triples = job.triples || [];
   const stats = {
     attempted: 0, sent: 0, dropped: 0, deferred: 0, terminated: 0,
-    reads: 0, doCalls: 0, pools: { apns_initial: 0, apns_retry: 0 },
+    reads: 0, pools: { apns_initial: 0, apns_retry: 0 },
   };
   if (!triples.length) return { ack: true, stats };
 
-  // 1. Worst-case read allowance for the whole message, before touching KV.
-  //    2. A refusal is made TERMINAL inside that same transaction, so the work
-  //    genuinely stops rather than being reported as stopped and replanned.
-  const reserve = await ledger.call("reserveReadsOrTerminate", {
-    day, want: worstCaseReads(triples.length), now,
-    triples: triples.map((t) => ({
-      uid: t.uid, fixtureId: t.fixtureId, league: t.league, kickoffAt: t.kickoffAt,
-    })),
+  const identity = (t) => ({
+    uid: t.uid, fixtureId: t.fixtureId, league: t.league, kickoffAt: t.kickoffAt,
   });
-  stats.doCalls++;
-  if (reserve.refused) {
-    stats.dropped = reserve.dropped;
-    stats.terminated = reserve.dropped;
+
+  // CALL 1 — reserve, claim and resolve dispositions, in one round trip. A
+  // refusal is made terminal inside that same transaction.
+  const begun = await ledger.call("beginDelivery", {
+    day, want: worstCaseReads(triples.length), now, triples: triples.map(identity),
+  });
+  if (begun.refused) {
+    stats.dropped = begun.dropped;
+    stats.terminated = begun.dropped;
     return { ack: true, stats };
   }
-  stats.reads = reserve.granted;                       // 6. consumed either way
+  stats.reads = begun.granted;                         // 6. consumed either way
+  stats.deferred = begun.deferred;
+  let ack = begun.deferred === 0;
 
-  const claimed = await ledger.call("claim", {
-    now,
-    triples: triples.map((t) => ({
-      uid: t.uid, fixtureId: t.fixtureId, league: t.league, kickoffAt: t.kickoffAt,
-    })),
-  });
-  const owned = new Map(claimed.map((row) => [`${row.uid}|${row.fixture_id}`, row]));
+  const owned = new Map(begun.claimed.map((row) => [`${row.uid}|${row.fixture_id}`, row]));
 
-  let ack = true;
-  const unclaimed = triples.filter((t) => !owned.has(`${t.uid}|${t.fixtureId}`));
-  for (const t of unclaimed) {
-    const how = await ledger.call("disposition", { uid: t.uid, fixtureId: t.fixtureId, now });
-    if (how === "retry") { stats.deferred++; ack = false; }
-  }
-
-  // 3. Authoritative eligibility, on reads already paid for.
+  // 3. Authoritative eligibility, on reads already paid for and loaded once.
+  const context = await loadContext(deps, triples.filter((t) => owned.has(`${t.uid}|${t.fixtureId}`)));
   const eligible = [];
   const outcomes = [];
   for (const t of triples) {
@@ -106,7 +125,7 @@ export async function deliverJob(job, env, deps) {
       stats.dropped++;
       continue;
     }
-    const check = await stillEligible(deps, t);
+    const check = await stillEligible(deps, context, t);
     if (!check.ok) {
       outcomes.push({ ...t, gen: row.claim_gen, result: "dropped", reason: check.reason });
       stats.dropped++;
@@ -115,15 +134,14 @@ export async function deliverJob(job, env, deps) {
     eligible.push({ ...t, gen: row.claim_gen, token: check.token });
   }
 
-  // 4. The exact attempts: one fenced atomic step that verifies each fence,
-  //    picks the pool from the row's own history, reserves and marks.
+  // CALL 2 — the exact attempts: one fenced atomic step that verifies each
+  // fence, picks the pool from the row's own history, reserves and marks.
   let grants = [];
   if (eligible.length) {
     grants = await ledger.call("grantAttempts", {
       day,
       grants: eligible.map((t) => ({ uid: t.uid, fixtureId: t.fixtureId, gen: t.gen })),
     });
-    stats.doCalls++;
   }
   const granted = new Map(grants.map((g) => [`${g.uid}|${g.fixtureId}`, g]));
 
@@ -161,6 +179,7 @@ export async function deliverJob(job, env, deps) {
     else { outcomes.push({ ...t, result: "failed" }); ack = false; }
   }
 
+  // CALL 3 — every outcome of this delivery, in one round trip.
   if (outcomes.length) {
     await ledger.call("recordOutcomes", {
       day, now,
@@ -168,7 +187,6 @@ export async function deliverJob(job, env, deps) {
         uid: o.uid, fixtureId: o.fixtureId, gen: o.gen, result: o.result, reason: o.reason,
       })),
     });
-    stats.doCalls++;
   }
   return { ack, stats };
 }

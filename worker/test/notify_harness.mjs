@@ -54,13 +54,24 @@ export function ledgerObject() {
   return {
     ledger,
     db,
-    /** The same call surface worker.js's ledgerClient exposes, without HTTP. */
-    client: {
-      async call(op, args = {}) {
-        if (typeof ledger[op] !== "function") throw new Error(`unknown op: ${op}`);
-        return op === "spent" ? ledger.spent(args.day) : ledger[op](args);
-      },
-    },
+    /**
+     * The same call surface worker.js's ledgerClient exposes, without HTTP —
+     * and instrumented the same way, ON THE CLIENT, so a call-count assertion
+     * measures round trips that happened rather than a tally someone kept.
+     */
+    client: (() => {
+      const calls = [];
+      return {
+        calls,
+        count: () => calls.length,
+        reset: () => { calls.length = 0; },
+        async call(op, args = {}) {
+          if (typeof ledger[op] !== "function") throw new Error(`unknown op: ${op}`);
+          calls.push(op);
+          return op === "spent" ? ledger.spent(args.day) : ledger[op](args);
+        },
+      };
+    })(),
     row: (uid, fixtureId) =>
       db.prepare("SELECT * FROM delivery WHERE uid=? AND fixture_id=?").get(uid, fixtureId),
     drops: () => db.prepare("SELECT * FROM dropped_log ORDER BY fixture, reason").all(),
@@ -106,15 +117,17 @@ export function harnessDeps({ kv, client, now, sends, sendResult = () => ({ ok: 
       return page.keys.map((k) => k.name.slice(prefix.length)).sort();
     },
     readPicks: async (fixtureId) => (await kvGet(`picks:${fixtureId}`)) || {},
+    readSlate: (code, period) => kvGet(`custom_slate:${code}:${period}`),
     readPush: (uid) => kvGet(`push:${uid}`),
     dropPushToken: (uid) => kv.delete(`push:${uid}`),
     isMember: async (code, uid) => !!(await kvGet(`member:${code}:${uid}`)),
-    stillInSlate: async (code, fixtureId) => {
-      const hint = await kvGet(`slatefx:${fixtureId}:${code}`);
-      if (!hint?.period) return false;
-      const slate = await kvGet(`custom_slate:${code}:${hint.period}`);
-      return slate?.status === "published"
-        && (slate.fixtureIds || []).map(String).includes(String(fixtureId));
+    periodsForFixture: async (fixtureId, codes) => {
+      const out = new Map();
+      for (const code of codes) {
+        const hint = await kvGet(`slatefx:${fixtureId}:${code}`);
+        if (hint?.period != null) out.set(code, String(hint.period));
+      }
+      return out;
     },
     membersByLeague: async (codes) => {
       const out = new Map();
@@ -147,8 +160,8 @@ export const fixture = (id, startAt) => ({
 /** A job as the planner builds it, for tests that drive the consumer directly. */
 export const job = (triples) => ({ v: 1, triples });
 
-export const triple = ({ uid, fixtureId, league, kickoffAt, competition = "PL" }) => ({
-  uid, fixtureId, league, kickoffAt, competition,
+export const triple = ({ uid, fixtureId, league, kickoffAt, competition = "PL", period = "7" }) => ({
+  uid, fixtureId, league, kickoffAt, competition, period,
   match: { id: fixtureId, player1: `Home ${fixtureId}`, player2: `Away ${fixtureId}`,
     startAt: new Date(kickoffAt).toISOString() },
 });

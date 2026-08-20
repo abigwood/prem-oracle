@@ -84,14 +84,23 @@ ON CONFLICT (uid, fixture_id) DO UPDATE SET
 RETURNING uid, fixture_id, league, claim_gen, attempts, apns_tried;
 `;
 
-const TERMINATE_ON_READ_REFUSAL = `
+/**
+ * Make a triple terminally dropped, safely.
+ *
+ * Used by BOTH refusal paths — the consumer's read-budget refusal and the
+ * planner's pre-enqueue refusal — because both have to stop work that would
+ * otherwise be planned again, and both must leave alone anything they do not
+ * own: `sent`, an existing `dropped`, and another consumer's LIVE fenced claim
+ * all fail the conflict clause untouched.
+ */
+const TERMINATE = `
 INSERT INTO delivery (uid, fixture_id, league, state, claim_gen, claim_until,
                       attempts, kickoff_at, drop_reason)
-VALUES (?1, ?2, ?3, 'dropped', 1, NULL, 0, ?5, 'kv-read-budget-exhausted')
+VALUES (?1, ?2, ?3, 'dropped', 1, NULL, 0, ?5, ?6)
 ON CONFLICT (uid, fixture_id) DO UPDATE SET
     state       = 'dropped',
     claim_until = NULL,
-    drop_reason = 'kv-read-budget-exhausted'
+    drop_reason = ?6
   WHERE delivery.state = 'failed'
      OR (delivery.state = 'claimed' AND delivery.claim_until <= ?4)
 RETURNING uid, fixture_id;
@@ -153,57 +162,97 @@ export class NotifyLedger {
     return { granted, used: used + granted, remaining: cap - (used + granted) };
   }
 
+  /** Terminally drop a batch, with the conflict guard both refusal paths need. */
+  #terminate({ day, now, triples, reason }) {
+    const byFixture = {};
+    let dropped = 0;
+    for (const t of triples) {
+      const hit = this.#rows(TERMINATE, t.uid, t.fixtureId, t.league, now, t.kickoffAt, reason);
+      if (hit.length) {
+        dropped++;
+        byFixture[t.fixtureId] = (byFixture[t.fixtureId] || 0) + 1;
+      }
+    }
+    for (const [fixture, uids] of Object.entries(byFixture)) {
+      this.sql.exec(LOG_DROP, day, fixture, reason, uids, now);
+    }
+    return { dropped, byFixture };
+  }
+
   /**
-   * Reserve the read allowance, or refuse it and make the refusal TERMINAL —
-   * one transaction either way, and one Durable Object call either way.
+   * CALL ONE of a delivery: reserve the reads, claim the batch, and report what
+   * is owed on everything not claimed — all in one round trip.
    *
-   * Reporting a triple as dropped is not dropping it: without this, nothing in
-   * the ledger says so and the planner offers the same work again.
+   * These were three separate RPCs, and the per-triple disposition made it up
+   * to forty-eight. A delivery's Durable Object cost has to be a fixed three
+   * calls or the pre-enqueue reservation is fiction, so they are one.
+   *
+   * If the read allowance is refused, the refusal is made TERMINAL inside this
+   * same transaction: reporting a triple as dropped is not dropping it.
    */
-  reserveReadsOrTerminate({ day, want, triples, now }) {
+  beginDelivery({ day, want, triples, now }) {
     return this.ctx.storage.transactionSync(() => {
       const used = this.#used(day, "kv_reads");
-      if (used + want <= POOL.kv_reads) {
-        this.sql.exec(BUDGET_SET, day, "kv_reads", used + want);
-        return { granted: want, refused: false, dropped: 0, byFixture: {} };
+      if (used + want > POOL.kv_reads) {
+        const { dropped, byFixture } = this.#terminate({
+          day, now, triples, reason: "kv-read-budget-exhausted",
+        });
+        return { refused: true, granted: 0, dropped, byFixture, claimed: [], deferred: 0 };
       }
-      const byFixture = {};
-      let dropped = 0;
+      this.sql.exec(BUDGET_SET, day, "kv_reads", used + want);
+      const claimed = [];
+      const owned = new Set();
       for (const t of triples) {
-        // Only what is safe to touch: sent, already-dropped and another
-        // consumer's LIVE fenced claim all fail the conflict clause.
-        const hit = this.#rows(TERMINATE_ON_READ_REFUSAL,
-          t.uid, t.fixtureId, t.league, now, t.kickoffAt);
-        if (hit.length) {
-          dropped++;
-          byFixture[t.fixtureId] = (byFixture[t.fixtureId] || 0) + 1;
-        }
+        const got = this.#rows(CLAIM,
+          t.uid, t.fixtureId, t.league, now, LEASE_MS, t.kickoffAt, MAX_ATTEMPTS);
+        if (got.length) { claimed.push(got[0]); owned.add(`${t.uid}|${t.fixtureId}`); }
       }
-      for (const [fixture, uids] of Object.entries(byFixture)) {
-        this.sql.exec(LOG_DROP, day, fixture, "kv-read-budget-exhausted", uids, now);
+      // Anything not claimed: is it finished, or is somebody else still holding
+      // it? Only the second means this message must come back.
+      let deferred = 0;
+      for (const t of triples) {
+        if (owned.has(`${t.uid}|${t.fixtureId}`)) continue;
+        const row = this.#rows(OWNER, t.uid, t.fixtureId)[0];
+        if (row && row.state === "claimed" && row.claim_until > now) deferred++;
       }
-      return { granted: 0, refused: true, dropped, byFixture };
+      return { refused: false, granted: want, dropped: 0, byFixture: {}, claimed, deferred };
     });
   }
 
-  /** Take a bounded, fenced lease. Returns only the rows this caller now owns. */
-  claim({ triples, now }) {
-    const out = [];
-    for (const t of triples) {
-      const got = this.#rows(CLAIM,
-        t.uid, t.fixtureId, t.league, now, LEASE_MS, t.kickoffAt, MAX_ATTEMPTS);
-      if (got.length) out.push(got[0]);
-    }
-    return out;
+  /**
+   * The planner's refusal, made terminal.
+   *
+   * A message the planner could not fund is work that will otherwise be offered
+   * again on the next tick. It has no claim and no generation, so it cannot go
+   * through recordOutcomes — it needs the same insert-or-safely-update the read
+   * refusal uses.
+   */
+  terminatePlanned({ day, now, triples, reason = "plan-budget-exhausted" }) {
+    return this.ctx.storage.transactionSync(() => this.#terminate({ day, now, triples, reason }));
   }
 
-  /** What a triple this caller could not claim is owed, if anything. */
-  disposition({ uid, fixtureId, now }) {
-    const row = this.#rows(OWNER, uid, fixtureId)[0];
-    if (!row) return "absent";
-    if (row.state === "sent" || row.state === "dropped") return "terminal";
-    if (row.state === "claimed" && row.claim_until > now) return "retry";
-    return "claimable";
+  /**
+   * ATOMIC multi-pool reservation for whole messages.
+   *
+   * Reserving each pool separately means a short third pool leaves the first
+   * two charged for messages that were never enqueued. Either the same whole
+   * count is funded from every pool, or nothing is.
+   */
+  reserveMessages({ day, count, perMessage }) {
+    return this.ctx.storage.transactionSync(() => {
+      const metrics = Object.entries(perMessage).filter(([, cost]) => cost > 0);
+      const affordable = metrics.reduce((limit, [metric, cost]) => {
+        const remaining = POOL[metric] - this.#used(day, metric);
+        return Math.min(limit, Math.floor(remaining / cost));
+      }, count);
+      const granted = Math.max(0, Math.min(count, affordable));
+      if (granted > 0) {
+        for (const [metric, cost] of metrics) {
+          this.sql.exec(BUDGET_SET, day, metric, this.#used(day, metric) + granted * cost);
+        }
+      }
+      return { affordable: granted, refused: count - granted };
+    });
   }
 
   /**
@@ -283,9 +332,9 @@ export class NotifyLedger {
     const { op, ...args } = await request.json();
     const handlers = {
       reserve: () => this.reserve(args),
-      reserveReadsOrTerminate: () => this.reserveReadsOrTerminate(args),
-      claim: () => this.claim(args),
-      disposition: () => this.disposition(args),
+      beginDelivery: () => this.beginDelivery(args),
+      terminatePlanned: () => this.terminatePlanned(args),
+      reserveMessages: () => this.reserveMessages(args),
       grantAttempts: () => this.grantAttempts(args),
       recordOutcomes: () => this.recordOutcomes(args),
       sweep: () => this.sweep(args),

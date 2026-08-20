@@ -33,14 +33,17 @@ const uid = (n) => `prem_u${String(n).padStart(5, "0")}`;
 
 // --- delivery basics ------------------------------------------------------
 
-test("a working delivery sends, records and costs exactly three DO calls", async () => {
+test("A · a working delivery sends, records and costs exactly three DO calls", async () => {
   const w = world();
+  w.L.client.reset();
   const triples = [0, 1].map((n) => triple({ uid: uid(n), fixtureId: "f1", league: "AAA", kickoffAt: KICK }));
   const { ack, stats } = await deliverJob(job(triples), env, w.deps);
   assert.equal(ack, true);
   assert.equal(stats.sent, 2);
   assert.equal(stats.attempted, 2);
-  assert.equal(stats.doCalls, 3, "a working delivery must be three round trips");
+  assert.deepEqual(w.L.client.calls, ["beginDelivery", "grantAttempts", "recordOutcomes"],
+    "a working delivery must be exactly these three round trips");
+  assert.equal(w.L.client.count(), 3);
   assert.equal(w.L.row(uid(0), "f1").state, "sent");
   assert.equal(w.sends.length, 2);
 });
@@ -223,7 +226,9 @@ test("exhausting INITIAL drops the remainder terminally with a reason", async ()
 test("an active lease is not stolen, and the message retries rather than acks", async () => {
   const w = world();
   const t = triple({ uid: uid(0), fixtureId: "f1", league: "AAA", kickoffAt: KICK });
-  await w.L.client.call("claim", { now: T0, triples: [{ ...t }] });   // another consumer
+  await w.L.client.call("beginDelivery", {
+    day: DAY, want: 8, now: T0, triples: [{ ...t }],
+  });   // another consumer holds the lease
   const { ack, stats } = await deliverJob(job([t]), env, w.deps);
   assert.equal(ack, false, "a live lease was acked away");
   assert.equal(stats.deferred, 1);
@@ -234,8 +239,10 @@ test("an active lease is not stolen, and the message retries rather than acks", 
 test("a stale generation cannot spend either pool", async () => {
   const w = world();
   const t = { uid: uid(0), fixtureId: "f1", league: "AAA", kickoffAt: KICK };
-  const [first] = await w.L.client.call("claim", { now: T0, triples: [t] });
-  await w.L.client.call("claim", { now: T0 + LEASE_MS, triples: [t] });   // reclaimed, gen 2
+  const { claimed: [first] } = await w.L.client.call("beginDelivery",
+    { day: DAY, want: 8, now: T0, triples: [t] });
+  await w.L.client.call("beginDelivery",
+    { day: DAY, want: 8, now: T0 + LEASE_MS, triples: [t] });   // reclaimed, gen 2
   const grants = await w.L.client.call("grantAttempts", {
     day: DAY, grants: [{ uid: t.uid, fixtureId: t.fixtureId, gen: first.claim_gen }],
   });
@@ -249,7 +256,8 @@ test("a stale generation cannot spend either pool", async () => {
 test("crash before APNs loses nothing: redelivery after the lease sends once", async () => {
   const w = world();
   const t = triple({ uid: uid(0), fixtureId: "f1", league: "AAA", kickoffAt: KICK });
-  await w.L.client.call("claim", { now: T0, triples: [t] });   // claimed, then died
+  await w.L.client.call("beginDelivery",
+    { day: DAY, want: 8, now: T0, triples: [t] });   // claimed, then died
   const spentBefore = await w.L.client.call("spent", { day: DAY });
   assert.equal(spentBefore.apns_initial, 0, "an attempt was charged before permission");
 
@@ -266,7 +274,8 @@ test("crash before APNs loses nothing: redelivery after the lease sends once", a
 test("crash after permission is at-least-once, charged to RETRY, and collapsed", async () => {
   const w = world();
   const t = triple({ uid: uid(0), fixtureId: "f1", league: "AAA", kickoffAt: KICK });
-  const [row] = await w.L.client.call("claim", { now: T0, triples: [t] });
+  const { claimed: [row] } = await w.L.client.call("beginDelivery",
+    { day: DAY, want: 8, now: T0, triples: [t] });
   await w.L.client.call("grantAttempts", {
     day: DAY, grants: [{ uid: t.uid, fixtureId: t.fixtureId, gen: row.claim_gen }],
   });
@@ -294,14 +303,16 @@ test("attempts are capped and exhaustion is swept to a terminal drop", async () 
 
 // --- KV refusal is terminal -----------------------------------------------
 
-test("a read-budget refusal reads nothing, sends nothing and costs one DO call", async () => {
+test("A · a read-budget refusal reads nothing, sends nothing and costs one DO call", async () => {
   const w = world();
   await w.L.client.call("reserve", { day: DAY, metric: "kv_reads", want: POOL.kv_reads });
   const before = { ...w.kv.counts };
   const triples = [0, 1].map((n) => triple({ uid: uid(n), fixtureId: "f1", league: "AAA", kickoffAt: KICK }));
+  w.L.client.reset();
   const { ack, stats } = await deliverJob(job(triples), env, w.deps);
   assert.equal(ack, true);
-  assert.equal(stats.doCalls, 1, "terminalising cost an extra round trip");
+  assert.deepEqual(w.L.client.calls, ["beginDelivery"],
+    "a refused delivery must be one round trip, terminalising included");
   assert.equal(stats.reads, 0);
   assert.equal(w.sends.length, 0);
   assert.equal(w.kv.counts.get, before.get, "the refused delivery read KV");
@@ -337,7 +348,8 @@ test("a refusal leaves sent, dropped and live-claimed rows untouched", async () 
   const done = triple({ uid: uid(0), fixtureId: "f1", league: "AAA", kickoffAt: KICK });
   await deliverJob(job([done]), env, w.deps);                       // -> sent
   const live = { uid: uid(1), fixtureId: "f1", league: "AAA", kickoffAt: KICK };
-  const [liveRow] = await w.L.client.call("claim", { now: T0, triples: [live] });
+  const { claimed: [liveRow] } = await w.L.client.call("beginDelivery",
+    { day: DAY, want: 8, now: T0, triples: [live] });
 
   await w.L.client.call("reserve", { day: DAY, metric: "kv_reads", want: POOL.kv_reads });
   const triples = [0, 1, 2].map((n) => triple({ uid: uid(n), fixtureId: "f1", league: "AAA", kickoffAt: KICK }));
@@ -358,16 +370,36 @@ test("the pre-enqueue reservation covers four fully-working deliveries", () => {
     { queue_ops: 7, worker_requests: 4, do_requests: 12 });
 });
 
-test("four working deliveries of one message cost exactly twelve DO calls", async () => {
+test("A · four working deliveries of one message cost exactly twelve real RPCs", async () => {
   const w = world({ sendResult: () => ({ ok: false, status: 503 }) });
   const t = triple({ uid: uid(0), fixtureId: "f1", league: "AAA", kickoffAt: KICK });
-  let calls = 0;
-  for (let i = 0; i < 4; i++) {
-    const { stats } = await deliverJob(job([t]), env, w.deps);
-    assert.equal(stats.doCalls, 3, `delivery ${i + 1} was not a full three-call sequence`);
-    calls += stats.doCalls;
-  }
-  assert.equal(calls, PER_MESSAGE_WORST_CASE.do_requests);
+  w.L.client.reset();
+  for (let i = 0; i < 4; i++) await deliverJob(job([t]), env, w.deps);
+  assert.equal(w.L.client.count(), PER_MESSAGE_WORST_CASE.do_requests,
+    `four deliveries made ${w.L.client.count()} round trips`);
+  assert.equal(w.L.client.count(), 12);
+});
+
+test("A · a 45-triple job still costs three RPCs, not one per triple", async () => {
+  const w = world({ leagues: [["AAA", 45, ["f1"]]] });
+  const triples = Array.from({ length: 45 }, (_, n) =>
+    triple({ uid: uid(n), fixtureId: "f1", league: "AAA", kickoffAt: KICK }));
+  w.L.client.reset();
+  await deliverJob(job(triples), env, w.deps);
+  assert.equal(w.L.client.count(), 3, "the per-triple disposition RPC is back");
+});
+
+test("A · unclaimed triples cost no extra round trip", async () => {
+  const w = world({ leagues: [["AAA", 3, ["f1"]]] });
+  const triples = [0, 1, 2].map((n) =>
+    triple({ uid: uid(n), fixtureId: "f1", league: "AAA", kickoffAt: KICK }));
+  // Two are already held by another consumer.
+  await w.L.client.call("beginDelivery",
+    { day: DAY, want: 12, now: T0, triples: triples.slice(0, 2) });
+  w.L.client.reset();
+  const { ack } = await deliverJob(job(triples), env, w.deps);
+  assert.equal(ack, false, "live leases must hold the message open");
+  assert.equal(w.L.client.count(), 3);
 });
 
 // --- eligibility helper in isolation ---------------------------------------
@@ -375,8 +407,86 @@ test("four working deliveries of one message cost exactly twelve DO calls", asyn
 test("stillEligible reports the first failing reason and stops", async () => {
   const w = world();
   w.kv.store.delete(`push:${uid(0)}`);
-  const result = await stillEligible(w.deps, {
-    uid: uid(0), fixtureId: "f1", league: "AAA", competition: "PL",
+  const context = { picks: new Map(), slates: new Map() };
+  const result = await stillEligible(w.deps, context, {
+    uid: uid(0), fixtureId: "f1", league: "AAA", competition: "PL", period: "7",
   });
-  assert.deepEqual(result, { ok: false, reason: "no-token" });
+  assert.deepEqual({ ...result }, { ok: false, reason: "no-token" });
+});
+
+// --- B · actual KV reads never exceed what was reserved --------------------
+
+test("B · 45 recipients cost exactly two reads each plus the fixed context", async () => {
+  const w = world({ leagues: [["AAA", 45, ["f1"]]] });
+  const triples = Array.from({ length: 45 }, (_, n) =>
+    triple({ uid: uid(n), fixtureId: "f1", league: "AAA", kickoffAt: KICK }));
+  const before = w.kv.counts.get;
+  const { stats } = await deliverJob(job(triples), env, w.deps);
+  const actual = w.kv.counts.get - before;
+  assert.equal(stats.sent, 45);
+  assert.ok(actual <= stats.reads,
+    `spent ${actual} reads against a reservation of ${stats.reads}`);
+  // Two per recipient, one picks, one slate.
+  assert.equal(actual, 45 * 2 + 2);
+});
+
+test("B · three fixtures and three leagues load their context once each", async () => {
+  const seed = {};
+  for (const [i, code] of ["AAA", "BBB", "CCC"].entries()) {
+    seedLeague(seed, { code, size: 5, fixtureIds: ["f1", "f2", "f3"], offset: i * 5 });
+  }
+  for (const id of ["f1", "f2", "f3"]) seed[`picks:${id}`] = {};
+  const kv = kvShim(seed);
+  const L = ledgerObject();
+  const sends = [];
+  const deps = harnessDeps({ kv, client: L.client, now: () => T0, sends });
+  const triples = [];
+  for (const [i, code] of ["AAA", "BBB", "CCC"].entries()) {
+    for (const id of ["f1", "f2", "f3"]) {
+      triples.push(triple({ uid: uid(i * 5), fixtureId: id, league: code, kickoffAt: KICK }));
+    }
+  }
+  const before = kv.counts.get;
+  const { stats } = await deliverJob(job(triples), env, deps);
+  const actual = kv.counts.get - before;
+  assert.ok(actual <= stats.reads, `spent ${actual} against a reservation of ${stats.reads}`);
+  // 9 triples x 2, plus 3 distinct fixtures and 3 distinct (league, period).
+  assert.equal(actual, 9 * 2 + 3 + 3);
+});
+
+test("B · overlapping recipients on one fixture read the pick map once", async () => {
+  const w = world({ leagues: [["AAA", 20, ["f1"]]] });
+  const triples = Array.from({ length: 20 }, (_, n) =>
+    triple({ uid: uid(n), fixtureId: "f1", league: "AAA", kickoffAt: KICK }));
+  const before = w.kv.counts.get;
+  const { stats } = await deliverJob(job(triples), env, w.deps);
+  const actual = w.kv.counts.get - before;
+  assert.equal(actual, 20 * 2 + 2, "the pick map or slate was read per recipient");
+  assert.ok(actual <= stats.reads);
+});
+
+test("B · a job at the documented bound never exceeds its reservation", async () => {
+  const seed = {};
+  for (const [i, code] of ["AAA", "BBB", "CCC"].entries()) {
+    seedLeague(seed, { code, size: 15, fixtureIds: ["f1", "f2", "f3"], offset: i * 15 });
+  }
+  for (const id of ["f1", "f2", "f3"]) seed[`picks:${id}`] = {};
+  const kv = kvShim(seed);
+  const L = ledgerObject();
+  const deps = harnessDeps({ kv, client: L.client, now: () => T0, sends: [] });
+  // 45 triples spread over the maximum three fixtures and three leagues.
+  const triples = [];
+  for (const [i, code] of ["AAA", "BBB", "CCC"].entries()) {
+    for (const [j, id] of ["f1", "f2", "f3"].entries()) {
+      for (let k = 0; k < 5; k++) {
+        triples.push(triple({ uid: uid(i * 15 + j * 5 + k), fixtureId: id, league: code, kickoffAt: KICK }));
+      }
+    }
+  }
+  assert.equal(triples.length, 45);
+  const before = kv.counts.get;
+  const { stats } = await deliverJob(job(triples), env, deps);
+  const actual = kv.counts.get - before;
+  assert.equal(stats.reads, worstCaseReads(45));
+  assert.ok(actual <= stats.reads, `spent ${actual} against ${stats.reads}`);
 });

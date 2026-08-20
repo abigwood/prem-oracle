@@ -49,9 +49,10 @@ import {
 import { apnsConfigured, sendPush } from "./apns.js";
 import { NotifyLedger, utcDay } from "./notify/ledger.js";
 import {
-  dueFixtures, planFixture, slateFixtureKey, slateFixturePrefix,
+  dueFixtures, planWindow, slateFixtureKey, slateFixturePrefix,
 } from "./notify/planner.js";
 import { deliverJob } from "./notify/consumer.js";
+import { verify as verifySlateIndex, repair as repairSlateIndex } from "./notify/backfill.js";
 import { RETRY_DELAY_S as NOTIFY_RETRY_DELAY_S } from "./notify/ledger.js";
 import { autoSettleResults, feedForCompetition } from "./results_feed.js";
 import {
@@ -1159,6 +1160,33 @@ async function getNotificationPrefs(env, url) {
 
 // Migration control surface. Secret-gated, and deliberately not wired to any
 // automatic trigger: a stage only ever runs because somebody asked for it.
+/**
+ * The slate-index backfill, behind the migration secret.
+ *
+ * Deliberately manual and deliberately NOT called from the cron. Every slate
+ * published before the index existed has no key, so the index has to be
+ * reconciled once and PROVED before the notification bindings are enabled —
+ * an unverified index means some leagues silently get no reminders at all.
+ *
+ *   { action: "verify" }   read-only; the ship gate
+ *   { action: "repair" }   writes missing keys, removes stale ones, re-verifies
+ *
+ * Both are resumable via `cursor` and safe to run again.
+ */
+async function slateIndexAdmin(env, body) {
+  if (!env.MIGRATION_SECRET || body.secret !== env.MIGRATION_SECRET) {
+    return json({ error: "forbidden" }, 403, env);
+  }
+  const options = {
+    cursor: body.cursor || undefined,
+    limit: Number(body.limit) || undefined,
+    maxPages: Number(body.maxPages) || undefined,
+  };
+  if (body.action === "verify") return json({ ok: true, ...(await verifySlateIndex(env, options)) }, 200, env);
+  if (body.action === "repair") return json({ ok: true, ...(await repairSlateIndex(env, options)) }, 200, env);
+  return json({ error: "action must be verify or repair" }, 400, env);
+}
+
 async function migrationAdmin(env, body) {
   if (!env.MIGRATION_SECRET || body.secret !== env.MIGRATION_SECRET) {
     return json({ error: "forbidden" }, 403, env);
@@ -1603,8 +1631,16 @@ const notifyEnabled = (env) => !!(env.NOTIFY_QUEUE && env.NOTIFY_LEDGER);
  */
 export function ledgerClient(env, name = "notify-ledger") {
   const stub = env.NOTIFY_LEDGER.get(env.NOTIFY_LEDGER.idFromName(name));
+  // The counter is on the CLIENT, so what it reports is the number of round
+  // trips that actually happened rather than the number the caller believes it
+  // made. A hand-incremented tally is exactly the evidence a call-count claim
+  // must not rest on.
+  const calls = [];
   return {
+    calls,
+    count: () => calls.length,
     async call(op, args = {}) {
+      calls.push(op);
       const response = await stub.fetch("https://notify-ledger/rpc", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -1626,15 +1662,19 @@ function notifyDeps(env, nowMs) {
     sendPush,
     leaguesForFixture: (fixtureId) => leaguesForFixture(env, fixtureId),
     readPicks: async (fixtureId) => (await kvGet(env, `picks:${fixtureId}`)) || {},
+    readSlate: (code, period) => kvGet(env, slateKey(code, period)),
+    /** The period each league published this fixture in, from the index value. */
+    periodsForFixture: async (fixtureId, codes) => {
+      const out = new Map();
+      for (const code of codes) {
+        const hint = await kvGet(env, slateFixtureKey(String(fixtureId), code));
+        if (hint?.period != null) out.set(code, String(hint.period));
+      }
+      return out;
+    },
     readPush: (uid) => kvGet(env, `push:${uid}`),
     dropPushToken: (uid) => env.KV.delete(`push:${uid}`),
     isMember: async (code, uid) => !!(await kvGet(env, leagueMemberKey(code, uid))),
-    stillInSlate: async (code, fixtureId) => {
-      const hint = await kvGet(env, slateFixtureKey(String(fixtureId), code));
-      if (!hint?.period) return false;
-      const slate = await readPublishedSlate(env, code, hint.period);
-      return !!slate && (slate.fixtureIds || []).map(String).includes(String(fixtureId));
-    },
     /**
      * Membership from KEY NAMES only. One list per due league, no value reads,
      * and no per-member fan-out anywhere in the cron invocation.
@@ -1672,19 +1712,14 @@ async function planKickoffReminders(env, nowMs = Date.now()) {
   const ledger = ledgerClient(env);
   const deps = notifyDeps(env, nowMs);
   const due = dueFixtures(await allFixtures(env), nowMs);
-  let planned = 0;
-  let enqueued = 0;
-  for (const match of due) {
-    const competition = competitionOfFixture(match.id) || DEFAULT_COMPETITION;
-    const result = await planFixture({ match, competition, env, ledger, deps, now: nowMs });
-    planned += result.triples;
-    for (const job of result.jobs) {
-      await env.NOTIFY_QUEUE.send(job);
-      enqueued++;
-    }
-  }
+  const result = await planWindow({
+    matches: due,
+    competitionOf: (match) => competitionOfFixture(match.id) || DEFAULT_COMPETITION,
+    ledger, deps, now: nowMs,
+  });
+  for (const job of result.jobs) await env.NOTIFY_QUEUE.send(job);
   await ledger.call("sweep", { day, now: nowMs });
-  return { planned, jobs: enqueued };
+  return { planned: result.triples, jobs: result.jobs.length, refused: result.refused };
 }
 
 // A host who never answers must not ambush their league with a full card two
@@ -2115,6 +2150,7 @@ async function route(request, env) {
       if (path === "/push-token") return await savePushToken(env, body);
       if (path === "/notification-prefs") return await setNotificationPrefs(env, body);
       if (path === "/admin/migration") return await migrationAdmin(env, body);
+      if (path === "/admin/slate-index") return await slateIndexAdmin(env, body);
       if (path === "/settle") return await settle(env, body);
     }
     return json({ error: "not found" }, 404, env);

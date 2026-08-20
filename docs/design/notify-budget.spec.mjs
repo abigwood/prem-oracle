@@ -1,8 +1,8 @@
 // EXECUTABLE SPECIFICATION — the arithmetic authority for Gate 0.
 //
-// Every figure in the Gate-0 operation and budget tables is computed here, so
-// the daily caps, the rolling-31-day caps and the normal/worst/max-retry
-// columns cannot drift apart in prose. Verified by test/budget.test.mjs.
+// Every figure in the Gate-0 operation, budget and capacity tables is computed
+// here, so caps, scenarios and capacity claims cannot drift apart in prose.
+// Verified by test/budget.test.mjs.
 
 /** Cloudflare Workers PAID included monthly allowances (from the pricing docs). */
 export const INCLUDED = {
@@ -17,79 +17,116 @@ export const INCLUDED = {
   kv_writes: 1_000_000,
 };
 
+/**
+ * The planner filters saved picks BEFORE creating jobs.
+ *
+ * It costs one bounded `picks:<fixtureId>` read per due fixture — ten reads for
+ * a ten-fixture window, independent of how many recipients there are — and it
+ * is the difference between enqueueing work for everybody and enqueueing it for
+ * the people who still owe a prediction. Queue message counts below are
+ * therefore based on PLANNED triples, never on successful APNs sends.
+ *
+ * The consumer still re-reads picks authoritatively before sending: this filter
+ * is an economy, not the correctness check (D2 requires the re-check).
+ */
+export const PLANNER = {
+  FILTERS_SAVED_PICKS: true,
+  PICK_READS_PER_FIXTURE: 1,
+  /** Reserved before sendBatch, because enqueueing makes these unavoidable. */
+  PER_MESSAGE_WORST_CASE: { queue_ops: 7, worker_requests: 4, do_requests: 8 },
+};
+
 export const DESIGN = {
-  JOB_TRIPLES: 45,          // triples per queue message
-  JOB_KV_READS: 96,         // <=45 push + <=45 member + <=3 picks + <=3 slate
-  MAX_RETRIES: 3,           // queue max_retries -> up to 4 deliveries
-  /**
-   * Documented: "A message that was retried 3 times (the default), fails
-   * delivery on the fourth time ... would incur five (5) read operations."
-   * Used as the read ceiling even though no DLQ is attached, which is the
-   * conservative direction.
-   */
-  QUEUE_READS_MAX: 5,
+  JOB_TRIPLES: 45,
+  KV_READS_PER_TRIPLE: 2,       // push: + member:
+  KV_READS_FIXED: 6,            // <=3 picks: + <=3 custom_slate: per message
+  MAX_RETRIES: 3,
+  DELIVERIES: 4,
+  QUEUE_READS_MAX: 5,           // documented ceiling for a retried message
   QUEUE_WRITE: 1,
   QUEUE_DELETE: 1,
-  CRON_TICKS: 96,           // 15-minute cadence
-  PLAN_DO_CALLS: 20,        // 10 fixtures x (lease + sweep)
+  CRON_TICKS: 96,
+  FIXTURES_PER_WINDOW: 10,
   CONSUMER_CPU_MS: 10,
   CRON_CPU_MS: 50,
   DO_MEM_GB: 0.128,
   DO_CALL_MS: 10,
   DAYS: 31,
-  APNS_ATTEMPT_CAP: 15_000, // per UTC day, FAILURES INCLUDED
 };
 
-const { JOB_TRIPLES, JOB_KV_READS, QUEUE_READS_MAX, QUEUE_WRITE, QUEUE_DELETE,
-  CRON_TICKS, PLAN_DO_CALLS, CONSUMER_CPU_MS, CRON_CPU_MS, DO_MEM_GB, DO_CALL_MS,
-  APNS_ATTEMPT_CAP } = DESIGN;
+/** Two pools, so a retry can never starve a recipient's first attempt. */
+export const POOL = {
+  apns_initial: 10_000,
+  apns_retry: 5_000,
+  kv_reads: 96_000,
+};
+export const APNS_ATTEMPT_CAP = POOL.apns_initial + POOL.apns_retry;
+
+const D = DESIGN;
+const readsPerDelivery = D.JOB_TRIPLES * D.KV_READS_PER_TRIPLE + D.KV_READS_FIXED;  // 96
 
 /**
  * One day of the notification path.
  *
- * `deliveriesPerMessage` models redelivery. The APNs budget is reserved BEFORE
- * each fetch, so once the cap is reached the remaining deliveries are acked and
- * dropped: they cost a queue read and a DO call, but no APNs fetch and no
- * authoritative KV reads. That early stop is why the max-retry column is not
- * simply four times the worst-shape one.
+ * `planned` is the triple count AFTER the planner's pick filter. `deliveries`
+ * models redelivery; the conservative ceiling assumes every message is
+ * delivered the full four times even though a message whose remainder is
+ * budget-dropped is acked and stops coming back.
+ *
+ * Ordering matters to the arithmetic: a delivery reserves its worst-case KV
+ * read allowance BEFORE any read, so a retry delivery that then finds no APNs
+ * budget has still spent its reads. That is deliberate — correctness over
+ * optimistic accounting — and it is why KV reads, not attempts, is the metric
+ * that binds first.
  */
-export function modelDay({ eligible, deliveriesPerMessage = 1, cap = APNS_ATTEMPT_CAP }) {
-  const messages = Math.ceil(eligible / JOB_TRIPLES);
+export function modelDay({ planned, deliveriesPerMessage = 1 }) {
+  const messages = Math.ceil(planned / D.JOB_TRIPLES);
   const deliveries = messages * deliveriesPerMessage;
 
-  // Deliveries are served in order until the attempt budget runs out.
-  const attempts = Math.min(deliveries * JOB_TRIPLES, cap);
-  const workingDeliveries = Math.ceil(attempts / JOB_TRIPLES);
-  const droppedDeliveries = deliveries - workingDeliveries;
+  // Attempts, drawn from the pool each one belongs in.
+  const wantInitial = planned;
+  const initial = Math.min(wantInitial, POOL.apns_initial);
+  const wantRetry = planned * (deliveriesPerMessage - 1);
+  const retry = Math.min(wantRetry, POOL.apns_retry);
 
-  const queueReads = deliveriesPerMessage === 1 ? 1 : QUEUE_READS_MAX;
-  const doCalls = deliveries * 2 + PLAN_DO_CALLS;   // (reserve+claim), (record|drop)
+  // Reads are reserved per delivery, capped by their own pool.
+  const affordableDeliveries = Math.min(deliveries, Math.floor(POOL.kv_reads / readsPerDelivery));
+  const kvReads = affordableDeliveries * readsPerDelivery;
+
+  const attempts = initial + retry;
+  const doCalls = deliveries * 2 + D.FIXTURES_PER_WINDOW * 2;
+  const queueReads = deliveriesPerMessage === 1 ? 1 : D.QUEUE_READS_MAX;
 
   return {
+    planned, messages, deliveries,
+    apns_initial: initial,
+    apns_retry: retry,
     apns_attempts: attempts,
-    messages,
-    deliveries,
-    working_deliveries: workingDeliveries,
-    dropped_deliveries: droppedDeliveries,
-    queue_ops: messages * (QUEUE_WRITE + queueReads + QUEUE_DELETE),
+    unmet_retry: wantRetry - retry,
+    queue_ops: messages * (D.QUEUE_WRITE + queueReads + D.QUEUE_DELETE),
     do_requests: doCalls,
-    do_rows_written: attempts * 2 + deliveries,      // claim + outcome, plus budget rows
+    do_rows_written: attempts * 2 + deliveries,
     do_rows_read: attempts * 5,
-    do_duration_gbs: +(doCalls * DO_CALL_MS / 1000 * DO_MEM_GB).toFixed(2),
-    worker_requests: CRON_TICKS + deliveries,
-    worker_cpu_ms: deliveries * CONSUMER_CPU_MS + CRON_TICKS * CRON_CPU_MS,
-    kv_reads: workingDeliveries * JOB_KV_READS,      // dropped deliveries read nothing
+    do_duration_gbs: +(doCalls * D.DO_CALL_MS / 1000 * D.DO_MEM_GB).toFixed(2),
+    worker_requests: D.CRON_TICKS + deliveries,
+    worker_cpu_ms: deliveries * D.CONSUMER_CPU_MS + D.CRON_TICKS * D.CRON_CPU_MS,
+    kv_reads: kvReads,
   };
 }
 
-/** 1,000 recipients. Worst shape = 10 due fixtures and nobody has picked. */
+/**
+ * 1,000 recipients, ten due fixtures.
+ * normal      — the planner's pick filter leaves ~30% of candidates planned
+ * worst       — nobody has saved a pick, so every candidate is planned
+ * max_retry   — worst shape, every message delivered the full four times
+ */
+export const CANDIDATES = 10_000;
 export const SCENARIOS = {
-  normal: { day: modelDay({ eligible: 3_000 }), days: 20 },
-  worst: { day: modelDay({ eligible: 10_000 }), days: DESIGN.DAYS },
-  max_retry: { day: modelDay({ eligible: 10_000, deliveriesPerMessage: 4 }), days: DESIGN.DAYS },
+  normal: { day: modelDay({ planned: 3_000 }), days: 20 },
+  worst: { day: modelDay({ planned: CANDIDATES }), days: D.DAYS },
+  max_retry: { day: modelDay({ planned: CANDIDATES, deliveriesPerMessage: D.DELIVERIES }), days: D.DAYS },
 };
 
-/** Daily caps, each set at monthly / 31 so the daily guard cannot breach it. */
 export const MONTHLY_CAP = {
   queue_ops: 232_500,
   do_requests: 232_500,
@@ -98,19 +135,32 @@ export const MONTHLY_CAP = {
   do_duration_gbs: 9_920,
   worker_requests: 148_800,
   worker_cpu_ms: 1_798_000,
-  kv_reads: 2_976_000,
+  kv_reads: POOL.kv_reads * D.DAYS,
   kv_writes: 17_980,
-  apns_attempts: 465_000,
+  apns_attempts: APNS_ATTEMPT_CAP * D.DAYS,
 };
 export const DAILY_CAP = Object.fromEntries(
-  Object.entries(MONTHLY_CAP).map(([k, v]) => [k, Math.floor(v / DESIGN.DAYS)]));
+  Object.entries(MONTHLY_CAP).map(([k, v]) => [k, Math.floor(v / D.DAYS)]));
 
-export const KV_WRITES_PER_DAY = 357;   // slatefx: publishes, independent of sends
+export const KV_WRITES_PER_DAY = 357;
 
 export const monthly = (name, metric) => {
   const { day, days } = SCENARIOS[name];
-  return metric === "kv_writes" ? KV_WRITES_PER_DAY * DESIGN.DAYS : day[metric] * days;
+  return metric === "kv_writes" ? KV_WRITES_PER_DAY * D.DAYS : day[metric] * days;
 };
 
 export const METRICS = ["queue_ops", "do_requests", "do_rows_written", "do_rows_read",
   "do_duration_gbs", "worker_requests", "worker_cpu_ms", "kv_reads", "apns_attempts"];
+
+/**
+ * Capacity, stated honestly.
+ *
+ * With ten fixtures and up to four deliveries, ONE user can absorb forty
+ * attempts — which is why the earlier "10 attempts per user" figure, and the
+ * 50%-margin claim built on it, were wrong.
+ */
+export const capacity = (plannedFixturesPerUser, deliveries = 1) => ({
+  attempts_per_user: plannedFixturesPerUser * deliveries,
+  on_total_cap: Math.floor(APNS_ATTEMPT_CAP / (plannedFixturesPerUser * deliveries)),
+  on_initial_pool: Math.floor(POOL.apns_initial / plannedFixturesPerUser),
+});

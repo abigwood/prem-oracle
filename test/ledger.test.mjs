@@ -3,7 +3,8 @@
 // against real SQLite.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { ledger, LEASE_MS, MAX_ATTEMPTS, APNS_ATTEMPT_CAP } from "../docs/design/notify-ledger.spec.mjs";
+import { ledger, LEASE_MS, MAX_ATTEMPTS, APNS_ATTEMPT_CAP, POOL, RETRY_DELAY_S,
+  REMINDER_WINDOW_S, deliverMessage, PER_MESSAGE_WORST_CASE } from "../docs/design/notify-ledger.spec.mjs";
 
 const T0 = 1_800_000_000_000;
 const KICK = T0 + 60 * 60 * 1000;
@@ -219,70 +220,297 @@ test("prune · clears past fixtures only", () => {
 
 // --- D · APNs ATTEMPT budget ---------------------------------------------
 
-test("budget · a normal day reserves attempts and never reaches the cap", () => {
+test("budget · a normal day reserves attempts and never reaches either pool cap", () => {
   const l = ledger();
   let total = 0;
-  for (let job = 0; job < 67; job++) total += l.reserve({ day: DAY, want: 45 }).granted;
+  for (let job = 0; job < 67; job++) total += l.reserve({ day: DAY, pool: "apns_initial", want: 45 }).granted;
   assert.equal(total, 3_015);
-  assert.ok(total < APNS_ATTEMPT_CAP);
-});
-
-test("budget · wholesale failure consumes budget: failures pay for themselves", () => {
-  const l = ledger();
-  // Every job fails all 45 sends and is redelivered four times.
-  let attempts = 0;
-  let stopped = 0;
-  for (let delivery = 0; delivery < 235 * 4; delivery++) {
-    const { granted } = l.reserve({ day: DAY, want: 45 });
-    if (granted === 0) { stopped++; continue; }     // acked and dropped, no fetch
-    attempts += granted;
-  }
-  assert.equal(attempts, APNS_ATTEMPT_CAP, "the cap was overshot or undershot");
-  assert.ok(stopped > 0, "the day never actually stopped");
-  // 15,000 / 45 = 333.33 -> 333 full jobs plus one partial grant of 15.
-  assert.equal(Math.ceil(APNS_ATTEMPT_CAP / 45), 334);
+  assert.ok(total < POOL.apns_initial);
 });
 
 test("budget · a partial grant is honoured at the boundary, not refused", () => {
   const l = ledger();
-  l.reserve({ day: DAY, want: APNS_ATTEMPT_CAP - 10 });
-  const edge = l.reserve({ day: DAY, want: 45 });
+  l.reserve({ day: DAY, pool: "apns_initial", want: POOL.apns_initial - 10 });
+  const edge = l.reserve({ day: DAY, pool: "apns_initial", want: 45 });
   assert.equal(edge.granted, 10, "the boundary job was refused instead of trimmed");
   assert.equal(edge.remaining, 0);
-  assert.equal(l.reserve({ day: DAY, want: 1 }).granted, 0);
+  assert.equal(l.reserve({ day: DAY, pool: "apns_initial", want: 1 }).granted, 0);
 });
 
-test("budget · concurrent consumers cannot overshoot the cap", () => {
+test("budget · 40 interleaved consumers cannot overshoot a pool", () => {
   const l = ledger();
-  // Interleaved reservations, as separate consumers would issue them. The
-  // Durable Object is single-threaded, so each reserve() is atomic.
   const consumers = Array.from({ length: 40 }, () => 0);
-  let round = 0;
-  while (round < 20) {
-    for (let c = 0; c < consumers.length; c++) consumers[c] += l.reserve({ day: DAY, want: 45 }).granted;
-    round++;
+  for (let round = 0; round < 20; round++) {
+    for (let c = 0; c < consumers.length; c++) {
+      consumers[c] += l.reserve({ day: DAY, pool: "apns_initial", want: 45 }).granted;
+    }
   }
   const total = consumers.reduce((a, b) => a + b, 0);
-  assert.equal(total, APNS_ATTEMPT_CAP, `40 consumers spent ${total}, cap is ${APNS_ATTEMPT_CAP}`);
-  assert.equal(l.reserve({ day: DAY, want: 1 }).granted, 0);
+  assert.equal(total, POOL.apns_initial, `40 consumers spent ${total}, pool is ${POOL.apns_initial}`);
+  assert.equal(l.reserve({ day: DAY, pool: "apns_initial", want: 1 }).granted, 0);
 });
 
-test("budget · each UTC day gets its own allowance", () => {
+test("budget · each UTC day gets its own allowance, per pool", () => {
   const l = ledger();
-  l.reserve({ day: DAY, want: APNS_ATTEMPT_CAP });
-  assert.equal(l.reserve({ day: DAY, want: 1 }).granted, 0);
-  assert.equal(l.reserve({ day: "2026-09-13", want: 45 }).granted, 45);
+  l.reserve({ day: DAY, pool: "apns_initial", want: POOL.apns_initial });
+  assert.equal(l.reserve({ day: DAY, pool: "apns_initial", want: 1 }).granted, 0);
+  assert.equal(l.reserve({ day: DAY, pool: "apns_retry", want: 1 }).granted, 1, "pools are not independent");
+  assert.equal(l.reserve({ day: "2026-09-13", pool: "apns_initial", want: 45 }).granted, 45);
 });
 
 test("budget · exhaustion drops the remaining work and records why", () => {
   const l = ledger();
-  l.reserve({ day: DAY, want: APNS_ATTEMPT_CAP });
+  l.reserve({ day: DAY, pool: "apns_initial", want: POOL.apns_initial });
   const [a] = l.claim("u1", "f1", ctx);
-  const { granted } = l.reserve({ day: DAY, want: 1 });
-  assert.equal(granted, 0);
-  // No fetch happens. The owner drops its own claim, fenced, and logs it.
+  assert.equal(l.reserve({ day: DAY, pool: "apns_initial", want: 1 }).granted, 0);
   assert.equal(l.drop("u1", "f1", a.claim_gen, "budget-exhausted"), 1);
   l.logDrop(DAY, "f1", "budget-exhausted", 1, T0);
   assert.equal(l.row("u1", "f1").state, "dropped");
   assert.deepEqual(l.drops().map((d) => d.reason), ["budget-exhausted"]);
+});
+
+// ==========================================================================
+// A · two pools: a retry can never starve a first attempt
+// ==========================================================================
+
+test("A · the pools sum to the hard ceiling and are separately capped", () => {
+  assert.equal(POOL.apns_initial + POOL.apns_retry, APNS_ATTEMPT_CAP);
+  assert.equal(APNS_ATTEMPT_CAP, 15_000);
+});
+
+test("A · a first attempt draws INITIAL, every later one draws RETRY", () => {
+  const l = ledger();
+  const [a] = l.claim("u1", "f1", ctx);
+  assert.equal(l.poolFor(a), "apns_initial");
+  l.markTried("u1", "f1", a.claim_gen);
+  l.fail("u1", "f1", a.claim_gen);
+  const [b] = l.claim("u1", "f1", { ...ctx, now: T0 + 1 });
+  assert.equal(l.poolFor(b), "apns_retry", "a retry drew from the first-attempt pool");
+});
+
+test("A · ADVERSARIAL: retries arriving first cannot consume first-attempt capacity", () => {
+  const l = ledger();
+  // 5,000 retry attempts land before any of the later first deliveries.
+  let retriesTaken = 0;
+  for (let i = 0; i < 8_000; i++) {
+    if (l.reserve({ day: DAY, pool: "apns_retry", want: 1 }).granted) retriesTaken++;
+  }
+  assert.equal(retriesTaken, POOL.apns_retry, "the retry pool was not capped at 5,000");
+
+  // Every one of the 10,000 first attempts is still available afterwards.
+  let firstTaken = 0;
+  for (let i = 0; i < POOL.apns_initial; i++) {
+    if (l.reserve({ day: DAY, pool: "apns_initial", want: 1 }).granted) firstTaken++;
+  }
+  assert.equal(firstTaken, 10_000, "retries starved first delivery");
+
+  const spent = l.spent(DAY);
+  assert.equal(spent.apns_initial + spent.apns_retry, APNS_ATTEMPT_CAP,
+    "total attempts exceeded the combined ceiling");
+  assert.equal(l.reserve({ day: DAY, pool: "apns_initial", want: 1 }).granted, 0);
+  assert.equal(l.reserve({ day: DAY, pool: "apns_retry", want: 1 }).granted, 0);
+});
+
+test("A · interleaved first attempts and retries never exceed either pool", () => {
+  const l = ledger();
+  let first = 0, retry = 0;
+  for (let round = 0; round < 12_000; round++) {
+    if (l.reserve({ day: DAY, pool: "apns_initial", want: 1 }).granted) first++;
+    if (l.reserve({ day: DAY, pool: "apns_retry", want: 1 }).granted) retry++;
+  }
+  assert.equal(first, POOL.apns_initial);
+  assert.equal(retry, POOL.apns_retry);
+  assert.equal(first + retry, APNS_ATTEMPT_CAP);
+});
+
+test("A · the honest capacity arithmetic", () => {
+  const FIXTURES = 10, DELIVERIES = 4;
+  // One attempt each across ten fixtures.
+  assert.equal(APNS_ATTEMPT_CAP / FIXTURES, 1_500);
+  // All four deliveries across ten fixtures is FORTY attempts per user.
+  assert.equal(APNS_ATTEMPT_CAP / (FIXTURES * DELIVERIES), 375);
+  // The INITIAL pool is what actually protects first delivery.
+  assert.equal(POOL.apns_initial / FIXTURES, 1_000);
+  // At 1,000 users, first attempts exactly consume INITIAL; RETRY holds 5,000.
+  assert.equal(1_000 * FIXTURES, POOL.apns_initial);
+  assert.equal(POOL.apns_retry, 5_000);
+});
+
+// ==========================================================================
+// B · crashed lease versus queue redelivery
+// ==========================================================================
+
+test("B · retry_delay outlives the lease and fits the reminder window", () => {
+  assert.ok(RETRY_DELAY_S * 1000 > LEASE_MS,
+    "a redelivery could land while the crashed lease is still live");
+  // Four deliveries: three retry gaps plus one lease, well inside the window.
+  const worst = 3 * RETRY_DELAY_S + LEASE_MS / 1000;
+  assert.ok(worst < REMINDER_WINDOW_S,
+    `the retry sequence takes ${worst}s, longer than the ${REMINDER_WINDOW_S}s window`);
+  assert.equal(worst, 570);
+});
+
+test("B · a live claim from a crashed delivery is RETRIED, never acked away", () => {
+  const l = ledger();
+  l.claim("u1", "f1", ctx);                          // delivery 1 claims, then crashes
+  // Delivery 2 arrives while the lease is still live.
+  const out = deliverMessage(l, { day: DAY, now: T0 + 1_000, kickoff: KICK, triples: [["u1", "f1"]] });
+  assert.equal(out.action, "retry", "the reminder was acked away while still owed");
+  assert.equal(out.deferred, 1);
+  assert.equal(out.attempted, 0);
+  assert.equal(l.row("u1", "f1").state, "claimed");
+});
+
+test("B · terminal triples are acked, not retried forever", () => {
+  const l = ledger();
+  const [a] = l.claim("u1", "f1", ctx);
+  l.sent("u1", "f1", a.claim_gen, T0 + 5);
+  const [b] = l.claim("u2", "f1", ctx);
+  l.drop("u2", "f1", b.claim_gen, "ineligible");
+  const out = deliverMessage(l, { day: DAY, now: T0 + 10, kickoff: KICK,
+    triples: [["u1", "f1"], ["u2", "f1"]] });
+  assert.equal(out.action, "ack");
+  assert.equal(out.attempted, 0, "a terminal triple was re-sent");
+});
+
+test("B · explicitly failed triples are reclaimed immediately on redelivery", () => {
+  const l = ledger();
+  const [a] = l.claim("u1", "f1", ctx);
+  l.markTried("u1", "f1", a.claim_gen);
+  l.fail("u1", "f1", a.claim_gen);
+  const out = deliverMessage(l, { day: DAY, now: T0 + 1, kickoff: KICK, triples: [["u1", "f1"]] });
+  assert.equal(out.action, "ack");
+  assert.equal(out.sent, 1, "a failed triple was not retried");
+  assert.equal(l.spent(DAY).apns_retry, 1, "the retry did not draw from the retry pool");
+});
+
+test("B · PRODUCTION SEQUENCE: crash BEFORE APNs is not lost", () => {
+  const l = ledger();
+  // Delivery 1: claims, then the isolate dies before any fetch.
+  l.claim("u1", "f1", ctx);
+  // Delivery 2 at retry_delay: the lease has expired, so it is reclaimable.
+  const now = T0 + RETRY_DELAY_S * 1000;
+  assert.ok(now > T0 + LEASE_MS);
+  const out = deliverMessage(l, { day: DAY, now, kickoff: KICK, triples: [["u1", "f1"]] });
+  assert.equal(out.action, "ack");
+  assert.equal(out.sent, 1, "the reminder was lost");
+  assert.equal(l.row("u1", "f1").state, "sent");
+  assert.equal(l.row("u1", "f1").claim_gen, 2, "the reclaim did not re-fence");
+  // Nothing was delivered twice: only one attempt was ever reserved.
+  assert.equal(l.spent(DAY).apns_initial, 1);
+});
+
+test("B · PRODUCTION SEQUENCE: crash AFTER APNs is at-least-once, not lost", () => {
+  const l = ledger();
+  const [a] = l.claim("u1", "f1", ctx);
+  l.reserve({ day: DAY, pool: "apns_initial", want: 1 });
+  l.markTried("u1", "f1", a.claim_gen);
+  // APNs accepted here. The isolate dies before SENT_SQL.
+  const now = T0 + RETRY_DELAY_S * 1000;
+  const out = deliverMessage(l, { day: DAY, now, kickoff: KICK, triples: [["u1", "f1"]] });
+  assert.equal(out.action, "ack");
+  assert.equal(out.sent, 1, "the reminder was lost");
+  // The second attempt drew from RETRY, because the first was already tried.
+  const spent = l.spent(DAY);
+  assert.equal(spent.apns_initial, 1);
+  assert.equal(spent.apns_retry, 1, "a duplicate attempt was charged to first delivery");
+  // The zombie cannot corrupt the row that replaced it.
+  assert.equal(l.sent("u1", "f1", a.claim_gen, now + 1), 0);
+});
+
+// ==========================================================================
+// C · budget ordering
+// ==========================================================================
+
+test("C · a budget-dropped delivery performs NO authoritative reads", () => {
+  const l = ledger();
+  l.reserve({ day: DAY, pool: "kv_reads", want: POOL.kv_reads });   // exhaust it
+  let reads = 0;
+  const out = deliverMessage(l, {
+    day: DAY, now: T0, kickoff: KICK,
+    triples: [["u1", "f1"], ["u2", "f1"]],
+    eligible: () => { reads++; return true; },
+  });
+  assert.equal(out.action, "ack", "an unreadable message was retried instead of dropped");
+  assert.equal(out.dropped, 2);
+  assert.equal(out.reads, 0);
+  assert.equal(reads, 0, "the eligibility check ran after the budget said no");
+  assert.equal(out.attempted, 0);
+});
+
+test("C · the read allowance is reserved BEFORE any read, and kept if unused", () => {
+  const l = ledger();
+  // Two triples: worst case 2*2 + 6 = 10 reads reserved up front.
+  const out = deliverMessage(l, {
+    day: DAY, now: T0, kickoff: KICK,
+    triples: [["u1", "f1"], ["u2", "f1"]],
+    eligible: (uid) => uid === "u1",          // u2 turns out ineligible
+  });
+  assert.equal(out.reads, 10, "the reservation was trimmed to what was used");
+  assert.equal(l.spent(DAY).kv_reads, 10, "unused allowance was given back");
+  assert.equal(out.attempted, 1);
+  assert.equal(out.dropped, 1);
+});
+
+test("C · partial eligibility spends attempts only on the eligible", () => {
+  const l = ledger();
+  const triples = Array.from({ length: 45 }, (_, i) => [`u${i}`, "f1"]);
+  const out = deliverMessage(l, {
+    day: DAY, now: T0, kickoff: KICK, triples,
+    eligible: (uid) => Number(uid.slice(1)) % 3 === 0,
+  });
+  assert.equal(out.attempted, 15);
+  assert.equal(out.dropped, 30);
+  assert.equal(l.spent(DAY).apns_initial, 15);
+});
+
+test("C · a failed APNs call keeps its reservation", () => {
+  const l = ledger();
+  const out = deliverMessage(l, {
+    day: DAY, now: T0, kickoff: KICK,
+    triples: [["u1", "f1"], ["u2", "f1"]],
+    apns: (uid) => uid === "u1",
+  });
+  assert.equal(out.attempted, 2, "the failure was not counted as an attempt");
+  assert.equal(out.sent, 1);
+  assert.equal(l.spent(DAY).apns_initial, 2, "the failed call was refunded");
+  assert.equal(out.action, "retry");
+});
+
+test("C · wholesale failure: every attempt is charged and the message retries", () => {
+  const l = ledger();
+  const triples = Array.from({ length: 45 }, (_, i) => [`u${i}`, "f1"]);
+  const out = deliverMessage(l, { day: DAY, now: T0, kickoff: KICK, triples, apns: () => false });
+  assert.equal(out.attempted, 45);
+  assert.equal(out.sent, 0);
+  assert.equal(out.action, "retry");
+  assert.equal(l.spent(DAY).apns_initial, 45);
+});
+
+test("C · concurrent consumers cannot exceed the KV-read budget", () => {
+  const l = ledger();
+  let granted = 0;
+  for (let i = 0; i < 2_000; i++) {
+    const want = 96;
+    if (l.reserve({ day: DAY, pool: "kv_reads", want }).granted === want) granted += want;
+  }
+  assert.equal(granted, POOL.kv_reads, `spent ${granted}, cap is ${POOL.kv_reads}`);
+  assert.equal(l.reserve({ day: DAY, pool: "kv_reads", want: 1 }).granted, 0);
+});
+
+test("C · budget exhaustion mid-message drops the remainder under its own fence", () => {
+  const l = ledger();
+  l.reserve({ day: DAY, pool: "apns_initial", want: POOL.apns_initial - 3 });
+  const triples = Array.from({ length: 10 }, (_, i) => [`u${i}`, "f1"]);
+  const out = deliverMessage(l, { day: DAY, now: T0, kickoff: KICK, triples });
+  assert.equal(out.attempted, 3, "the pool boundary was overrun");
+  assert.equal(out.dropped, 7);
+  assert.equal(l.row("u9", "f1").drop_reason, "budget-exhausted");
+  assert.equal(l.spent(DAY).apns_initial, POOL.apns_initial);
+});
+
+test("C · the planner reserves worst-case unavoidable cost before enqueueing", () => {
+  // Once a message is on the queue its write is already charged and up to four
+  // deliveries follow whatever the consumer decides.
+  assert.deepEqual(PER_MESSAGE_WORST_CASE, { queue_ops: 7, worker_requests: 4, do_requests: 8 });
 });

@@ -1,6 +1,6 @@
 {
   "captured_utc": "2026-08-20",
-  "purpose": "Gate 0 blocker 1 - verify the Cloudflare account's Workers plan",
+  "purpose": "Gate 0 - record the account's OBSERVED operating limits. Not proof of billing plan.",
   "account": {
     "id": "c6e813c4f3da6f38b219967759c42fab",
     "name": "Ops.ab80@gmail.com's Account",
@@ -386,6 +386,11 @@
     "list": 1100,
     "delete": 20
   },
-  "conclusion": "KV read/list/delete volumes exceed Workers FREE plan daily caps on multiple days with zero reported errors on a live, working app. Workers Free enforces these caps by failing operations. The account is therefore NOT on Workers Free; it is on Workers Paid.",
-  "not_provable_here": "Direct billing confirmation: the wrangler OAuth token lacks billing scope (GET /accounts/{id}/billing/profile returns HTTP 403). Adam must confirm the subscription line item in dash.cloudflare.com > Manage Account > Billing > Subscriptions."
+  "conclusion": "KV read/list/delete volumes sustained ABOVE the documented Workers Free daily caps on multiple days with zero reported errors. This records what the account was OBSERVED to allow; it does not by itself establish a billing plan, and is not offered as proof of one. Its operational significance is narrower and more important: Free-tier quotas are NOT being enforced as hard caps on this account, so the notification design cannot rely on the platform to stop it and must carry its own application-level daily budgets.",
+  "plan_authority": {
+    "source": "Adam, account holder, direct confirmation",
+    "plan": "Workers Paid",
+    "note": "Knowingly enabled. Supersedes the earlier zero-hard-cost ruling for the existing Workers baseline ONLY. No additional paid services and no incremental usage charges are authorised."
+  },
+  "superseded_claim": "An earlier revision of this file concluded from usage alone that the account was not on Workers Free. That inference has been withdrawn: usage evidence reports observed limits, and only the account holder can state the plan."
 }

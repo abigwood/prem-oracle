@@ -1946,3 +1946,61 @@ body.picker-open { overflow: hidden; }
   .pick-section-head::after,
   .league-settings-head::after { transition: none; }
 }
+
+/* --- v1.6.6 D8: folded matchweeks in My Picks ------------------------------
+   A finished week is a line, not a stack of cards. The cards are still in the
+   document behind the summary — folding is never deleting. */
+.pick-week-folded {
+  margin-top: 10px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--white);
+}
+.pick-week-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 11px 13px;
+  list-style: none;
+  cursor: pointer;
+}
+.pick-week-summary::-webkit-details-marker { display: none; }
+.pick-week-summary .pick-week-label { margin: 0; }
+.pick-week-score {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: .78rem;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.pick-week-summary::after {
+  content: "⌄";
+  color: var(--purple);
+  font-size: 1.05rem;
+  line-height: 1;
+  transition: transform .16s ease;
+}
+.pick-week-folded[open] > .pick-week-summary::after { transform: rotate(180deg); }
+.pick-week-body { padding: 0 10px 8px; }
+
+/* --- D7: movement on the weekly table -------------------------------------
+   Shape carries the direction, colour only reinforces it (A1). */
+.round-standings .movement {
+  display: inline-block;
+  min-width: 1.1em;
+  margin-right: 4px;
+  font-size: .78rem;
+  font-weight: 900;
+  line-height: 1;
+}
+.round-standings .movement-up { color: var(--green); }
+.round-standings .movement-down { color: var(--danger); }
+.round-standings .movement-flat { color: var(--muted); }
+
+@media (prefers-reduced-motion: reduce) {
+  .pick-week-summary::after { transition: none; }
+}

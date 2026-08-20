@@ -8,7 +8,7 @@ import { scorePick } from "../worker/src/logic.js";
 
 const CSS = readFileSync(new URL("../styles.css", import.meta.url), "utf8");
 
-const D3 = ["VOID_STATUSES", "isVoidFixture", "finalScore", "scorePickLocal",
+const D3 = ["VOID_STATUSES", "isVoidFixture", "isPostponed", "finalScore", "scorePickLocal",
   "resultState", "RESULT_FIRST_STATES", "isSettledCard", "resultBadge",
   "resultPickLine", "resultCard"];
 
@@ -314,7 +314,9 @@ test("A2 · both collapses are real disclosure widgets, keyboard-operable", () =
 
 test("A2 · the collapse chevron is not the only cue and respects reduced motion", () => {
   assert.match(CSS, /\.league-settings\[open\] > \.league-settings-head::after \{ transform: rotate\(180deg\); \}/);
-  const reduced = CSS.slice(CSS.lastIndexOf("@media (prefers-reduced-motion: reduce)"));
+  // Joined, so a later reduced-motion block cannot hide this rule from the test.
+  const reduced = CSS.split("@media (prefers-reduced-motion: reduce)")
+    .slice(1).map((block) => block.slice(0, block.indexOf("\n}"))).join("\n");
   assert.match(reduced, /\.league-settings-head::after \{ transition: none; \}/);
 });
 
@@ -347,4 +349,21 @@ test("A3 · FINAL is a status, not a colour", () => {
   assert.match(s.resultBadge("completed"), /FINAL/);
   assert.match(s.resultBadge("void"), /VOID/);
   assert.match(s.resultBadge("started-unsettled"), /IN PLAY/);
+});
+
+test("R1 · the client's void list is the worker's, and postponed is separate", async () => {
+  const s = load(D3);
+  const { isVoided } = await import("../worker/src/logic.js");
+  for (const status of ["walkover", "retired", "cancelled", "abandoned",
+    "postponed", "scheduled", "live", ""]) {
+    assert.equal(s.isVoidFixture({ status }), isVoided({ status }),
+      `client and worker disagree on "${status}"`);
+  }
+  assert.equal(s.isVoidFixture({ void: true }), isVoided({ void: true }));
+  // Postponed is void to the VIEWER (no points, no result to show) but is not
+  // the worker's void, because D7 must be able to tell them apart.
+  assert.equal(s.isPostponed({ status: "postponed" }), true);
+  assert.equal(s.isVoidFixture({ status: "postponed" }), false);
+  s.picks = {};
+  assert.equal(s.resultState({ id: "m1", status: "postponed" }), "void");
 });

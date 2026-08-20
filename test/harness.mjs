@@ -28,10 +28,23 @@ export function constOf(name) {
   const head = `const ${name} =`;
   const at = APP.indexOf(head);
   if (at < 0) throw new Error(`app.js has no const ${name}`);
-  let i = APP.indexOf("\n", at);
-  // An arrow spilling over lines ends at the first line that closes with ";".
-  while (i > 0 && !APP.slice(at, i).trimEnd().endsWith(";")) i = APP.indexOf("\n", i + 1);
-  return APP.slice(at, i);
+  // A declaration ends at the first ";" that is not inside a bracket, a string
+  // or a template. Guessing at "the first line ending in ;" breaks on every
+  // multi-line arrow body, which is most of the interesting ones.
+  let depth = 0, quote = null, i = at;
+  for (; i < APP.length; i++) {
+    const c = APP[i];
+    if (quote) {
+      if (c === "\\") { i++; continue; }
+      if (c === quote) quote = null;
+      continue;
+    }
+    if (c === '"' || c === "'" || c === "`") { quote = c; continue; }
+    if ("([{".includes(c)) depth++;
+    else if (")]}".includes(c)) depth--;
+    else if (c === ";" && depth === 0) return APP.slice(at, i + 1);
+  }
+  throw new Error(`unterminated const ${name}`);
 }
 
 /**

@@ -32,8 +32,12 @@ export const INCLUDED = {
 export const PLANNER = {
   FILTERS_SAVED_PICKS: true,
   PICK_READS_PER_FIXTURE: 1,
-  /** Reserved before sendBatch, because enqueueing makes these unavoidable. */
-  PER_MESSAGE_WORST_CASE: { queue_ops: 7, worker_requests: 4, do_requests: 8 },
+  /**
+   * Reserved before sendBatch, because enqueueing makes these unavoidable.
+   * do_requests is FOUR deliveries x THREE calls: an earlier value of 8 assumed
+   * some deliveries would be refused cheaply, which is an average, not a bound.
+   */
+  PER_MESSAGE_WORST_CASE: { queue_ops: 7, worker_requests: 4, do_requests: 12 },
 };
 
 export const DESIGN = {
@@ -122,6 +126,13 @@ export function modelDay({ planned, deliveriesPerMessage = 1 }) {
    * A delivery refused its read allowance costs one.
    */
   const doCalls = deliveries * D.DO_CALLS_PER_DELIVERY + D.FIXTURES_PER_WINDOW * 2;
+  /**
+   * What the DO-request BUDGET actually holds. The planner books each message's
+   * unavoidable worst case up front and, as with reads, does not hand back what
+   * goes unused — so the cap is checked against the reservation, not the calls.
+   */
+  const doReserved = messages * PLANNER.PER_MESSAGE_WORST_CASE.do_requests
+    + D.FIXTURES_PER_WINDOW * 2;
 
   /**
    * Rows written. The old `attempts * 2 + deliveries` understated the case
@@ -147,7 +158,9 @@ export function modelDay({ planned, deliveriesPerMessage = 1 }) {
     apns_attempts: attempts,
     unmet_retry: wantRetry - retry,
     queue_ops: messages * (D.QUEUE_WRITE + queueReads + D.QUEUE_DELETE),
-    do_requests: doCalls,
+    do_requests: Math.max(doCalls, doReserved),
+    do_calls_actual: doCalls,
+    do_requests_reserved: doReserved,
     do_rows_written: rowsWritten,
     do_rows_read: attempts * 5 + claimed,
     do_duration_gbs: +(doCalls * D.DO_CALL_MS / 1000 * D.DO_MEM_GB).toFixed(2),

@@ -58,17 +58,29 @@ test("C · queue accounting uses the documented 5-read retry ceiling and no DLQ"
   assert.equal(modelDay({ planned: 45, deliveriesPerMessage: 4 }).queue_ops, 7);
 });
 
-test("C · the planner's pre-enqueue reservation matches the per-delivery model", () => {
-  // 4 deliveries x 3 DO calls would be 12; the planner reserves 8 because a
-  // budget-refused delivery costs one call, not three. Stated, not assumed.
+test("A · the pre-enqueue reservation is FOUR deliveries x THREE calls", () => {
   assert.equal(PLANNER.PER_MESSAGE_WORST_CASE.queue_ops, 7);
   assert.equal(PLANNER.PER_MESSAGE_WORST_CASE.worker_requests, DESIGN.DELIVERIES);
-  assert.ok(PLANNER.PER_MESSAGE_WORST_CASE.do_requests >= DESIGN.DO_CALLS_PER_DELIVERY * 2);
+  assert.equal(PLANNER.PER_MESSAGE_WORST_CASE.do_requests,
+    DESIGN.DELIVERIES * DESIGN.DO_CALLS_PER_DELIVERY);
+  assert.equal(PLANNER.PER_MESSAGE_WORST_CASE.do_requests, 12);
+});
+
+test("A · the DO-request budget is checked against the RESERVATION, not the calls", () => {
+  for (const name of ["normal", "worst", "max_retry"]) {
+    const day = SCENARIOS[name].day;
+    assert.ok(day.do_requests_reserved >= day.do_calls_actual,
+      `${name}: reserved ${day.do_requests_reserved} < actual ${day.do_calls_actual}`);
+    assert.equal(day.do_requests, day.do_requests_reserved,
+      `${name}: the cap is being checked against actual calls, not the reservation`);
+    assert.equal(day.do_requests_reserved,
+      day.messages * 12 + DESIGN.FIXTURES_PER_WINDOW * 2);
+  }
 });
 
 test("C · the planner reserves each message's unavoidable worst case before enqueueing", () => {
   assert.deepEqual(PLANNER.PER_MESSAGE_WORST_CASE,
-    { queue_ops: 7, worker_requests: 4, do_requests: 8 });
+    { queue_ops: 7, worker_requests: 4, do_requests: 12 });
 });
 
 // --- D · the planner's pick filter ---------------------------------------
@@ -128,7 +140,7 @@ test("A · a wholesale-retry day is capped, and the unmet retries are visible", 
 test("C · a working delivery costs THREE Durable Object calls, not two", () => {
   assert.equal(DESIGN.DO_CALLS_PER_DELIVERY, 3);
   const day = SCENARIOS.max_retry.day;
-  assert.equal(day.do_requests,
+  assert.equal(day.do_calls_actual,
     day.deliveries * 3 + DESIGN.FIXTURES_PER_WINDOW * 2);
 });
 

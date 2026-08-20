@@ -4,7 +4,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { ledger, LEASE_MS, MAX_ATTEMPTS, APNS_ATTEMPT_CAP, POOL, RETRY_DELAY_S,
-  REMINDER_WINDOW_S, deliverMessage, PER_MESSAGE_WORST_CASE } from "../docs/design/notify-ledger.spec.mjs";
+  REMINDER_WINDOW_S, deliverMessage, PER_MESSAGE_WORST_CASE, DO_CALLS_PER_WORKING_DELIVERY,
+  MAX_DELIVERIES } from "../docs/design/notify-ledger.spec.mjs";
 
 const T0 = 1_800_000_000_000;
 const KICK = T0 + 60 * 60 * 1000;
@@ -517,9 +518,10 @@ test("C · budget exhaustion mid-message drops the remainder under its own fence
 });
 
 test("C · the planner reserves worst-case unavoidable cost before enqueueing", () => {
-  // Once a message is on the queue its write is already charged and up to four
-  // deliveries follow whatever the consumer decides.
-  assert.deepEqual(PER_MESSAGE_WORST_CASE, { queue_ops: 7, worker_requests: 4, do_requests: 8 });
+  // Four deliveries x three calls. Assuming some would be refused cheaply was
+  // an average, not a bound.
+  assert.deepEqual(PER_MESSAGE_WORST_CASE, { queue_ops: 7, worker_requests: 4, do_requests: 12 });
+  assert.equal(MAX_DELIVERIES * DO_CALLS_PER_WORKING_DELIVERY, 12);
 });
 
 // ==========================================================================
@@ -737,4 +739,182 @@ test("D · when a cap prevents work the remainder is acked, recorded and counted
   const drops = l.drops();
   assert.equal(drops.length, 1);
   assert.equal(drops[0].uids, 25);
+});
+
+// ==========================================================================
+// A · the pre-enqueue reservation must cover FOUR fully-working deliveries
+// ==========================================================================
+
+test("A · ADVERSARIAL: all four deliveries do complete work, reservation covers it", () => {
+  const l = ledger();
+  const triples = Array.from({ length: 45 }, (_, i) => [`u${i}`, "f1"]);
+  let calls = 0;
+  // Every delivery claims, grants and records — the full three-call sequence,
+  // four times, which is the case the old value of 8 did not cover.
+  for (let delivery = 0; delivery < MAX_DELIVERIES; delivery++) {
+    const out = deliverMessage(l, {
+      day: DAY, now: T0 + delivery * (LEASE_MS + 1), kickoff: KICK, triples,
+      apns: () => false,                       // keep every triple retryable
+    });
+    assert.equal(out.do_calls, DO_CALLS_PER_WORKING_DELIVERY,
+      `delivery ${delivery + 1} did not do the full three-call sequence`);
+    calls += out.do_calls;
+  }
+  assert.equal(calls, 12, `four working deliveries cost ${calls} calls`);
+  assert.ok(calls <= PER_MESSAGE_WORST_CASE.do_requests,
+    `the pre-enqueue reservation of ${PER_MESSAGE_WORST_CASE.do_requests} does not cover ${calls}`);
+  assert.equal(PER_MESSAGE_WORST_CASE.do_requests, calls, "the reservation is not tight");
+});
+
+test("A · mixed working and refused deliveries stay inside the reservation", () => {
+  const l = ledger();
+  const triples = Array.from({ length: 45 }, (_, i) => [`m${i}`, "f2"]);
+  let calls = 0;
+  // Two full deliveries, then the read budget runs out for the rest.
+  for (let delivery = 0; delivery < 2; delivery++) {
+    calls += deliverMessage(l, {
+      day: DAY, now: T0 + delivery * (LEASE_MS + 1), kickoff: KICK, triples, apns: () => false,
+    }).do_calls;
+  }
+  l.reserve({ day: DAY, pool: "kv_reads", want: POOL.kv_reads });
+  for (let delivery = 2; delivery < MAX_DELIVERIES; delivery++) {
+    const out = deliverMessage(l, {
+      day: DAY, now: T0 + delivery * (LEASE_MS + 1), kickoff: KICK, triples,
+    });
+    assert.equal(out.do_calls, 1, "a refused delivery cost more than one call");
+    calls += out.do_calls;
+  }
+  assert.equal(calls, 8);
+  assert.ok(calls <= PER_MESSAGE_WORST_CASE.do_requests);
+});
+
+// ==========================================================================
+// B · a read-budget refusal is TERMINAL, not merely reported
+// ==========================================================================
+
+/** Exhaust the read pool so the next delivery is refused. */
+const starveReads = (l) => l.reserve({ day: DAY, pool: "kv_reads", want: POOL.kv_reads });
+
+test("B1 · first-delivery triples with no rows become terminally dropped", () => {
+  const l = ledger();
+  starveReads(l);
+  const out = deliverMessage(l, {
+    day: DAY, now: T0, kickoff: KICK, triples: [["u1", "f1"], ["u2", "f1"]],
+  });
+  assert.equal(out.action, "ack");
+  assert.equal(out.terminated, 2);
+  for (const uid of ["u1", "u2"]) {
+    const row = l.row(uid, "f1");
+    assert.equal(row.state, "dropped", `${uid} was reported dropped but has no row`);
+    assert.equal(row.drop_reason, "kv-read-budget-exhausted");
+  }
+});
+
+test("B2 · failed and lease-expired rows become terminally dropped", () => {
+  const l = ledger();
+  const [a] = l.claim("u1", "f1", ctx);
+  l.fail("u1", "f1", a.claim_gen);                       // failed
+  l.claim("u2", "f1", ctx);                              // claimed, will expire
+  starveReads(l);
+  const out = deliverMessage(l, {
+    day: DAY, now: T0 + LEASE_MS + 1, kickoff: KICK, triples: [["u1", "f1"], ["u2", "f1"]],
+  });
+  assert.equal(out.terminated, 2);
+  assert.equal(l.row("u1", "f1").state, "dropped");
+  assert.equal(l.row("u2", "f1").state, "dropped");
+});
+
+test("B3 · sent, already-dropped and LIVE claims are left untouched", () => {
+  const l = ledger();
+  const [a] = l.claim("sentUser", "f1", ctx);
+  l.sent("sentUser", "f1", a.claim_gen, T0 + 5);
+  const [b] = l.claim("dropUser", "f1", ctx);
+  l.drop("dropUser", "f1", b.claim_gen, "ineligible");
+  const [c] = l.claim("liveUser", "f1", ctx);            // another consumer, lease LIVE
+
+  starveReads(l);
+  const out = deliverMessage(l, {
+    day: DAY, now: T0 + 10, kickoff: KICK,
+    triples: [["sentUser", "f1"], ["dropUser", "f1"], ["liveUser", "f1"]],
+  });
+  assert.equal(out.terminated, 0, "a terminal or live row was overwritten");
+  assert.equal(out.untouched, 3);
+  assert.equal(l.row("sentUser", "f1").state, "sent");
+  assert.equal(l.row("dropUser", "f1").drop_reason, "ineligible", "a drop reason was overwritten");
+  const live = l.row("liveUser", "f1");
+  assert.equal(live.state, "claimed", "another consumer's live claim was stolen");
+  assert.equal(live.claim_gen, c.claim_gen);
+  assert.equal(live.claim_until, T0 + LEASE_MS, "the live lease was cleared");
+});
+
+test("B4 · terminally dropped triples cannot be reclaimed or replanned", () => {
+  const l = ledger();
+  starveReads(l);
+  deliverMessage(l, { day: DAY, now: T0, kickoff: KICK, triples: [["u1", "f1"]] });
+  assert.equal(l.row("u1", "f1").state, "dropped");
+  // Not reclaimable at any later time inside the window.
+  for (const now of [T0 + 1, T0 + LEASE_MS + 1, KICK - 1]) {
+    assert.equal(l.claim("u1", "f1", { ...ctx, now }).length, 0, `reclaimed at +${now - T0}`);
+  }
+  // And a later delivery with read budget available still does no work for it.
+  const l2 = ledger();
+  starveReads(l2);
+  deliverMessage(l2, { day: DAY, now: T0, kickoff: KICK, triples: [["u1", "f1"]] });
+  l2.db.prepare("UPDATE budget SET used = 0 WHERE metric = 'kv_reads'").run();
+  let apns = 0;
+  const again = deliverMessage(l2, {
+    day: DAY, now: T0 + 20, kickoff: KICK, triples: [["u1", "f1"]], apns: () => { apns++; return true; },
+  });
+  assert.equal(again.attempted, 0, "a terminally dropped triple was replanned into an attempt");
+  assert.equal(apns, 0);
+});
+
+test("B5 · the bounded diagnostic records the exact dropped count, per fixture", () => {
+  const l = ledger();
+  starveReads(l);
+  const triples = [...Array.from({ length: 30 }, (_, i) => [`u${i}`, "f1"]),
+    ...Array.from({ length: 15 }, (_, i) => [`v${i}`, "f2"])];
+  const out = deliverMessage(l, { day: DAY, now: T0, kickoff: KICK, triples });
+  assert.equal(out.terminated, 45);
+  const drops = l.drops();
+  assert.equal(drops.length, 2, "the diagnostic is not one bounded row per fixture");
+  assert.deepEqual(drops.map((d) => [d.fixture, d.reason, d.uids]),
+    [["f1", "kv-read-budget-exhausted", 30], ["f2", "kv-read-budget-exhausted", 15]]);
+});
+
+test("B6 · a crash during reserve-plus-terminalise is atomic", () => {
+  const l = ledger();
+  starveReads(l);
+  const triples = [["u1", "f1"], ["u2", "f1"]];
+  assert.throws(() => l.reserveReadsOrTerminate({
+    day: DAY, want: 96, triples, now: T0, kickoff: KICK, failMidway: true,
+  }), /crash during reserve-and-terminalise/);
+  // Neither the drops nor the diagnostic survived the rollback.
+  assert.equal(l.row("u1", "f1"), undefined, "a partial terminalisation was committed");
+  assert.equal(l.row("u2", "f1"), undefined);
+  assert.equal(l.drops().length, 0, "a diagnostic survived a rolled-back transaction");
+  // And the retry completes cleanly.
+  const ok = l.reserveReadsOrTerminate({ day: DAY, want: 96, triples, now: T0, kickoff: KICK });
+  assert.equal(ok.refused, true);
+  assert.equal(ok.dropped, 2);
+  assert.equal(l.drops()[0].uids, 2);
+});
+
+test("B7 · the refusal path performs zero reads, zero eligibility and zero APNs", () => {
+  const l = ledger();
+  starveReads(l);
+  let eligibility = 0, apns = 0;
+  const before = l.spent(DAY).kv_reads;
+  const out = deliverMessage(l, {
+    day: DAY, now: T0, kickoff: KICK,
+    triples: Array.from({ length: 45 }, (_, i) => [`u${i}`, "f1"]),
+    eligible: () => { eligibility++; return true; },
+    apns: () => { apns++; return true; },
+  });
+  assert.equal(eligibility, 0, "the eligibility check ran on a refused delivery");
+  assert.equal(apns, 0, "APNs was called on a refused delivery");
+  assert.equal(out.reads, 0);
+  assert.equal(l.spent(DAY).kv_reads, before, "the refused delivery consumed read budget");
+  assert.equal(out.do_calls, 1, "terminalising cost an extra Durable Object call");
+  assert.deepEqual(out.pools, { apns_initial: 0, apns_retry: 0 });
 });

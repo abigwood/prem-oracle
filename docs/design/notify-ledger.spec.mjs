@@ -227,6 +227,31 @@ UPDATE delivery SET state = 'dropped', claim_until = NULL, drop_reason = 'attemp
 RETURNING uid, fixture_id, league, attempts;
 `;
 
+/**
+ * Terminally record a triple the read budget refused.
+ *
+ * Reporting a triple as dropped in a return value is not dropping it: nothing
+ * in the ledger says so, and the planner will offer it again. This makes the
+ * refusal terminal in the same transaction as the failed reservation.
+ *
+ * It touches ONLY what is safe to touch. An absent row is created dropped; a
+ * `failed` row and a `claimed` row whose lease has expired are moved to dropped.
+ * A `sent` row, an already-`dropped` row and another consumer's LIVE fenced
+ * claim all fail the conflict clause and are left exactly as they are.
+ */
+export const TERMINATE_ON_READ_REFUSAL_SQL = `
+INSERT INTO delivery (uid, fixture_id, league, state, claim_gen, claim_until,
+                      attempts, kickoff_at, drop_reason)
+VALUES (:uid, :fx, :league, 'dropped', 1, NULL, 0, :kickoff, 'kv-read-budget-exhausted')
+ON CONFLICT (uid, fixture_id) DO UPDATE SET
+    state       = 'dropped',
+    claim_until = NULL,
+    drop_reason = 'kv-read-budget-exhausted'
+  WHERE delivery.state = 'failed'
+     OR (delivery.state = 'claimed' AND delivery.claim_until <= :now)
+RETURNING uid, fixture_id;
+`;
+
 export const PRUNE_SQL = `DELETE FROM delivery WHERE kickoff_at <= :now;`;
 
 export const LOG_DROP_SQL = `
@@ -259,6 +284,51 @@ export function reserve(db, { day, metric, want, cap }) {
 }
 
 // ---------------------------------------------------------------------------
+/**
+ * Reserve the read allowance, or refuse it and make the refusal terminal —
+ * one transaction either way, and one Durable Object call either way.
+ *
+ * The terminalisation happens INSIDE the failed reservation's transaction, so
+ * the refusal path costs no additional round trip and cannot half-happen.
+ * `failMidway` exists only so a test can crash between the drops and the
+ * diagnostic and assert the rollback.
+ */
+export function reserveReadsOrTerminate(db, {
+  day, want, triples, now, kickoff, league = "AAA", failMidway = false,
+}) {
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const used = db.prepare(BUDGET_READ_SQL).get({ day, metric: "kv_reads" })?.used ?? 0;
+    if (used + want <= POOL.kv_reads) {
+      db.prepare(BUDGET_SET_SQL).run({ day, metric: "kv_reads", used: used + want });
+      db.exec("COMMIT");
+      return { granted: want, refused: false, dropped: 0, byFixture: {} };
+    }
+    // Refused. Nothing is read and nothing is asked of APNs — but the triples
+    // this message was carrying stop being work, terminally.
+    const terminate = db.prepare(TERMINATE_ON_READ_REFUSAL_SQL);
+    const byFixture = {};
+    let dropped = 0;
+    for (const [uid, fx] of triples) {
+      if (terminate.all({ uid, fx, league, now, kickoff }).length) {
+        dropped++;
+        byFixture[fx] = (byFixture[fx] || 0) + 1;
+      }
+    }
+    if (failMidway) throw new Error("crash during reserve-and-terminalise");
+    const log = db.prepare(LOG_DROP_SQL);
+    for (const [fixture, uids] of Object.entries(byFixture)) {
+      log.run({ day, fixture, reason: "kv-read-budget-exhausted", uids, at: now });
+    }
+    db.exec("COMMIT");
+    return { granted: 0, refused: true, dropped, byFixture };
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Harness, so the traces read as the sequence of events they describe
 // ---------------------------------------------------------------------------
 
@@ -285,6 +355,7 @@ export function ledger() {
     markTried: (uid, fx, gen) => db.prepare(MARK_TRIED_SQL).run({ uid, fx, gen }).changes,
     /** The single fenced atomic step: fence check + pool choice + reserve + mark. */
     grantAttempt: (opts) => grantAttempt(db, opts),
+    reserveReadsOrTerminate: (opts) => reserveReadsOrTerminate(db, opts),
     disposition: (uid, fx, now) =>
       disposition(db.prepare(DISPOSITION_SQL).get({ uid, fx }), now),
     spent: (day) => Object.fromEntries(Object.keys(POOL).map((m) => [m,
@@ -324,17 +395,21 @@ export function deliverMessage(l, {
 }) {
   const out = {
     action: "ack", attempted: 0, sent: 0, dropped: 0, reads: 0, deferred: 0,
-    stale: 0, budget_refused: 0, claimed: 0, do_calls: 0,
+    stale: 0, budget_refused: 0, claimed: 0, do_calls: 0, terminated: 0, untouched: 0,
     pools: { apns_initial: 0, apns_retry: 0 },
   };
 
   // 1. Worst-case read allowance for the whole message, before touching KV.
   const wantReads = triples.length * kvReadsPerTriple + kvReadsFixed;
-  const readGrant = l.reserve({ day, pool: "kv_reads", want: wantReads });
+  const readGrant = l.reserveReadsOrTerminate({ day, want: wantReads, triples, now, kickoff });
   out.do_calls++;                                      // call 1: reserve + claim batch
-  if (readGrant.granted < wantReads) {
-    // 2. Not enough: ack and drop, having read nothing at all.
-    out.dropped = triples.length;
+  if (readGrant.refused) {
+    // 2. Not enough: ack, having read nothing and asked APNs nothing. The
+    //    triples are made terminal INSIDE that same transaction, so they are
+    //    genuinely dropped rather than merely reported as dropped.
+    out.dropped = readGrant.dropped;
+    out.terminated = readGrant.dropped;
+    out.untouched = triples.length - readGrant.dropped;
     return out;
   }
   out.reads = readGrant.granted;                       // 6. consumed regardless
@@ -383,12 +458,17 @@ export function deliverMessage(l, {
  * What the PLANNER must reserve before `sendBatch`, not after.
  *
  * Once a message is enqueued its worst-case cost is unavoidable: Cloudflare has
- * already charged the write, and up to four deliveries with their reads and
- * deletes follow whatever the consumer decides. Reserving afterwards would be
- * checking a bill that has already been run up.
+ * already charged the write, and up to four deliveries follow whatever the
+ * consumer decides. Reserving afterwards would be checking a bill already run up.
+ *
+ * do_requests is FOUR deliveries x THREE calls. An earlier value of 8 assumed
+ * some deliveries would be refused cheaply, which is an average and not a worst
+ * case: all four deliveries may do complete work.
  */
+export const DO_CALLS_PER_WORKING_DELIVERY = 3;   // reserve+claim, grants, outcomes
+export const MAX_DELIVERIES = 4;                  // max_retries = 3
 export const PER_MESSAGE_WORST_CASE = {
   queue_ops: 7,          // 1 write + 5 reads (documented ceiling) + 1 delete
-  worker_requests: 4,    // up to four deliveries
-  do_requests: 8,        // (reserve+claim) and (record|drop) per delivery
+  worker_requests: MAX_DELIVERIES,
+  do_requests: MAX_DELIVERIES * DO_CALLS_PER_WORKING_DELIVERY,   // 12
 };

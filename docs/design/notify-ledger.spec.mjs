@@ -5,6 +5,7 @@
 // so the traces are executed rather than asserted in prose. Nothing under
 // worker/src or app.js imports it.
 import { DatabaseSync } from "node:sqlite";
+import { POOL, readPoolFor } from "../../worker/src/notify/ledger.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -23,18 +24,17 @@ export const MAX_ATTEMPTS = 5;
  * storm of retries early in the day would starve first delivery for everybody
  * planned later.
  */
-export const POOL = {
-  /**
-   * First APNs attempt per (uid, fixture), sized to the PRODUCT'S MAXIMUM
-   * SHAPE: the frozen authority's 20-fixture round, at the required
-   * 1,000-recipient scale, is 20,000 first attempts. Sizing this to a
-   * ten-fixture round protected only 500 recipients at that shape.
-   */
-  apns_initial: 20_000,
-  apns_retry: 5_000,      // every attempt after the first, separately bounded
-  kv_reads: 110_000,      // authoritative pre-send reads, reserved before reading
-};
-export const APNS_ATTEMPT_CAP = POOL.apns_initial + POOL.apns_retry;   // 15,000
+/**
+ * The pools, IMPORTED from production rather than restated.
+ *
+ * This file calls itself the executable state-machine authority, which it can
+ * only be if it models the pools that actually exist. Mirroring them by hand is
+ * exactly how it ended up verifying a single `kv_reads` pool that production
+ * had already split in two.
+ */
+export { POOL, readPoolFor } from "../../worker/src/notify/ledger.js";
+
+export const APNS_ATTEMPT_CAP = POOL.apns_initial + POOL.apns_retry;
 
 /**
  * Redelivery must land AFTER a crashed consumer's lease has expired, or the
@@ -295,14 +295,15 @@ export function reserve(db, { day, metric, want, cap }) {
  */
 export function reserveReadsOrTerminate(db, {
   day, want, triples, now, kickoff, league = "AAA", failMidway = false,
+  pool = "kv_reads_initial",
 }) {
   db.exec("BEGIN IMMEDIATE");
   try {
-    const used = db.prepare(BUDGET_READ_SQL).get({ day, metric: "kv_reads" })?.used ?? 0;
-    if (used + want <= POOL.kv_reads) {
-      db.prepare(BUDGET_SET_SQL).run({ day, metric: "kv_reads", used: used + want });
+    const used = db.prepare(BUDGET_READ_SQL).get({ day, metric: pool })?.used ?? 0;
+    if (used + want <= POOL[pool]) {
+      db.prepare(BUDGET_SET_SQL).run({ day, metric: pool, used: used + want });
       db.exec("COMMIT");
-      return { granted: want, refused: false, dropped: 0, byFixture: {} };
+      return { granted: want, refused: false, dropped: 0, byFixture: {}, pool };
     }
     // Refused. Nothing is read and nothing is asked of APNs — but the triples
     // this message was carrying stop being work, terminally.
@@ -321,7 +322,7 @@ export function reserveReadsOrTerminate(db, {
       log.run({ day, fixture, reason: "kv-read-budget-exhausted", uids, at: now });
     }
     db.exec("COMMIT");
-    return { granted: 0, refused: true, dropped, byFixture };
+    return { granted: 0, refused: true, dropped, byFixture, pool };
   } catch (error) {
     db.exec("ROLLBACK");
     throw error;
@@ -388,6 +389,7 @@ export function ledger() {
  */
 export function deliverMessage(l, {
   day, now, kickoff, triples,
+  attempt = 1,                   // the queue's own delivery counter
   kvReadsPerTriple = 2,          // <=45 push + <=45 member, per triple
   kvReadsFixed = 6,              // <=3 picks + <=3 slate, per message
   eligible = () => true,         // authoritative check, run only after step 1
@@ -396,12 +398,20 @@ export function deliverMessage(l, {
   const out = {
     action: "ack", attempted: 0, sent: 0, dropped: 0, reads: 0, deferred: 0,
     stale: 0, budget_refused: 0, claimed: 0, do_calls: 0, terminated: 0, untouched: 0,
+    readPool: null,
     pools: { apns_initial: 0, apns_retry: 0 },
   };
 
   // 1. Worst-case read allowance for the whole message, before touching KV.
+  // The pool this DELIVERY belongs to. A retry cannot reach the reads a first
+  // delivery still needs, because a delivery refused its reads never reaches
+  // the attempt pool at all.
   const wantReads = triples.length * kvReadsPerTriple + kvReadsFixed;
-  const readGrant = l.reserveReadsOrTerminate({ day, want: wantReads, triples, now, kickoff });
+  const readPool = readPoolFor(attempt);
+  out.readPool = readPool;
+  const readGrant = l.reserveReadsOrTerminate({
+    day, want: wantReads, triples, now, kickoff, pool: readPool,
+  });
   out.do_calls++;                                      // call 1: reserve + claim batch
   if (readGrant.refused) {
     // 2. Not enough: ack, having read nothing and asked APNs nothing. The

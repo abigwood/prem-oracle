@@ -427,7 +427,7 @@ test("B · PRODUCTION SEQUENCE: crash AFTER APNs is at-least-once, not lost", ()
 
 test("C · a budget-dropped delivery performs NO authoritative reads", () => {
   const l = ledger();
-  l.reserve({ day: DAY, pool: "kv_reads", want: POOL.kv_reads });   // exhaust it
+  l.reserve({ day: DAY, pool: "kv_reads_initial", want: POOL.kv_reads_initial });   // exhaust it
   let reads = 0;
   const out = deliverMessage(l, {
     day: DAY, now: T0, kickoff: KICK,
@@ -450,7 +450,7 @@ test("C · the read allowance is reserved BEFORE any read, and kept if unused", 
     eligible: (uid) => uid === "u1",          // u2 turns out ineligible
   });
   assert.equal(out.reads, 10, "the reservation was trimmed to what was used");
-  assert.equal(l.spent(DAY).kv_reads, 10, "unused allowance was given back");
+  assert.equal(l.spent(DAY).kv_reads_initial, 10, "unused allowance was given back");
   assert.equal(out.attempted, 1);
   assert.equal(out.dropped, 1);
 });
@@ -495,15 +495,15 @@ test("C · concurrent consumers cannot exceed the KV-read budget", () => {
   let granted = 0;
   let full = 0;
   for (let i = 0; i < 3_000; i++) {
-    const g = l.reserve({ day: DAY, pool: "kv_reads", want: 96 }).granted;
+    const g = l.reserve({ day: DAY, pool: "kv_reads_initial", want: 96 }).granted;
     granted += g;
     if (g === 96) full++;
   }
   // The pool is not a whole number of 96-read deliveries, so the last grant is
   // a partial one. What must hold is that the total is exactly the cap.
-  assert.equal(granted, POOL.kv_reads, `spent ${granted}, cap is ${POOL.kv_reads}`);
-  assert.equal(full, Math.floor(POOL.kv_reads / 96));
-  assert.equal(l.reserve({ day: DAY, pool: "kv_reads", want: 1 }).granted, 0);
+  assert.equal(granted, POOL.kv_reads_initial, `spent ${granted}, cap is ${POOL.kv_reads_initial}`);
+  assert.equal(full, Math.floor(POOL.kv_reads_initial / 96));
+  assert.equal(l.reserve({ day: DAY, pool: "kv_reads_initial", want: 1 }).granted, 0);
 });
 
 test("C · budget exhaustion mid-message drops the remainder under its own fence", () => {
@@ -545,7 +545,7 @@ test("B · a stale generation spends NOTHING", () => {
   const stale = l.grantAttempt({ uid: "u1", fx: "f1", gen: a.claim_gen, day: DAY });
   assert.equal(stale.granted, false);
   assert.equal(stale.reason, "stale");
-  assert.deepEqual(l.spent(DAY), { apns_initial: 0, apns_retry: 0, kv_reads: 0 },
+  assert.equal(l.spent(DAY).apns_initial, 0,
     "a stale owner spent budget");
   assert.equal(l.row("u1", "f1").apns_tried, 0, "a stale owner marked the row tried");
 });
@@ -631,7 +631,8 @@ test("D · MAXIMUM SHAPE: all 20,000 first attempts are protected", () => {
   const spent = l.spent(DAY);
   assert.equal(spent.apns_initial, POOL.apns_initial, "INITIAL was not exactly consumed");
   assert.equal(spent.apns_retry, 0, "first delivery drew from the retry pool");
-  assert.ok(spent.kv_reads <= POOL.kv_reads, `KV reads ${spent.kv_reads} exceeded the pool`);
+  assert.ok(spent.kv_reads_initial <= POOL.kv_reads_initial,
+    `KV reads ${spent.kv_reads_initial} exceeded the pool`);
 });
 
 test("D · ADVERSARIAL: retries arriving first cannot consume INITIAL", () => {
@@ -675,7 +676,8 @@ test("D · wholesale APNs failure respects RETRY, KV and every cap", () => {
   assert.ok(retryDropped > 0, "nothing was dropped once the retry pool ran out");
   const spent = l.spent(DAY);
   assert.equal(spent.apns_initial + spent.apns_retry, APNS_ATTEMPT_CAP);
-  assert.ok(spent.kv_reads <= POOL.kv_reads, `KV reads ${spent.kv_reads} exceeded the pool`);
+  assert.ok(spent.kv_reads_initial <= POOL.kv_reads_initial,
+    `KV reads ${spent.kv_reads_initial} exceeded the pool`);
 });
 
 test("D · crash between claim and APNs permission loses nothing", () => {
@@ -715,7 +717,8 @@ test("D · a stale consumer cannot spend either pool", () => {
   for (const gen of [a.claim_gen, a.claim_gen + 5, 0]) {
     assert.equal(l.grantAttempt({ uid: "u1", fx: "f1", gen, day: DAY }).granted, false);
   }
-  assert.deepEqual(l.spent(DAY), { apns_initial: 0, apns_retry: 0, kv_reads: 0 });
+  assert.equal(l.spent(DAY).apns_initial, 0);
+  assert.equal(l.spent(DAY).apns_retry, 0);
 });
 
 test("D · when a cap prevents work the remainder is acked, recorded and counted", () => {
@@ -776,7 +779,7 @@ test("A · mixed working and refused deliveries stay inside the reservation", ()
       day: DAY, now: T0 + delivery * (LEASE_MS + 1), kickoff: KICK, triples, apns: () => false,
     }).do_calls;
   }
-  l.reserve({ day: DAY, pool: "kv_reads", want: POOL.kv_reads });
+  l.reserve({ day: DAY, pool: "kv_reads_initial", want: POOL.kv_reads_initial });
   for (let delivery = 2; delivery < MAX_DELIVERIES; delivery++) {
     const out = deliverMessage(l, {
       day: DAY, now: T0 + delivery * (LEASE_MS + 1), kickoff: KICK, triples,
@@ -793,7 +796,7 @@ test("A · mixed working and refused deliveries stay inside the reservation", ()
 // ==========================================================================
 
 /** Exhaust the read pool so the next delivery is refused. */
-const starveReads = (l) => l.reserve({ day: DAY, pool: "kv_reads", want: POOL.kv_reads });
+const starveReads = (l) => l.reserve({ day: DAY, pool: "kv_reads_initial", want: POOL.kv_reads_initial });
 
 test("B1 · first-delivery triples with no rows become terminally dropped", () => {
   const l = ledger();
@@ -860,7 +863,7 @@ test("B4 · terminally dropped triples cannot be reclaimed or replanned", () => 
   const l2 = ledger();
   starveReads(l2);
   deliverMessage(l2, { day: DAY, now: T0, kickoff: KICK, triples: [["u1", "f1"]] });
-  l2.db.prepare("UPDATE budget SET used = 0 WHERE metric = 'kv_reads'").run();
+  l2.db.prepare("UPDATE budget SET used = 0 WHERE metric = 'kv_reads_initial'").run();
   let apns = 0;
   const again = deliverMessage(l2, {
     day: DAY, now: T0 + 20, kickoff: KICK, triples: [["u1", "f1"]], apns: () => { apns++; return true; },
@@ -904,7 +907,7 @@ test("B7 · the refusal path performs zero reads, zero eligibility and zero APNs
   const l = ledger();
   starveReads(l);
   let eligibility = 0, apns = 0;
-  const before = l.spent(DAY).kv_reads;
+  const before = l.spent(DAY).kv_reads_initial;
   const out = deliverMessage(l, {
     day: DAY, now: T0, kickoff: KICK,
     triples: Array.from({ length: 45 }, (_, i) => [`u${i}`, "f1"]),
@@ -914,7 +917,91 @@ test("B7 · the refusal path performs zero reads, zero eligibility and zero APNs
   assert.equal(eligibility, 0, "the eligibility check ran on a refused delivery");
   assert.equal(apns, 0, "APNs was called on a refused delivery");
   assert.equal(out.reads, 0);
-  assert.equal(l.spent(DAY).kv_reads, before, "the refused delivery consumed read budget");
+  assert.equal(l.spent(DAY).kv_reads_initial, before, "the refused delivery consumed read budget");
   assert.equal(out.do_calls, 1, "terminalising cost an extra Durable Object call");
   assert.deepEqual(out.pools, { apns_initial: 0, apns_retry: 0 });
+});
+
+// ==========================================================================
+// A · the specification models the PRODUCTION pools, and cannot drift from them
+// ==========================================================================
+
+test("A · the specification and the production ledger expose the same pools", async () => {
+  const production = await import("../worker/src/notify/ledger.js");
+  // Not "the same values" — the same OBJECT. A spec that restates the pools is
+  // how this file ended up verifying a kv_reads pool production had split.
+  assert.equal(POOL, production.POOL, "the spec keeps its own copy of the pools");
+  assert.deepEqual(Object.keys(POOL).sort(), Object.keys(production.POOL).sort());
+  for (const key of Object.keys(POOL)) {
+    assert.equal(POOL[key], production.POOL[key], `${key} differs from production`);
+  }
+  assert.ok(!("kv_reads" in POOL), "the superseded shared read pool is back");
+  assert.ok("kv_reads_initial" in POOL && "kv_reads_retry" in POOL);
+});
+
+test("A · attempt 1 draws ONLY initial reads", async () => {
+  const l = ledger();
+  const out = deliverMessage(l, { day: DAY, now: T0, kickoff: KICK, triples: [["u1", "f1"]] });
+  assert.equal(out.readPool, "kv_reads_initial");
+  const spent = l.spent(DAY);
+  assert.ok(spent.kv_reads_initial > 0);
+  assert.equal(spent.kv_reads_retry, 0, "a first delivery drew from the retry pool");
+});
+
+test("A · attempts 2-4 draw ONLY retry reads", async () => {
+  for (const attempt of [2, 3, 4]) {
+    const l = ledger();
+    const out = deliverMessage(l, {
+      day: DAY, now: T0, kickoff: KICK, attempt, triples: [["u1", "f1"]],
+    });
+    assert.equal(out.readPool, "kv_reads_retry", `attempt ${attempt} used the wrong pool`);
+    const spent = l.spent(DAY);
+    assert.equal(spent.kv_reads_initial, 0, `attempt ${attempt} spent first-delivery reads`);
+    assert.ok(spent.kv_reads_retry > 0);
+  }
+});
+
+test("A · exhausting the retry reads cannot affect the initial reads", () => {
+  const l = ledger();
+  l.reserve({ day: DAY, pool: "kv_reads_retry", want: POOL.kv_reads_retry });
+  assert.equal(l.reserve({ day: DAY, pool: "kv_reads_retry", want: 1 }).granted, 0);
+
+  // A retry now finds nothing and terminally drops.
+  const retry = deliverMessage(l, {
+    day: DAY, now: T0, kickoff: KICK, attempt: 2, triples: [["u1", "f1"]],
+  });
+  assert.equal(retry.terminated, 1);
+  assert.equal(retry.attempted, 0);
+
+  // A first delivery is untouched by any of it.
+  const first = deliverMessage(l, {
+    day: DAY, now: T0, kickoff: KICK, triples: [["u2", "f1"]],
+  });
+  assert.equal(first.attempted, 1, "an exhausted retry pool blocked a first delivery");
+  assert.equal(first.readPool, "kv_reads_initial");
+  assert.equal(l.spent(DAY).kv_reads_retry, POOL.kv_reads_retry);
+});
+
+test("A · both read pools are atomic under concurrency", () => {
+  for (const pool of ["kv_reads_initial", "kv_reads_retry"]) {
+    const l = ledger();
+    let granted = 0;
+    let full = 0;
+    for (let i = 0; i < 5_000; i++) {
+      const g = l.reserve({ day: DAY, pool, want: 96 }).granted;
+      granted += g;
+      if (g === 96) full++;
+    }
+    assert.equal(granted, POOL[pool], `${pool}: spent ${granted}, cap is ${POOL[pool]}`);
+    assert.equal(full, Math.floor(POOL[pool] / 96));
+    assert.equal(l.reserve({ day: DAY, pool, want: 1 }).granted, 0);
+  }
+});
+
+test("A · spent() reports the production pool names", () => {
+  const l = ledger();
+  const spent = l.spent(DAY);
+  assert.deepEqual(Object.keys(spent).sort(), Object.keys(POOL).sort());
+  assert.ok(!("kv_reads" in spent), "spent() still reports the superseded pool");
+  for (const key of Object.keys(POOL)) assert.equal(spent[key], 0);
 });

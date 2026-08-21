@@ -414,60 +414,62 @@ function endpoint(env) {
   };
 }
 
-test("B · ENDPOINT: the full 1,000-league repair completes through HTTP alone", async () => {
+test("B · ENDPOINT: ONE 1,000-league world, repaired AND verified through HTTP alone", async () => {
+  // One environment for both halves. Measuring the repair on a thousand leagues
+  // and the verification on sixty, then quoting the two figures together, is
+  // not a measurement of anything.
   const env = { ...hugeWorld(), MIGRATION_SECRET: SECRET, ALLOWED_ORIGIN: "*" };
   const post = endpoint(env);
 
+  // --- repair, one HTTP call at a time -----------------------------------
   let body = { action: "repair" };
-  let calls = 0;
+  let repairCalls = 0;
   let result;
-  const finishedForward = [];
+  const forwardDoneHistory = [];
   do {
     result = await post(body);
-    calls++;
+    repairCalls++;
     assert.ok(result.ops <= result.opsCap,
-      `invocation ${calls} performed ${result.ops} operations against a cap of ${result.opsCap}`);
-    finishedForward.push(result.forward.done);
-    // Exactly what an operator does: hand the continuation straight back.
-    body = { action: "repair", resume: result.resume };
-  } while (!result.done && calls < 2_000);
+      `repair call ${repairCalls} performed ${result.ops} operations, cap ${result.opsCap}`);
+    forwardDoneHistory.push(result.forward.done);
+    body = { action: "repair", resume: result.resume };   // exactly as an operator would
+  } while (!result.done && repairCalls < 5_000);
 
-  assert.equal(result.done, true, `repair never finished in ${calls} calls`);
+  assert.equal(result.done, true, `repair never finished in ${repairCalls} calls`);
   assert.equal(indexKeys(env).length, 1_000 * 20);
-
-  // Once forward reported done it must NEVER have gone back to not-done.
-  const firstDone = finishedForward.indexOf(true);
-  assert.ok(firstDone >= 0, "forward never completed");
-  assert.ok(finishedForward.slice(firstDone).every(Boolean),
+  const firstDone = forwardDoneHistory.indexOf(true);
+  assert.ok(firstDone >= 0 && forwardDoneHistory.slice(firstDone).every(Boolean),
     "a completed direction restarted on a later request");
-  console.log(`\n  endpoint-driven repair: ${calls} HTTP calls, cap ${result.opsCap} ops each`);
-});
 
-test("B · ENDPOINT: a fresh chain reaches ready, and only then", async () => {
-  const env = { ...hugeWorld({ leagues: 60, fixtures: 20 }), MIGRATION_SECRET: SECRET, ALLOWED_ORIGIN: "*" };
-  const post = endpoint(env);
-
-  // Repair first, through the endpoint.
-  let body = { action: "repair" };
-  let repaired;
-  do {
-    repaired = await post(body);
-    body = { action: "repair", resume: repaired.resume };
-  } while (!repaired.done);
-
-  // Then a fresh chained verification, one call at a time.
+  // --- then verify THAT SAME repaired index, through the same endpoint ----
   let verified = await post({ action: "verify", restart: true });
-  let calls = 1;
-  while (!verified.complete && calls < 2_000) {
-    assert.equal(verified.ready, false, "an unfinished chain reported ready");
+  let verifyCalls = 1;
+  while (!verified.complete && verifyCalls < 5_000) {
+    // Readiness must be impossible until BOTH prefixes have finished.
+    assert.equal(verified.ready, false,
+      `call ${verifyCalls} reported ready with forward.done=${verified.forward.done} `
+      + `reverse.done=${verified.reverse.done}`);
     assert.match(verified.verdict, /IN PROGRESS/);
+    assert.ok(verified.ops <= verified.opsCap,
+      `verify call ${verifyCalls} performed ${verified.ops} operations, cap ${verified.opsCap}`);
     verified = await post({ action: "verify" });
-    calls++;
+    verifyCalls++;
   }
-  assert.ok(calls > 1, "the chain finished in one call, so it proves nothing");
+
+  assert.equal(verified.complete, true, `verification never finished in ${verifyCalls} calls`);
   assert.equal(verified.ready, true, verified.verdict);
   assert.match(verified.verdict, /READY/);
-  console.log(`  endpoint-driven verification: ${calls} HTTP calls to ready\n`);
+  // The chain really did inspect every fixture of every league.
+  assert.equal(verified.forward.counts.ok, 1_000 * 20);
+  assert.equal(verified.forward.counts.missing, 0);
+  assert.equal(verified.reverse.counts.stale, 0);
+  assert.ok(verifyCalls > 1, "the chain finished in one call, so it proves nothing");
+
+  console.log(`\n  ONE 1,000-league x 20-fixture world, driven entirely through HTTP:`);
+  console.log(`    repair calls       : ${repairCalls}`);
+  console.log(`    verification calls : ${verifyCalls}`);
+  console.log(`    operation cap      : ${verified.opsCap} per invocation`);
+  console.log(`    index keys written : ${indexKeys(env).length.toLocaleString()}\n`);
 });
 
 test("B · ENDPOINT: a repair invalidates the chain, so ready cannot be stale", async () => {

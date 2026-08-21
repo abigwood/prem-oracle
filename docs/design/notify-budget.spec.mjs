@@ -111,14 +111,25 @@ export function modelDay({ distribution, plannedFraction = 1, deliveriesPerMessa
    * reserves its OWN job's worst case, so a fragmented round costs more per
    * delivery than a consolidated one and the pool binds sooner.
    */
-  let kvReads = 0;
+  let readsInitial = 0;
+  let readsRetry = 0;
   let refusedDeliveries = 0;
   const perJob = jobs.map((j) => worstCaseReads(j.triples));
   for (let d = 0; d < deliveries; d++) {
     const want = perJob[d % jobs.length];
-    if (kvReads + want > POOL.kv_reads) { refusedDeliveries++; continue; }
-    kvReads += want;
+    // The first pass draws from its own pool; everything after it is a retry.
+    // The two are separate so no interleaving can make a retry starve a first
+    // delivery of the reads it needs to reach the attempt pool at all.
+    const first = d < jobs.length;
+    if (first) {
+      if (readsInitial + want > POOL.kv_reads_initial) { refusedDeliveries++; continue; }
+      readsInitial += want;
+    } else {
+      if (readsRetry + want > POOL.kv_reads_retry) { refusedDeliveries++; continue; }
+      readsRetry += want;
+    }
   }
+  const kvReads = readsInitial + readsRetry;
 
   const doReserved = jobs.length * PER_MESSAGE_WORST_CASE.do_requests
     + D.FIXTURES_PER_WINDOW * D.PLAN_PASSES;
@@ -139,6 +150,8 @@ export function modelDay({ distribution, plannedFraction = 1, deliveriesPerMessa
     apns_attempts: attempts,
     unmet_retry: wantRetry - retry,
     kv_reads: kvReads,
+    kv_reads_initial: readsInitial,
+    kv_reads_retry: readsRetry,
     queue_ops: jobs.length * (D.QUEUE_WRITE + queueReads + D.QUEUE_DELETE),
     do_requests: Math.max(doCalls, doReserved),
     do_calls_actual: doCalls,
@@ -173,7 +186,9 @@ export const MONTHLY_CAP = {
   do_duration_gbs: 9_920,
   worker_requests: 148_800,
   worker_cpu_ms: 1_798_000,
-  kv_reads: POOL.kv_reads * D.DAYS,
+  kv_reads: (POOL.kv_reads_initial + POOL.kv_reads_retry) * D.DAYS,
+  kv_reads_initial: POOL.kv_reads_initial * D.DAYS,
+  kv_reads_retry: POOL.kv_reads_retry * D.DAYS,
   kv_writes: 35_960,
   apns_attempts: (POOL.apns_initial + POOL.apns_retry) * D.DAYS,
 };
@@ -183,7 +198,8 @@ export const DAILY_CAP = Object.fromEntries(
 export const KV_WRITES_PER_DAY = 714;
 
 export const METRICS = ["queue_ops", "do_requests", "do_rows_written", "do_rows_read",
-  "do_duration_gbs", "worker_requests", "worker_cpu_ms", "kv_reads", "apns_attempts"];
+  "do_duration_gbs", "worker_requests", "worker_cpu_ms", "kv_reads",
+  "kv_reads_initial", "kv_reads_retry", "apns_attempts"];
 
 export function monthly(distribution, sequence, metric) {
   if (metric === "kv_writes") return KV_WRITES_PER_DAY * D.DAYS;

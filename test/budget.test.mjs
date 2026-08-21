@@ -52,8 +52,9 @@ test("A · every first attempt fits, at every distribution", () => {
       `${distribution}: only ${day.apns_initial} first attempts were granted`);
     assert.equal(day.refused_deliveries, 0,
       `${distribution}: ${day.refused_deliveries} first-pass deliveries were refused reads`);
-    assert.ok(day.kv_reads <= POOL.kv_reads,
-      `${distribution}: first pass wanted ${day.kv_reads} reads`);
+    assert.ok(day.kv_reads_initial <= POOL.kv_reads_initial,
+      `${distribution}: first pass wanted ${day.kv_reads_initial} reads`);
+    assert.equal(day.kv_reads_retry, 0, "a first pass drew from the retry pool");
   }
 });
 
@@ -63,30 +64,40 @@ test("A · dynamic reservations never exceed the configured pool", () => {
   for (const distribution of Object.keys(DISTRIBUTIONS)) {
     for (const sequence of SEQUENCES) {
       const { day } = scenario(distribution, sequence);
-      assert.ok(day.kv_reads <= POOL.kv_reads,
-        `${distribution}/${sequence}: ${day.kv_reads} reads against a pool of ${POOL.kv_reads}`);
+      assert.ok(day.kv_reads_initial <= POOL.kv_reads_initial,
+        `${distribution}/${sequence}: ${day.kv_reads_initial} initial reads over pool`);
+      assert.ok(day.kv_reads_retry <= POOL.kv_reads_retry,
+        `${distribution}/${sequence}: ${day.kv_reads_retry} retry reads over pool`);
       assert.ok(day.apns_initial + day.apns_retry <= POOL.apns_initial + POOL.apns_retry);
     }
   }
 });
 
-test("A · a fragmented max-retry day exhausts the read pool, and says so", () => {
-  const day = modelDay({ distribution: "fragmented", deliveriesPerMessage: DESIGN.DELIVERIES });
-  // The pool is spent to within one job's worth: what is left cannot fund the
-  // next delivery, so the remainder is refused rather than half-served.
-  assert.ok(POOL.kv_reads - day.kv_reads < day.reads_per_job_max,
-    `${POOL.kv_reads - day.kv_reads} reads left over, which is more than one job needs`);
-  assert.ok(day.refused_deliveries > 0,
-    "the pool filled without any delivery being refused, which cannot be right");
+test("A · under wholesale retry the RETRY read pool binds, and only it", () => {
+  for (const distribution of Object.keys(DISTRIBUTIONS)) {
+    const day = modelDay({ distribution, deliveriesPerMessage: DESIGN.DELIVERIES });
+    // The retry pool is spent to within one job's worth: what remains cannot
+    // fund another delivery, so the rest is refused rather than half-served.
+    assert.ok(POOL.kv_reads_retry - day.kv_reads_retry < day.reads_per_job_max,
+      `${distribution}: ${POOL.kv_reads_retry - day.kv_reads_retry} retry reads left over`);
+    assert.ok(day.refused_deliveries > 0, `${distribution}: nothing was refused`);
 
-  // Fragmentation genuinely costs more: consolidation fits with room to spare.
-  const consolidated = modelDay({ distribution: "one_league", deliveriesPerMessage: DESIGN.DELIVERIES });
-  assert.equal(consolidated.refused_deliveries, 0, "consolidation should fit comfortably");
-  assert.ok(consolidated.kv_reads < day.kv_reads);
+    // What must NOT happen: the first pass losing anything to that storm.
+    assert.ok(day.kv_reads_initial <= POOL.kv_reads_initial,
+      `${distribution}: first-pass reads over their own pool`);
+    assert.equal(day.apns_initial, 20_000, `${distribution}: a retry cost a first attempt`);
+  }
+});
 
-  // The refusals are safe: those deliveries drop terminally with a diagnostic,
-  // and every FIRST attempt was made before any of them.
-  assert.equal(day.apns_initial, 20_000);
+test("A · fragmentation costs more per delivery than consolidation", () => {
+  const spread = modelDay({ distribution: "fragmented", deliveriesPerMessage: DESIGN.DELIVERIES });
+  const together = modelDay({ distribution: "one_league", deliveriesPerMessage: DESIGN.DELIVERIES });
+  assert.ok(spread.reads_per_job_max > together.reads_per_job_max);
+  assert.ok(spread.kv_reads_initial > together.kv_reads_initial,
+    "a fragmented first pass should cost more reads than a consolidated one");
+  // Both still deliver every first attempt, which is the point of the split.
+  assert.equal(spread.apns_initial, together.apns_initial);
+  assert.equal(spread.apns_initial, 20_000);
 });
 
 // --- caps ------------------------------------------------------------------
@@ -100,10 +111,15 @@ test("C · every daily cap is monthly / 31", () => {
 
 test("C · every monthly cap sits inside the Paid included allowance", () => {
   for (const metric of METRICS) {
+    // apns_attempts is Apple's; the two read sub-pools are halves of kv_reads,
+    // which is the metric the allowance is actually expressed in.
     if (metric === "apns_attempts") continue;
+    if (metric === "kv_reads_initial" || metric === "kv_reads_retry") continue;
     assert.ok(MONTHLY_CAP[metric] <= INCLUDED[metric],
       `${metric}: cap ${MONTHLY_CAP[metric]} exceeds included ${INCLUDED[metric]}`);
   }
+  // And the two sub-pools sum to exactly the read cap they divide.
+  assert.equal(MONTHLY_CAP.kv_reads_initial + MONTHLY_CAP.kv_reads_retry, MONTHLY_CAP.kv_reads);
 });
 
 test("C · the WORST month across every distribution clears its cap", () => {

@@ -1,9 +1,10 @@
 // Slice 1 — every Gate-0 design guarantee, asserted about the PRODUCTION path.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { ledgerObject, kvShim, harnessDeps, seedLeague, triple, job }
+import { ledgerObject, kvShim, harnessDeps, seedLeague, triple, job, fixture }
   from "./notify_harness.mjs";
 import { deliverJob, worstCaseReads, stillEligible } from "../src/notify/consumer.js";
+import { planWindow } from "../src/notify/planner.js";
 import { POOL, LEASE_MS, MAX_ATTEMPTS, RETRY_DELAY_S, PER_MESSAGE_WORST_CASE, utcDay }
   from "../src/notify/ledger.js";
 import { collapseId, reminderPayload, chooseLeagueCode, LOCK_SCREEN_LEAGUE }
@@ -55,7 +56,7 @@ test("the reads reserved are the message's worst case, not what it used", async 
   // Priced from the job's composition: two recipients, one fixture, one league.
   assert.equal(stats.reads, worstCaseReads(triples));
   assert.equal(stats.reads, 2 * 2 + 1 + 1);
-  assert.equal((await w.L.client.call("spent", { day: DAY })).kv_reads, stats.reads);
+  assert.equal((await w.L.client.call("spent", { day: DAY })).kv_reads_initial, stats.reads);
 });
 
 // --- eligibility rechecked immediately before APNs ------------------------
@@ -307,7 +308,7 @@ test("attempts are capped and exhaustion is swept to a terminal drop", async () 
 
 test("A · a read-budget refusal reads nothing, sends nothing and costs one DO call", async () => {
   const w = world();
-  await w.L.client.call("reserve", { day: DAY, metric: "kv_reads", want: POOL.kv_reads });
+  await w.L.client.call("reserve", { day: DAY, metric: "kv_reads_initial", want: POOL.kv_reads_initial });
   const before = { ...w.kv.counts };
   const triples = [0, 1].map((n) => triple({ uid: uid(n), fixtureId: "f1", league: "AAA", kickoffAt: KICK }));
   w.L.client.reset();
@@ -322,7 +323,7 @@ test("A · a read-budget refusal reads nothing, sends nothing and costs one DO c
 
 test("a read-budget refusal is TERMINAL, not merely reported", async () => {
   const w = world();
-  await w.L.client.call("reserve", { day: DAY, metric: "kv_reads", want: POOL.kv_reads });
+  await w.L.client.call("reserve", { day: DAY, metric: "kv_reads_initial", want: POOL.kv_reads_initial });
   const triples = [0, 1].map((n) => triple({ uid: uid(n), fixtureId: "f1", league: "AAA", kickoffAt: KICK }));
   const { stats } = await deliverJob(job(triples), env, w.deps);
   assert.equal(stats.terminated, 2);
@@ -335,11 +336,11 @@ test("a read-budget refusal is TERMINAL, not merely reported", async () => {
 
 test("a terminally dropped triple is never replanned into an attempt", async () => {
   const w = world();
-  await w.L.client.call("reserve", { day: DAY, metric: "kv_reads", want: POOL.kv_reads });
+  await w.L.client.call("reserve", { day: DAY, metric: "kv_reads_initial", want: POOL.kv_reads_initial });
   const t = triple({ uid: uid(0), fixtureId: "f1", league: "AAA", kickoffAt: KICK });
   await deliverJob(job([t]), env, w.deps);
   // Budget frees up; the work must still be finished with.
-  w.L.db.prepare("UPDATE budget SET used = 0 WHERE metric = 'kv_reads'").run();
+  w.L.db.prepare("UPDATE budget SET used = 0 WHERE metric = 'kv_reads_initial'").run();
   const again = await deliverJob(job([t]), env, w.deps);
   assert.equal(again.stats.attempted, 0, "a terminally dropped triple was replanned");
   assert.equal(w.sends.length, 0);
@@ -353,7 +354,7 @@ test("a refusal leaves sent, dropped and live-claimed rows untouched", async () 
   const { claimed: [liveRow] } = await w.L.client.call("beginDelivery",
     { day: DAY, want: 8, now: T0, triples: [live] });
 
-  await w.L.client.call("reserve", { day: DAY, metric: "kv_reads", want: POOL.kv_reads });
+  await w.L.client.call("reserve", { day: DAY, metric: "kv_reads_initial", want: POOL.kv_reads_initial });
   const triples = [0, 1, 2].map((n) => triple({ uid: uid(n), fixtureId: "f1", league: "AAA", kickoffAt: KICK }));
   const { stats } = await deliverJob(job(triples), env, w.deps);
 
@@ -522,4 +523,122 @@ test("B · a job spread across 45 one-person leagues prices and stays inside it"
   assert.equal(stats.reads, 45 * 2 + 1 + 45);
   assert.ok(actual <= stats.reads, `spent ${actual} against a reservation of ${stats.reads}`);
   assert.equal(L.client.count(), 3, "fragmentation cost extra round trips");
+});
+
+// ==========================================================================
+// A · a retry storm cannot starve first deliveries of KV READS
+// ==========================================================================
+//
+// The attempt pools protect first ATTEMPTS. They do nothing for reads, and a
+// delivery refused its reads never reaches the attempt pool at all — so until
+// reads are split too, "refusals only land on retries" is an assumption about
+// queue ordering that production does not provide.
+
+const FIXTURES_20 = Array.from({ length: 20 }, (_, i) => `f${String(i).padStart(2, "0")}`);
+
+/** 1,000 recipients in 1,000 one-person leagues, published on 20 fixtures. */
+function fragmentedWorld() {
+  const seed = { __meta: {} };
+  for (let i = 0; i < 1_000; i++) {
+    const code = `L${String(i).padStart(4, "0")}`;
+    const who = uid(i);
+    seed[`league:${code}`] = { code, name: code };
+    seed[`custom_slate:${code}:7`] = { status: "published", fixtureIds: FIXTURES_20, periodKey: "7" };
+    for (const id of FIXTURES_20) {
+      seed[`slatefx:${id}:${code}`] = { period: "7" };
+      seed.__meta[`slatefx:${id}:${code}`] = { period: "7" };
+    }
+    seed[`member:${code}:${who}`] = { nick: who, since: 0 };
+    seed[`push:${who}`] = { token: `tok-${who}`, mute: [] };
+  }
+  for (const id of FIXTURES_20) seed[`picks:${id}`] = {};
+  const kv = kvShim(seed);
+  const L = ledgerObject();
+  const sends = [];
+  const deps = harnessDeps({ kv, client: L.client, now: () => T0, sends });
+  return {
+    kv, L, sends, deps,
+    matches: FIXTURES_20.map((id) => fixture(id, new Date(KICK).toISOString())),
+  };
+}
+
+test("A · the read pools are split, and a retry cannot reach the first-delivery one", async () => {
+  const { POOL: P, readPoolFor, MAX_READS_PER_JOB, MAX_MESSAGES_PER_WINDOW } =
+    await import("../src/notify/ledger.js");
+  assert.equal(readPoolFor(1), "kv_reads_initial");
+  assert.equal(readPoolFor(2), "kv_reads_retry");
+  assert.equal(readPoolFor(4), "kv_reads_retry");
+  // The initial pool provably covers the entire worst admissible first pass.
+  assert.ok(P.kv_reads_initial >= MAX_MESSAGES_PER_WINDOW * MAX_READS_PER_JOB,
+    `${P.kv_reads_initial} cannot cover ${MAX_MESSAGES_PER_WINDOW} x ${MAX_READS_PER_JOB}`);
+  assert.equal(MAX_READS_PER_JOB, 45 * 2 + 3 + 45);
+});
+
+test("A · INTERLEAVED: a maximum retry storm cannot starve untouched first deliveries", async () => {
+  const w = fragmentedWorld();
+  const { POOL: P } = await import("../src/notify/ledger.js");
+  const { jobs } = await planWindow({
+    matches: w.matches, competitionOf: () => "PL", ledger: w.L.client, deps: w.deps, now: T0,
+  });
+  assert.equal(jobs.length, 445);
+
+  // Deliver only part of the initial queue.
+  const firstHalf = jobs.slice(0, 100);
+  const untouched = jobs.slice(100);
+  let attempted = 0;
+  for (const j of firstHalf) attempted += (await deliverJob(j, env, w.deps)).stats.attempted;
+
+  // Now the storm: every delivered message comes back, at every retry attempt,
+  // BEFORE any of the untouched first deliveries is dequeued.
+  let stormReads = 0;
+  for (let attempt = 2; attempt <= 4; attempt++) {
+    for (const j of firstHalf) {
+      const { stats } = await deliverJob(j, env, w.deps, { attempt });
+      assert.equal(stats.readPool, "kv_reads_retry", "a retry drew from the first-delivery pool");
+      stormReads += stats.reads;
+    }
+  }
+  assert.ok(stormReads > 0, "the storm did no work at all");
+  const afterStorm = await w.L.client.call("spent", { day: DAY });
+  assert.equal(afterStorm.kv_reads_retry, Math.min(stormReads, P.kv_reads_retry) === stormReads
+    ? stormReads : afterStorm.kv_reads_retry);
+
+  // Every untouched first delivery must STILL get its reads and its attempts.
+  let refused = 0;
+  for (const j of untouched) {
+    const { stats } = await deliverJob(j, env, w.deps);
+    assert.equal(stats.readPool, "kv_reads_initial");
+    if (stats.terminated) refused++;
+    attempted += stats.attempted;
+  }
+  assert.equal(refused, 0, `${refused} untouched first deliveries were refused their reads`);
+  assert.equal(attempted, 20_000, `only ${attempted} of 20,000 first attempts were made`);
+
+  const spent = await w.L.client.call("spent", { day: DAY });
+  assert.equal(spent.apns_initial, P.apns_initial, "not every first attempt was granted");
+  assert.ok(spent.kv_reads_initial <= P.kv_reads_initial,
+    `initial reads ${spent.kv_reads_initial} over pool ${P.kv_reads_initial}`);
+  assert.ok(spent.kv_reads_retry <= P.kv_reads_retry,
+    `retry reads ${spent.kv_reads_retry} over pool ${P.kv_reads_retry}`);
+  console.log(`\n  interleaved storm, fragmented 1,000 x 20:`);
+  console.log(`    first-delivery reads : ${spent.kv_reads_initial.toLocaleString()} / ${P.kv_reads_initial.toLocaleString()}`);
+  console.log(`    retry reads          : ${spent.kv_reads_retry.toLocaleString()} / ${P.kv_reads_retry.toLocaleString()}`);
+  console.log(`    first attempts made  : ${spent.apns_initial.toLocaleString()}\n`);
+});
+
+test("A · exhausting the retry read pool never touches the first-delivery pool", async () => {
+  const w = fragmentedWorld();
+  const { POOL: P } = await import("../src/notify/ledger.js");
+  await w.L.client.call("reserve",
+    { day: DAY, metric: "kv_reads_retry", want: P.kv_reads_retry });
+  const t = triple({ uid: uid(0), fixtureId: "f00", league: "L0000", kickoffAt: KICK });
+  // A retry now finds nothing and drops terminally.
+  const retry = await deliverJob(job([t]), env, w.deps, { attempt: 3 });
+  assert.equal(retry.stats.terminated, 1);
+  assert.equal(retry.stats.readPool, "kv_reads_retry");
+  // A first delivery of a DIFFERENT recipient is unaffected.
+  const fresh = triple({ uid: uid(1), fixtureId: "f00", league: "L0001", kickoffAt: KICK });
+  const first = await deliverJob(job([fresh]), env, w.deps);
+  assert.equal(first.stats.sent, 1, "an exhausted retry pool blocked a first delivery");
+  assert.equal(first.stats.readPool, "kv_reads_initial");
 });

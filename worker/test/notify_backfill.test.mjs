@@ -390,3 +390,153 @@ test("F · with no secret configured the route is closed entirely", async () => 
   }), env);
   assert.equal(response.status, 403);
 });
+
+// ==========================================================================
+// B · driven ENTIRELY through /admin/slate-index, as an operator would
+// ==========================================================================
+//
+// The direct-helper tests prove the algorithm. They do not prove the route
+// carries the state the algorithm needs — and it did not: the continuation
+// dropped forwardDone and reverseDone, so a finished direction restarted on
+// every operator request and the pair could never complete together.
+
+const SECRET = "s3cret";
+
+function endpoint(env) {
+  return async function post(body) {
+    const response = await worker.fetch(new Request("https://w/admin/slate-index", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ secret: SECRET, ...body }),
+    }), env);
+    assert.equal(response.status, 200, `endpoint returned ${response.status}`);
+    return response.json();
+  };
+}
+
+test("B · ENDPOINT: the full 1,000-league repair completes through HTTP alone", async () => {
+  const env = { ...hugeWorld(), MIGRATION_SECRET: SECRET, ALLOWED_ORIGIN: "*" };
+  const post = endpoint(env);
+
+  let body = { action: "repair" };
+  let calls = 0;
+  let result;
+  const finishedForward = [];
+  do {
+    result = await post(body);
+    calls++;
+    assert.ok(result.ops <= result.opsCap,
+      `invocation ${calls} performed ${result.ops} operations against a cap of ${result.opsCap}`);
+    finishedForward.push(result.forward.done);
+    // Exactly what an operator does: hand the continuation straight back.
+    body = { action: "repair", resume: result.resume };
+  } while (!result.done && calls < 2_000);
+
+  assert.equal(result.done, true, `repair never finished in ${calls} calls`);
+  assert.equal(indexKeys(env).length, 1_000 * 20);
+
+  // Once forward reported done it must NEVER have gone back to not-done.
+  const firstDone = finishedForward.indexOf(true);
+  assert.ok(firstDone >= 0, "forward never completed");
+  assert.ok(finishedForward.slice(firstDone).every(Boolean),
+    "a completed direction restarted on a later request");
+  console.log(`\n  endpoint-driven repair: ${calls} HTTP calls, cap ${result.opsCap} ops each`);
+});
+
+test("B · ENDPOINT: a fresh chain reaches ready, and only then", async () => {
+  const env = { ...hugeWorld({ leagues: 60, fixtures: 20 }), MIGRATION_SECRET: SECRET, ALLOWED_ORIGIN: "*" };
+  const post = endpoint(env);
+
+  // Repair first, through the endpoint.
+  let body = { action: "repair" };
+  let repaired;
+  do {
+    repaired = await post(body);
+    body = { action: "repair", resume: repaired.resume };
+  } while (!repaired.done);
+
+  // Then a fresh chained verification, one call at a time.
+  let verified = await post({ action: "verify", restart: true });
+  let calls = 1;
+  while (!verified.complete && calls < 2_000) {
+    assert.equal(verified.ready, false, "an unfinished chain reported ready");
+    assert.match(verified.verdict, /IN PROGRESS/);
+    verified = await post({ action: "verify" });
+    calls++;
+  }
+  assert.ok(calls > 1, "the chain finished in one call, so it proves nothing");
+  assert.equal(verified.ready, true, verified.verdict);
+  assert.match(verified.verdict, /READY/);
+  console.log(`  endpoint-driven verification: ${calls} HTTP calls to ready\n`);
+});
+
+test("B · ENDPOINT: a repair invalidates the chain, so ready cannot be stale", async () => {
+  const env = { ...legacyWorld({ indexed: true }), MIGRATION_SECRET: SECRET, ALLOWED_ORIGIN: "*" };
+  const post = endpoint(env);
+  const clean = await post({ action: "verify", restart: true });
+  assert.equal(clean.ready, true);
+
+  // Something changes; the operator repairs.
+  env.KV.store.set("custom_slate:AAA:7",
+    JSON.stringify({ status: "published", fixtureIds: ["f1", "f2", "f3"], periodKey: "7" }));
+  await post({ action: "repair" });
+
+  // Continuing the OLD chain must not resurrect the old verdict.
+  const after = await post({ action: "verify" });
+  assert.equal(after.chain.invocations, 1, "a stale chain survived the repair");
+  assert.equal(after.ready, true, "the fresh chain should now be clean");
+  assert.equal(indexKeys(env).length, 3);
+});
+
+test("B · ENDPOINT: the operation ceiling covers the WHOLE invocation", async () => {
+  const env = { ...hugeWorld({ leagues: 100 }), MIGRATION_SECRET: SECRET, ALLOWED_ORIGIN: "*" };
+  const post = endpoint(env);
+  const before = { ...env.KV.counts };
+  const result = await post({ action: "verify", restart: true });
+  const actual = (env.KV.counts.get - before.get) + (env.KV.counts.put - before.put)
+    + (env.KV.counts.list - before.list) + (env.KV.counts.delete - before.delete);
+  // Including the chain's own read and write, not just the scanning.
+  assert.ok(result.ops >= actual - 1 && result.ops <= result.opsCap,
+    `reported ${result.ops}, actually performed ${actual}, cap ${result.opsCap}`);
+  assert.ok(actual <= MAX_OPS_PER_INVOCATION,
+    `the invocation performed ${actual} KV operations against a cap of ${MAX_OPS_PER_INVOCATION}`);
+});
+
+// --- the deleted resume key ------------------------------------------------
+
+test("B · a deleted resume key does not carry its offset into a different slate", async () => {
+  // Two leagues, each with many fixtures. Stop partway through the first.
+  const ids = Array.from({ length: 30 }, (_, i) => `f${String(i).padStart(2, "0")}`);
+  const env = legacyWorld({ leagues: [["AAA", ids], ["BBB", ids]] });
+  const first = await runDirection(env, { direction: "forward", apply: true, maxOps: 12 });
+  assert.equal(first.position.key, "custom_slate:AAA:7");
+  assert.ok(first.position.offset > 0 && first.position.offset < 30,
+    `stopped at offset ${first.position.offset}`);
+  const doneForAAA = indexKeys(env).filter((k) => k.endsWith(":AAA")).length;
+
+  // The league is deleted between invocations; its slate key is gone.
+  env.KV.store.delete("custom_slate:AAA:7");
+  env.KV.store.delete("league:AAA");
+
+  const second = await runDirection(env,
+    { direction: "forward", apply: true, position: first.position, maxOps: 500 });
+  assert.equal(second.done, true);
+  // BBB must be indexed from its FIRST fixture, not from AAA's offset.
+  const bbb = indexKeys(env).filter((k) => k.endsWith(":BBB")).sort();
+  assert.equal(bbb.length, 30, `only ${bbb.length} of BBB's 30 fixtures were indexed`);
+  assert.equal(bbb[0], "slatefx:f00:BBB", "the first fixtures of the next slate were skipped");
+  // And AAA's partial keys are left for the reverse pass to clear.
+  assert.ok(doneForAAA > 0);
+});
+
+test("B · a deleted resume key with an exact-match successor keeps its offset", async () => {
+  const ids = Array.from({ length: 30 }, (_, i) => `f${String(i).padStart(2, "0")}`);
+  const env = legacyWorld({ leagues: [["AAA", ids]] });
+  const first = await runDirection(env, { direction: "forward", apply: true, maxOps: 12 });
+  const written = indexKeys(env).length;
+  // The key is still there, so the offset applies and finished work is not redone.
+  const second = await runDirection(env,
+    { direction: "forward", apply: true, position: first.position, maxOps: 500 });
+  assert.equal(second.repaired, 30 - written, "the resumed run redid finished fixtures");
+  assert.equal(indexKeys(env).length, 30);
+});

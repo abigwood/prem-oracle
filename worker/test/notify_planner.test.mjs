@@ -336,7 +336,7 @@ test("MAXIMUM SHAPE: every one of the 20,000 first attempts is granted", async (
   const spent = await w.L.client.call("spent", { day: DAY });
   assert.equal(spent.apns_initial, POOL.apns_initial, "INITIAL was not exactly consumed");
   assert.equal(spent.apns_retry, 0, "first delivery drew from the retry pool");
-  assert.ok(spent.kv_reads <= POOL.kv_reads, `KV reads ${spent.kv_reads} over pool`);
+  assert.ok(spent.kv_reads_initial <= POOL.kv_reads_initial, `KV reads ${spent.kv_reads_initial} over pool`);
   assert.equal(w.sends.length, 20_000);
 });
 
@@ -719,7 +719,7 @@ test("C5 · the corrected timing leaves every cap intact", async () => {
   const before = { ...world.kv.counts };
   for (const minutes of [60, 45, 30, 15]) await plan(tickAt(minutes));
   const spent = await world.L.client.call("spent", { day: DAY });
-  for (const metric of ["do_requests", "queue_ops", "worker_requests", "kv_reads"]) {
+  for (const metric of ["do_requests", "queue_ops", "worker_requests", "kv_reads_initial"]) {
     assert.ok(spent[metric] <= POOL[metric], `${metric} over cap after four ticks`);
   }
   const gets = world.kv.counts.get - before.get;

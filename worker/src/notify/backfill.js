@@ -130,6 +130,11 @@ export async function runDirection(env, {
   let resumeAt = position?.key ?? null;
   let done = false;
   let stopped = null;
+  // The key currently being worked on. The budget can run out on any operation,
+  // including ones outside an inner try — without this the fallback resumes with
+  // no key at all, which means starting the whole prefix again and never
+  // finishing.
+  let currentKey = null;
 
   const stop = (key, at) => { stopped = { cursor, key, offset: at }; };
 
@@ -137,9 +142,15 @@ export async function runDirection(env, {
     pages: for (;;) {
       const page = await kv.list({ prefix, cursor, limit: pageLimit });
       for (const key of page.keys) {
+        currentKey = key.name;
         if (resumeAt) {
           if (key.name < resumeAt) continue;          // finished last time
-          resumeAt = null;                            // this is where we stopped
+          // The stored key may have been DELETED between invocations. If the
+          // next key sorts after it, this is a different slate and the offset
+          // belongs to a fixture list that is not this one — start it at zero
+          // rather than skipping into the middle of it.
+          if (key.name !== resumeAt) offset = 0;
+          resumeAt = null;
         } else {
           offset = 0;
         }
@@ -216,8 +227,10 @@ export async function runDirection(env, {
     }
   } catch (error) {
     if (!(error instanceof BudgetExhausted)) throw error;
-    // Ran out fetching the next page: resume from the cursor, nothing part-done.
-    if (!stopped) stopped = { cursor, key: null, offset: 0 };
+    // Ran out somewhere without an inner handler — fetching a page, or reading
+    // a slate or league record. Resume at the key it was on: re-reading it is
+    // idempotent, and it is the only position that guarantees progress.
+    if (!stopped) stopped = { cursor, key: currentKey, offset: 0 };
   }
 
   return {
@@ -252,6 +265,15 @@ const freshChain = (startedAt) => ({
 
 export const readChain = (env) => env.KV.get(CHAIN_KEY, "json");
 const writeChain = (env, chain) => env.KV.put(CHAIN_KEY, JSON.stringify(chain));
+
+/**
+ * The chain's own bookkeeping: one read at the start of a verify and one write
+ * at the end, plus at most one delete when a repair invalidates it. They are
+ * charged against the invocation ceiling like everything else, so the number in
+ * the report is the whole invocation and not the scanning part of it.
+ */
+export const CHAIN_OPS_PER_VERIFY = 2;
+export const CHAIN_OPS_PER_REPAIR = 1;
 
 export function chainVerdict(chain) {
   const { forward, reverse } = chain;
@@ -291,8 +313,10 @@ export async function verify(env, { restart = false, at = 0, ...options } = {}) 
   const chain = existing ?? freshChain(at);
   chain.invocations = (chain.invocations ?? 0) + 1;
 
-  // Split the budget between the directions so one cannot starve the other.
-  const perDirection = Math.max(2, Math.floor(clampOps(options.maxOps) / 2));
+  // Split what is left AFTER the chain's own read and write, so the ceiling
+  // covers the whole invocation rather than only its scanning.
+  const scanBudget = Math.max(2, clampOps(options.maxOps) - CHAIN_OPS_PER_VERIFY);
+  const perDirection = Math.max(2, Math.floor(scanBudget / 2));
 
   for (const direction of ["forward", "reverse"]) {
     const leg = chain[direction];
@@ -307,7 +331,12 @@ export async function verify(env, { restart = false, at = 0, ...options } = {}) 
   }
 
   await writeChain(env, chain);
-  return { chain, forward: chain.forward, reverse: chain.reverse, ...chainVerdict(chain) };
+  const ops = (chain.forward.ops ?? 0) + (chain.reverse.ops ?? 0) + CHAIN_OPS_PER_VERIFY;
+  return {
+    chain, forward: chain.forward, reverse: chain.reverse,
+    ops, opsCap: clampOps(options.maxOps),
+    ...chainVerdict(chain),
+  };
 }
 
 /**
@@ -332,7 +361,9 @@ export async function repair(env, {
   forward: fPos = null, reverse: rPos = null,
   forwardDone = false, reverseDone = false, ...options
 } = {}) {
-  const perDirection = Math.max(2, Math.floor(clampOps(options.maxOps) / 2));
+  // Leave room for the chain invalidation this repair may have to perform.
+  const scanBudget = Math.max(2, clampOps(options.maxOps) - CHAIN_OPS_PER_REPAIR);
+  const perDirection = Math.max(2, Math.floor(scanBudget / 2));
   const forward = forwardDone
     ? finished("forward")
     : await runDirection(env,
@@ -350,6 +381,8 @@ export async function repair(env, {
     forward,
     reverse,
     done,
+    ops: forward.ops + reverse.ops + CHAIN_OPS_PER_REPAIR,
+    opsCap: clampOps(options.maxOps),
     resume: done ? null : {
       forward: forward.position,
       reverse: reverse.position,

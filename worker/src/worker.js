@@ -1194,24 +1194,36 @@ async function slateIndexAdmin(env, body) {
   if (!env.MIGRATION_SECRET || body.secret !== env.MIGRATION_SECRET) {
     return json({ error: "forbidden" }, 403, env);
   }
-  // Both directions carry their own position, and a position is a cursor PLUS
-  // an offset into the current slate's fixture list — a twenty-fixture slate
-  // has to be stoppable partway through. `limit` and `maxOps` are clamped to
-  // server constants: a request body may ask for less work, never for more.
-  const options = {
-    forward: body.forward || null,
-    reverse: body.reverse || null,
-    limit: body.limit,
-    maxOps: body.maxOps,
-  };
+  // A continuation is NOT merely a cursor: each direction carries a cursor, the
+  // key it stopped on and how far into that slate's fixture list it got, PLUS
+  // whether it has finished. Dropping the done flags is how a completed
+  // direction silently restarts on the next operator request, so the whole
+  // `resume` object is passed straight back in.
+  //
+  // `limit` and `maxOps` are clamped to server constants: a request body may
+  // ask for less work, never for more.
   if (body.action === "verify") {
+    // Verification is a CHAIN. It continues unless the caller explicitly
+    // restarts it, and only a chain that ran from the start of both prefixes
+    // can report ready.
     return json({ ok: true, ...(await verifySlateIndex(env, {
       restart: body.restart === true, at: Date.now(),
       limit: body.limit, maxOps: body.maxOps,
     })) }, 200, env);
   }
   if (body.action === "repair") {
-    return json({ ok: true, ...(await repairSlateIndex(env, options)) }, 200, env);
+    // Repair does NOT verify afterwards — a fresh full verification is
+    // unbounded. It invalidates the chain, and the operator runs verify with
+    // restart:true when the repair reports done.
+    const resume = body.resume || {};
+    return json({ ok: true, ...(await repairSlateIndex(env, {
+      forward: resume.forward ?? null,
+      reverse: resume.reverse ?? null,
+      forwardDone: resume.forwardDone === true,
+      reverseDone: resume.reverseDone === true,
+      limit: body.limit,
+      maxOps: body.maxOps,
+    })) }, 200, env);
   }
   return json({ error: "action must be verify or repair" }, 400, env);
 }
@@ -2135,7 +2147,10 @@ export default {
     const deps = notifyDeps(env);
     for (const message of batch.messages) {
       try {
-        const { ack } = await deliverJob(message.body, env, deps);
+        // Cloudflare's own delivery counter: attempt 1 is a first delivery,
+        // anything higher is a retry and draws from the retry read pool.
+        const { ack } = await deliverJob(message.body, env, deps,
+          { attempt: message.attempts ?? 1 });
         if (ack) message.ack();
         else message.retry({ delaySeconds: NOTIFY_RETRY_DELAY_S });
       } catch {

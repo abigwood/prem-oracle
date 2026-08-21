@@ -36,14 +36,38 @@ export const SWEEP_WITHIN_MS = 20 * 60 * 1000;
  *
  * FROZEN by the Gate-0 cost review. Raising any of these needs a fresh one.
  */
+/**
+ * The absolute ceiling for one job's reads: 45 recipients at two each, plus the
+ * three fixtures and the forty-five distinct leagues a full job can span.
+ */
+export const MAX_READS_PER_JOB = 45 * 2 + 3 + 45;   // 138
+/** ceil(20,000 / 45) messages at the product maximum. */
+export const MAX_MESSAGES_PER_WINDOW = 445;
+
 export const POOL = Object.freeze({
   apns_initial: 20_000,
   apns_retry: 5_000,
-  kv_reads: 110_000,
+  /**
+   * Reads are split the same way attempts are, and for the same reason.
+   *
+   * One shared read pool gives no ORDERING guarantee: a retry delivery can
+   * reserve reads before an untouched first-delivery message is even dequeued,
+   * and under slow APNs responses that is not a corner case. Protecting the
+   * attempt pools while leaving reads shared protects the wrong half — a first
+   * delivery refused its reads never reaches the attempt pool at all.
+   *
+   * INITIAL is sized to the entire worst admissible first pass, so it cannot be
+   * touched by a retry however the two interleave.
+   */
+  kv_reads_initial: 62_000,        // >= 445 x 138 = 61,410, provably sufficient
+  kv_reads_retry: 48_000,
   queue_ops: 7_500,
   do_requests: 7_500,
   worker_requests: 4_800,
 });
+
+/** Which read pool a delivery draws from. The queue knows; nothing else has to. */
+export const readPoolFor = (attempt) => (Number(attempt) > 1 ? "kv_reads_retry" : "kv_reads_initial");
 
 /** Booked before sendBatch, because enqueueing makes these unavoidable. */
 export const PER_MESSAGE_WORST_CASE = Object.freeze({
@@ -233,16 +257,17 @@ export class NotifyLedger {
    * If the read allowance is refused, the refusal is made TERMINAL inside this
    * same transaction: reporting a triple as dropped is not dropping it.
    */
-  beginDelivery({ day, want, triples, now }) {
+  beginDelivery({ day, want, triples, now, attempt = 1 }) {
+    const pool = readPoolFor(attempt);
     return this.ctx.storage.transactionSync(() => {
-      const used = this.#used(day, "kv_reads");
-      if (used + want > POOL.kv_reads) {
+      const used = this.#used(day, pool);
+      if (used + want > POOL[pool]) {
         const { dropped, byFixture } = this.#terminate({
           day, now, triples, reason: "kv-read-budget-exhausted",
         });
-        return { refused: true, granted: 0, dropped, byFixture, claimed: [], deferred: 0 };
+        return { refused: true, pool, granted: 0, dropped, byFixture, claimed: [], deferred: 0 };
       }
-      this.sql.exec(BUDGET_SET, day, "kv_reads", used + want);
+      this.sql.exec(BUDGET_SET, day, pool, used + want);
       const claimed = [];
       const owned = new Set();
       for (const t of triples) {
@@ -258,7 +283,7 @@ export class NotifyLedger {
         const row = this.#rows(OWNER, t.uid, t.fixtureId)[0];
         if (row && row.state === "claimed" && row.claim_until > now) deferred++;
       }
-      return { refused: false, granted: want, dropped: 0, byFixture: {}, claimed, deferred };
+      return { refused: false, pool, granted: want, dropped: 0, byFixture: {}, claimed, deferred };
     });
   }
 

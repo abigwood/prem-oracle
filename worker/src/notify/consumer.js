@@ -102,7 +102,7 @@ export async function stillEligible(deps, context, triple) {
  * would silently lose that reminder, and the lease means it cannot be reclaimed
  * yet; RETRY_DELAY_S is longer than the lease, so the redelivery finds it gone.
  */
-export async function deliverJob(job, env, deps) {
+export async function deliverJob(job, env, deps, { attempt = 1 } = {}) {
   const now = deps.now();
   const day = utcDay(now);
   const ledger = deps.ledger();
@@ -119,15 +119,19 @@ export async function deliverJob(job, env, deps) {
 
   // CALL 1 — reserve, claim and resolve dispositions, in one round trip. A
   // refusal is made terminal inside that same transaction.
+  // The queue's own attempt counter decides which read pool this delivery may
+  // draw from. A retry can never reach the pool reserved for first deliveries.
   const begun = await ledger.call("beginDelivery", {
-    day, want: worstCaseReads(triples), now, triples: triples.map(identity),
+    day, want: worstCaseReads(triples), now, attempt, triples: triples.map(identity),
   });
   if (begun.refused) {
     stats.dropped = begun.dropped;
     stats.terminated = begun.dropped;
+    stats.readPool = begun.pool;
     return { ack: true, stats };
   }
   stats.reads = begun.granted;                         // 6. consumed either way
+  stats.readPool = begun.pool;
   stats.deferred = begun.deferred;
   let ack = begun.deferred === 0;
 

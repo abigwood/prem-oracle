@@ -16,6 +16,8 @@ export const LEASE_MS = 120_000;
 export const MAX_ATTEMPTS = 5;
 /** Redelivery must land AFTER a crashed consumer's lease has expired. */
 export const RETRY_DELAY_S = 150;
+/** The initial plan, and one sweep for whoever is still unsent. */
+export const PLAN_PASSES = 2;
 
 /**
  * Two pools, so a retry can never consume capacity a recipient who has not yet
@@ -59,6 +61,10 @@ CREATE INDEX IF NOT EXISTS delivery_kickoff ON delivery (kickoff_at);
 CREATE TABLE IF NOT EXISTS budget (
   day TEXT NOT NULL, metric TEXT NOT NULL, used INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (day, metric)
+);
+CREATE TABLE IF NOT EXISTS plan_pass (
+  day TEXT NOT NULL, fixture TEXT NOT NULL, passes INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (day, fixture)
 );
 CREATE TABLE IF NOT EXISTS dropped_log (
   day TEXT NOT NULL, fixture TEXT NOT NULL, reason TEXT NOT NULL,
@@ -127,6 +133,21 @@ const PRUNE = `DELETE FROM delivery WHERE kickoff_at <= ?1`;
 const LOG_DROP = `
 INSERT INTO dropped_log (day, fixture, reason, uids, at) VALUES (?1, ?2, ?3, ?4, ?5)
 ON CONFLICT (day, fixture, reason) DO UPDATE SET uids = dropped_log.uids + ?4, at = ?5`;
+/**
+ * One planning pass per fixture, at most PLAN_PASSES per day.
+ *
+ * The cron fires every fifteen minutes and the reminder window is an hour, so a
+ * fixture is due on four consecutive ticks. Without this, every one of them
+ * re-plans it: four times the messages, four times the queue operations, and a
+ * cost model describing a quarter of what actually happens. The ledger dedupes
+ * the DELIVERY, but only after the queue has already been paid for.
+ */
+const PLAN_CLAIM = `
+INSERT INTO plan_pass (day, fixture, passes) VALUES (?1, ?2, 1)
+ON CONFLICT (day, fixture) DO UPDATE SET passes = plan_pass.passes + 1
+  WHERE plan_pass.passes < ?3
+RETURNING passes`;
+
 const BUDGET_GET = `SELECT used FROM budget WHERE day=?1 AND metric=?2`;
 const BUDGET_SET = `INSERT INTO budget (day, metric, used) VALUES (?1, ?2, ?3)
    ON CONFLICT (day, metric) DO UPDATE SET used = ?3`;
@@ -315,6 +336,25 @@ export class NotifyLedger {
     });
   }
 
+  /**
+   * May this planner plan these fixtures now?
+   *
+   * Returns the pass number for each fixture it granted, so the caller knows
+   * whether it is the initial plan or the sweep. Batched, because a planning
+   * window covers up to twenty fixtures and this must not become a round trip
+   * per fixture.
+   */
+  claimPlanPasses({ day, fixtureIds }) {
+    return this.ctx.storage.transactionSync(() => {
+      const granted = {};
+      for (const id of fixtureIds) {
+        const row = this.#rows(PLAN_CLAIM, day, String(id), PLAN_PASSES)[0];
+        if (row) granted[String(id)] = row.passes;
+      }
+      return granted;
+    });
+  }
+
   /** Who is still owed a reminder for a fixture — the planner's sweep pass. */
   unsent({ fixtureId, uids }) {
     return uids.filter((uid) => {
@@ -335,6 +375,7 @@ export class NotifyLedger {
       beginDelivery: () => this.beginDelivery(args),
       terminatePlanned: () => this.terminatePlanned(args),
       reserveMessages: () => this.reserveMessages(args),
+      claimPlanPasses: () => this.claimPlanPasses(args),
       grantAttempts: () => this.grantAttempts(args),
       recordOutcomes: () => this.recordOutcomes(args),
       sweep: () => this.sweep(args),

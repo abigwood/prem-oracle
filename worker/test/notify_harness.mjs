@@ -78,25 +78,52 @@ export function ledgerObject() {
   };
 }
 
-/** A KV shim that counts every operation, so read claims can be asserted. */
-export function kvShim(seed = {}) {
-  const store = new Map(Object.entries(seed).map(([k, v]) => [k, JSON.stringify(v)]));
+/**
+ * A KV shim that counts every operation and PAGINATES for real.
+ *
+ * The pagination matters as much as the counting: a shim that returns
+ * everything in one page cannot tell a resumable scan from one that silently
+ * restarts, and cannot prove a cursor is honoured at all.
+ */
+export function kvShim(seed = {}, { pageSize = 1000 } = {}) {
+  const { __meta: seededMeta = {}, ...rest } = seed;
+  const store = new Map(Object.entries(rest).map(([k, v]) => [k, JSON.stringify(v)]));
+  const meta = new Map(Object.entries(seededMeta));
   const counts = { get: 0, put: 0, delete: 0, list: 0 };
   return {
     counts,
     store,
+    meta,
+    /** Seed a key's list metadata, as a metadata-carrying put would have. */
+    setMeta(key, metadata) { meta.set(key, metadata); },
     async get(key, type) {
       counts.get++;
       const raw = store.get(key);
       if (raw == null) return null;
       return type === "json" ? JSON.parse(raw) : raw;
     },
-    async put(key, value) { counts.put++; store.set(key, value); },
-    async delete(key) { counts.delete++; store.delete(key); },
-    async list({ prefix = "", cursor } = {}) {
+    async put(key, value, options) {
+      counts.put++;
+      store.set(key, value);
+      if (options?.metadata) meta.set(key, options.metadata);
+      else meta.delete(key);
+    },
+    async delete(key) { counts.delete++; store.delete(key); meta.delete(key); },
+    async list({ prefix = "", cursor, limit = pageSize } = {}) {
       counts.list++;
       const names = [...store.keys()].filter((k) => k.startsWith(prefix)).sort();
-      return { keys: names.map((name) => ({ name })), list_complete: true, cursor };
+      // The cursor is the last key returned, so a resumed scan continues from
+      // after it rather than from the top.
+      const start = cursor ? names.findIndex((n) => n > cursor) : 0;
+      const from = start < 0 ? names.length : start;
+      const slice = names.slice(from, from + limit);
+      const last = slice[slice.length - 1];
+      const complete = from + slice.length >= names.length;
+      return {
+        keys: slice.map((name) => ({ name, metadata: meta.get(name) })),
+        list_complete: complete,
+        cursor: complete ? undefined : last,
+      };
     },
   };
 }
@@ -113,29 +140,44 @@ export function harnessDeps({ kv, client, now, sends, sendResult = () => ({ ok: 
     },
     leaguesForFixture: async (fixtureId) => {
       const prefix = `slatefx:${fixtureId}:`;
-      const page = await kv.list({ prefix });
-      return page.keys.map((k) => k.name.slice(prefix.length)).sort();
+      const found = [];
+      let cursor;
+      for (;;) {
+        const page = await kv.list({ prefix, cursor });
+        for (const key of page.keys) {
+          const period = key.metadata?.period;
+          if (period == null) continue;
+          found.push({ code: key.name.slice(prefix.length), period: String(period) });
+        }
+        if (page.list_complete) break;
+        cursor = page.cursor;
+      }
+      return found.sort((a, b) => a.code.localeCompare(b.code));
     },
     readPicks: async (fixtureId) => (await kvGet(`picks:${fixtureId}`)) || {},
     readSlate: (code, period) => kvGet(`custom_slate:${code}:${period}`),
     readPush: (uid) => kvGet(`push:${uid}`),
     dropPushToken: (uid) => kv.delete(`push:${uid}`),
     isMember: async (code, uid) => !!(await kvGet(`member:${code}:${uid}`)),
-    periodsForFixture: async (fixtureId, codes) => {
-      const out = new Map();
-      for (const code of codes) {
-        const hint = await kvGet(`slatefx:${fixtureId}:${code}`);
-        if (hint?.period != null) out.set(code, String(hint.period));
+    membershipGraph: async () => {
+      const graph = new Map();
+      let cursor;
+      let pages = 0;
+      for (;;) {
+        const page = await kv.list({ prefix: "member:", cursor });
+        pages++;
+        for (const key of page.keys) {
+          const rest = key.name.slice("member:".length);
+          const split = rest.indexOf(":");
+          if (split < 0) continue;
+          const code = rest.slice(0, split);
+          if (!graph.has(code)) graph.set(code, []);
+          graph.get(code).push(rest.slice(split + 1));
+        }
+        if (page.list_complete) break;
+        cursor = page.cursor;
       }
-      return out;
-    },
-    membersByLeague: async (codes) => {
-      const out = new Map();
-      for (const code of codes) {
-        const page = await kv.list({ prefix: `member:${code}:` });
-        out.set(code, page.keys.map((k) => k.name.slice(`member:${code}:`.length)));
-      }
-      return out;
+      return { graph, pages };
     },
   };
 }
@@ -144,7 +186,10 @@ export function harnessDeps({ kv, client, now, sends, sendResult = () => ({ ok: 
 export function seedLeague(seed, { code, size, fixtureIds, period = "7", offset = 0 }) {
   seed[`league:${code}`] = { code, name: `League ${code}` };
   seed[`custom_slate:${code}:${period}`] = { status: "published", fixtureIds, periodKey: period };
-  for (const id of fixtureIds) seed[`slatefx:${id}:${code}`] = { period };
+  for (const id of fixtureIds) {
+    seed[`slatefx:${id}:${code}`] = { period };
+    (seed.__meta ||= {})[`slatefx:${id}:${code}`] = { period };
+  }
   for (let i = 0; i < size; i++) {
     const uid = `prem_u${String(offset + i).padStart(5, "0")}`;
     seed[`member:${code}:${uid}`] = { nick: uid, since: 0 };

@@ -10,13 +10,21 @@ import worker from "../src/worker.js";
 const SOURCE = readFileSync(new URL("../src/worker.js", import.meta.url), "utf8");
 
 /** A world where slates exist but the index was never written — the real case. */
-function legacyWorld({ leagues = [["AAA", ["f1", "f2"]]], indexed = false } = {}) {
-  const seed = {};
+function legacyWorld({
+  leagues = [["AAA", ["f1", "f2"]]], indexed = false, pageSize = 1000, league = true,
+} = {}) {
+  const seed = { __meta: {} };
   for (const [code, fixtureIds] of leagues) {
+    if (league) seed[`league:${code}`] = { code, name: code };
     seed[`custom_slate:${code}:7`] = { status: "published", fixtureIds, periodKey: "7" };
-    if (indexed) for (const id of fixtureIds) seed[`slatefx:${id}:${code}`] = { period: "7" };
+    if (indexed) {
+      for (const id of fixtureIds) {
+        seed[`slatefx:${id}:${code}`] = { period: "7" };
+        seed.__meta[`slatefx:${id}:${code}`] = { period: "7" };
+      }
+    }
   }
-  return { KV: kvShim(seed) };
+  return { KV: kvShim(seed, { pageSize }) };
 }
 
 const indexKeys = (env) => [...env.KV.store.keys()].filter((k) => k.startsWith("slatefx:")).sort();
@@ -54,10 +62,23 @@ test("F · repair writes exactly the missing keys and then verifies clean", asyn
   assert.match(result.verified.verdict, /READY/);
 });
 
-test("F · a repaired index carries the period the consumer needs", async () => {
+test("F · a repaired index carries the period in BOTH the value and the metadata", async () => {
   const env = legacyWorld();
   await repair(env);
   assert.deepEqual(JSON.parse(env.KV.store.get("slatefx:f1:AAA")), { period: "7" });
+  // The hot path reads metadata; a value-only key is invisible to it.
+  assert.deepEqual(env.KV.meta.get("slatefx:f1:AAA"), { period: "7" });
+});
+
+test("F · a value-only legacy key is treated as missing and repaired", async () => {
+  const env = legacyWorld({ indexed: true });
+  env.KV.meta.delete("slatefx:f1:AAA");            // written before metadata existed
+  const before = await verify(env);
+  assert.equal(before.forward.missing, 1);
+  assert.equal(before.ready, false);
+  await repair(env);
+  assert.deepEqual(env.KV.meta.get("slatefx:f1:AAA"), { period: "7" });
+  assert.equal((await verify(env)).ready, true);
 });
 
 // --- idempotence and rerun safety -----------------------------------------
@@ -145,29 +166,120 @@ test("F · a draft that was previously indexed has its keys removed", async () =
 
 // --- resumability ---------------------------------------------------------
 
-test("F · a bounded page returns a cursor and the next page continues", async () => {
-  const seed = {};
-  for (let i = 0; i < 12; i++) {
-    seed[`custom_slate:L${String(i).padStart(2, "0")}:7`] =
-      { status: "published", fixtureIds: ["f1"], periodKey: "7" };
-  }
-  const env = { KV: kvShim(seed) };
-  // The shim returns everything in one page, so drive resumability through
-  // runDirection's own page budget instead.
-  const first = await runDirection(env, { direction: "forward", apply: true, maxPages: 1 });
-  assert.equal(first.pages, 1);
-  assert.equal(first.done, true);
-  assert.equal(first.repaired, 12);
+/** Twelve one-fixture leagues, paginated four to a page. */
+function pagedWorld({ count = 12, pageSize = 4, indexed = false } = {}) {
+  return legacyWorld({
+    leagues: Array.from({ length: count }, (_, i) => [`L${String(i).padStart(2, "0")}`, ["f1"]]),
+    indexed, pageSize,
+  });
+}
+
+test("F · an interrupted FORWARD scan resumes from its own cursor", async () => {
+  const env = pagedWorld();
+  const first = await runDirection(env, { direction: "forward", apply: true, limit: 4, maxPages: 1 });
+  assert.equal(first.done, false, "the scan claimed to finish in one page");
+  assert.ok(first.cursor, "no cursor to resume from");
+  assert.equal(first.repaired, 4);
+  assert.equal(first.fromStart, true);
+
+  const second = await runDirection(env,
+    { direction: "forward", cursor: first.cursor, apply: true, limit: 4, maxPages: 1 });
+  assert.equal(second.repaired, 4, "the resumed scan redid finished work or skipped some");
+  assert.equal(second.fromStart, false, "a resumed scan must not claim to start from the beginning");
+
+  const third = await runDirection(env,
+    { direction: "forward", cursor: second.cursor, apply: true, limit: 4 });
+  assert.equal(third.repaired, 4);
+  assert.equal(third.done, true);
+  assert.equal(indexKeys(env).length, 12, "resumption lost or duplicated work");
 });
 
-test("F · an interrupted repair resumes and finishes the job", async () => {
-  const env = legacyWorld({ leagues: [["AAA", ["f1", "f2", "f3"]]] });
-  // Simulate an invocation that died after writing one key.
-  await env.KV.put("slatefx:f1:AAA", JSON.stringify({ period: "7" }));
+test("F · an interrupted REVERSE scan resumes independently of the forward one", async () => {
+  const env = pagedWorld({ indexed: true });
+  // Every index key is stale: their slates list a different fixture now.
+  for (let i = 0; i < 12; i++) {
+    env.KV.store.set(`custom_slate:L${String(i).padStart(2, "0")}:7`,
+      JSON.stringify({ status: "published", fixtureIds: ["other"], periodKey: "7" }));
+  }
+  const first = await runDirection(env, { direction: "reverse", apply: true, limit: 4, maxPages: 1 });
+  assert.equal(first.removed, 4);
+  assert.equal(first.done, false);
+  // A FORWARD cursor is meaningless here, and vice versa: they are separate.
+  const forwardFirst = await runDirection(env, { direction: "forward", limit: 4, maxPages: 1 });
+  assert.notEqual(forwardFirst.cursor, first.cursor,
+    "the two prefixes produced the same cursor, which cannot be right");
+
+  const second = await runDirection(env,
+    { direction: "reverse", cursor: first.cursor, apply: true, limit: 4 });
+  assert.equal(second.removed, 8, "the reverse scan did not continue from its own cursor");
+  assert.equal(indexKeys(env).length, 0);
+});
+
+test("F · a dirty PREFIX with a clean suffix can never report ready", async () => {
+  const env = pagedWorld({ indexed: true });
+  // Break the very first league only: the tail of the scan is spotless.
+  env.KV.store.delete("slatefx:f1:L00");
+  const fresh = await verify(env, { limit: 4 });
+  assert.equal(fresh.ready, false);
+  assert.equal(fresh.forward.missing, 1);
+
+  // Resuming past the damage sees a clean suffix — and must still refuse.
+  const firstPage = await runDirection(env, { direction: "forward", limit: 4, maxPages: 1 });
+  const suffix = await verify(env, {
+    limit: 4, forwardCursor: firstPage.cursor, reverseCursor: firstPage.cursor,
+  });
+  assert.equal(suffix.forward.missing, 0, "the suffix really is clean");
+  assert.equal(suffix.clean, true);
+  assert.equal(suffix.ready, false, "a suffix-only scan reported the index fit to ship");
+  assert.equal(suffix.fromStart, false);
+  assert.match(suffix.verdict, /NOT A SHIP GATE/);
+});
+
+test("F · only a fresh complete scan of both prefixes can report ready", async () => {
+  const env = pagedWorld({ indexed: true });
+  const partial = await verify(env, { limit: 4, maxPages: 1 });
+  assert.equal(partial.complete, false);
+  assert.equal(partial.ready, false);
+  assert.match(partial.verdict, /INCOMPLETE/);
+
+  const full = await verify(env, { limit: 4 });
+  assert.equal(full.complete, true);
+  assert.equal(full.fromStart, true);
+  assert.equal(full.ready, true);
+  assert.match(full.verdict, /READY/);
+});
+
+test("F · repair reports where to resume, and still verifies from the start", async () => {
+  const env = pagedWorld();
+  const result = await repair(env, { limit: 4, maxPages: 1 });
+  assert.ok(result.resume?.forwardCursor, "a partial repair gave no resumption point");
+  // Its verification is a fresh full scan, so it can speak for the whole index.
+  assert.equal(result.verified.fromStart, true);
+  assert.equal(result.verified.ready, false, "an unfinished repair was declared ready");
+});
+
+// --- partial league deletion ----------------------------------------------
+
+test("F · an orphaned slate is NOT indexed: the league record is the authority", async () => {
+  const env = legacyWorld({ league: false });     // slate survived, league:AAA gone
   const result = await repair(env);
-  assert.equal(result.forward.repaired, 2, "the resumed run redid finished work");
-  assert.equal(result.verified.ready, true);
-  assert.equal(indexKeys(env).length, 3);
+  assert.equal(result.forward.orphaned, 1);
+  assert.equal(result.forward.repaired, 0, "a deleted league was resurrected into the index");
+  assert.equal(indexKeys(env).length, 0);
+});
+
+test("F · index keys of a deleted league are stale even when the slate survived", async () => {
+  const env = legacyWorld({ indexed: true, league: false });
+  const result = await repair(env);
+  assert.equal(result.reverse.removed, 2, "a deleted league's index keys were kept");
+  assert.equal(indexKeys(env).length, 0);
+});
+
+test("F · an orphaned slate keeps the gate shut", async () => {
+  const env = legacyWorld({ league: false });
+  const result = await verify(env);
+  assert.equal(result.ready, false);
+  assert.match(result.verdict, /orphaned/);
 });
 
 // --- the ship gate --------------------------------------------------------

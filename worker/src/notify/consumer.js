@@ -21,16 +21,36 @@ import { reminderPayload, collapseId, apnsExpiration } from "./copy.js";
 
 /** Per-recipient reads: push:<uid> and member:<code>:<uid>. Nothing else. */
 export const KV_READS_PER_TRIPLE = 2;
+
 /**
- * Per-message reads: one picks: per distinct fixture and one custom_slate: per
- * distinct (league, period). The packer bounds a job to three of each, which is
- * what makes this a constant rather than a per-recipient cost.
+ * A job spans at most three fixtures. Leagues are NOT bounded, deliberately.
+ *
+ * Capping leagues per job looked like it made the fixed read cost a constant,
+ * but it only did so for leagues that are large. A thousand one-person leagues
+ * hits the cap after three triples, turning 445 messages into 6,680 — more than
+ * the queue and Durable Object pools can fund, so most of the round would
+ * simply never be planned. The bound was buying a tidy constant at the price of
+ * the product working for small leagues.
  */
 export const MAX_FIXTURES_PER_JOB = 3;
-export const MAX_LEAGUES_PER_JOB = 3;
-export const KV_READS_FIXED = MAX_FIXTURES_PER_JOB + MAX_LEAGUES_PER_JOB;
 
-export const worstCaseReads = (count) => count * KV_READS_PER_TRIPLE + KV_READS_FIXED;
+/**
+ * What a job will read, from the JOB'S OWN COMPOSITION rather than a global
+ * worst case: two per recipient, one pick map per distinct fixture, one slate
+ * per distinct (league, period). A job of 45 in one league reads 94; the same
+ * 45 spread across 45 one-person leagues reads 136 — and says so before it
+ * starts, rather than discovering it halfway through.
+ */
+export function worstCaseReads(triples) {
+  const list = Array.isArray(triples) ? triples : [];
+  const fixtures = new Set();
+  const contexts = new Set();
+  for (const t of list) {
+    fixtures.add(t.fixtureId);
+    contexts.add(`${t.league}|${t.period}`);
+  }
+  return list.length * KV_READS_PER_TRIPLE + fixtures.size + contexts.size;
+}
 
 /**
  * The shared context a job's recipients are all judged against.
@@ -100,7 +120,7 @@ export async function deliverJob(job, env, deps) {
   // CALL 1 — reserve, claim and resolve dispositions, in one round trip. A
   // refusal is made terminal inside that same transaction.
   const begun = await ledger.call("beginDelivery", {
-    day, want: worstCaseReads(triples.length), now, triples: triples.map(identity),
+    day, want: worstCaseReads(triples), now, triples: triples.map(identity),
   });
   if (begun.refused) {
     stats.dropped = begun.dropped;

@@ -192,25 +192,42 @@ const CUSTOM_MIX_INDEX = "index:custom_mix";
  */
 async function syncSlateFixtureIndex(env, code, { added = [], removed = [], period }) {
   if (!env.KV) return;
+  const value = JSON.stringify({ period: String(period) });
   await Promise.all([
-    ...added.map((id) => kvPut(env, slateFixtureKey(String(id), code), { period: String(period) })),
+    // The period goes in the METADATA as well as the value. KV.list returns
+    // metadata, so the planner learns which period each league published this
+    // fixture in without a value read per league — which is the difference
+    // between "per league = 0 reads" being true and being a wish.
+    ...added.map((id) => env.KV.put(slateFixtureKey(String(id), code), value,
+      { metadata: { period: String(period) } })),
     ...removed.map((id) => env.KV.delete(slateFixtureKey(String(id), code))),
   ]);
 }
 
-/** Every league whose published slate currently lists this fixture. */
+/**
+ * Every league whose published slate lists this fixture, with the period it
+ * published in — from ONE list, reading key names and metadata only.
+ *
+ * A key without metadata predates the metadata-carrying writes and is skipped
+ * rather than chased with a value read: the backfill's verify pass reports
+ * those, and the ship gate refuses to open while any remain.
+ */
 async function leaguesForFixture(env, fixtureId) {
   if (!env.KV?.list) return [];
   const prefix = slateFixturePrefix(String(fixtureId));
-  const codes = [];
+  const found = [];
   let cursor;
   for (;;) {
     const page = await env.KV.list({ prefix, cursor });
-    for (const key of page.keys) codes.push(key.name.slice(prefix.length));
+    for (const key of page.keys) {
+      const period = key.metadata?.period;
+      if (period == null) continue;
+      found.push({ code: key.name.slice(prefix.length), period: String(period) });
+    }
     if (page.list_complete) break;
     cursor = page.cursor;
   }
-  return codes.sort();
+  return found.sort((a, b) => a.code.localeCompare(b.code));
 }
 
 // A league reads its slates when it publishes one every week (v1.5: any league
@@ -1177,8 +1194,11 @@ async function slateIndexAdmin(env, body) {
   if (!env.MIGRATION_SECRET || body.secret !== env.MIGRATION_SECRET) {
     return json({ error: "forbidden" }, 403, env);
   }
+  // Two prefixes, two cursors: a position in custom_slate: means nothing in
+  // slatefx:, so they are never conflated into one resumption token.
   const options = {
-    cursor: body.cursor || undefined,
+    forwardCursor: body.forwardCursor || undefined,
+    reverseCursor: body.reverseCursor || undefined,
     limit: Number(body.limit) || undefined,
     maxPages: Number(body.maxPages) || undefined,
   };
@@ -1663,37 +1683,38 @@ function notifyDeps(env, nowMs) {
     leaguesForFixture: (fixtureId) => leaguesForFixture(env, fixtureId),
     readPicks: async (fixtureId) => (await kvGet(env, `picks:${fixtureId}`)) || {},
     readSlate: (code, period) => kvGet(env, slateKey(code, period)),
-    /** The period each league published this fixture in, from the index value. */
-    periodsForFixture: async (fixtureId, codes) => {
-      const out = new Map();
-      for (const code of codes) {
-        const hint = await kvGet(env, slateFixtureKey(String(fixtureId), code));
-        if (hint?.period != null) out.set(code, String(hint.period));
-      }
-      return out;
-    },
     readPush: (uid) => kvGet(env, `push:${uid}`),
     dropPushToken: (uid) => env.KV.delete(`push:${uid}`),
     isMember: async (code, uid) => !!(await kvGet(env, leagueMemberKey(code, uid))),
     /**
-     * Membership from KEY NAMES only. One list per due league, no value reads,
-     * and no per-member fan-out anywhere in the cron invocation.
+     * The whole membership graph, in bounded pages, ONCE per planning window.
+     *
+     * Listing per league is one request per league, which at a thousand
+     * one-person leagues is a thousand requests to learn a thousand facts. One
+     * scan of the `member:` prefix costs pages proportional to total
+     * memberships instead — independent of how those memberships are
+     * distributed, which is the only shape that holds however the product is
+     * actually used. Key names only; no value read anywhere in it.
      */
-    membersByLeague: async (codes) => {
-      const out = new Map();
-      for (const code of codes) {
-        const prefix = leagueMemberPrefix(code);
-        const uids = [];
-        let cursor;
-        for (;;) {
-          const page = await env.KV.list({ prefix, cursor });
-          for (const key of page.keys) uids.push(key.name.slice(prefix.length));
-          if (page.list_complete) break;
-          cursor = page.cursor;
+    membershipGraph: async () => {
+      const graph = new Map();
+      let cursor;
+      let pages = 0;
+      for (;;) {
+        const page = await env.KV.list({ prefix: "member:", cursor });
+        pages++;
+        for (const key of page.keys) {
+          const rest = key.name.slice("member:".length);
+          const split = rest.indexOf(":");
+          if (split < 0) continue;
+          const code = rest.slice(0, split);
+          if (!graph.has(code)) graph.set(code, []);
+          graph.get(code).push(rest.slice(split + 1));
         }
-        out.set(code, uids);
+        if (page.list_complete) break;
+        cursor = page.cursor;
       }
-      return out;
+      return { graph, pages };
     },
   };
 }

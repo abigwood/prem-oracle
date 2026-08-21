@@ -6,7 +6,7 @@ import {
   dueFixtures, triplesForFixture, packJobs, reserveForJobs, planWindow,
   JOB_TRIPLES, REMINDER_WINDOW_MS, slateFixtureKey,
 } from "../src/notify/planner.js";
-import { MAX_FIXTURES_PER_JOB, MAX_LEAGUES_PER_JOB } from "../src/notify/consumer.js";
+import { MAX_FIXTURES_PER_JOB } from "../src/notify/consumer.js";
 import { POOL, PER_MESSAGE_WORST_CASE, utcDay } from "../src/notify/ledger.js";
 import { deliverJob } from "../src/notify/consumer.js";
 
@@ -29,15 +29,15 @@ test("the 60-minute reminder window is preserved exactly", () => {
 
 // --- N1 · league selection -------------------------------------------------
 
-const periods = (codes, period = "7") => new Map(codes.map((c) => [c, period]));
+const leaguesOf = (codes, period = "7") => codes.map((code) => ({ code, period }));
 
 test("N1 · a recipient in several leagues is notified once, through the smallest code", () => {
   const codes = ["ZZZ", "AAA", "MMM"];
   const triples = triplesForFixture({
     match: fixture("f1", new Date(KICK).toISOString()),
-    leagueCodes: codes,
-    membersByLeague: new Map(codes.map((c) => [c, [uid(0)]])),
-    periodsByLeague: periods(codes), picks: {}, competition: "PL",
+    leagues: leaguesOf(codes),
+    membership: new Map(codes.map((c) => [c, [uid(0)]])),
+    picks: {}, competition: "PL",
   });
   assert.equal(triples.length, 1, "one recipient produced more than one notification");
   assert.equal(triples[0].league, "AAA");
@@ -46,9 +46,9 @@ test("N1 · a recipient in several leagues is notified once, through the smalles
 test("N1 · discovery order cannot change the league chosen", () => {
   const build = (codes) => triplesForFixture({
     match: fixture("f1", new Date(KICK).toISOString()),
-    leagueCodes: codes,
-    membersByLeague: new Map(codes.map((c) => [c, [uid(0)]])),
-    periodsByLeague: periods(codes), picks: {}, competition: "PL",
+    leagues: leaguesOf(codes),
+    membership: new Map(codes.map((c) => [c, [uid(0)]])),
+    picks: {}, competition: "PL",
   })[0].league;
   assert.equal(build(["ZZZ", "AAA", "MMM"]), build(["MMM", "ZZZ", "AAA"]));
   assert.equal(build(["ZZZ", "AAA", "MMM"]), "AAA");
@@ -57,9 +57,9 @@ test("N1 · discovery order cannot change the league chosen", () => {
 test("N1 · every triple carries an explicit league code and period, never a default", () => {
   const triples = triplesForFixture({
     match: fixture("f1", new Date(KICK).toISOString()),
-    leagueCodes: ["QRS"],
-    membersByLeague: new Map([["QRS", [uid(0), uid(1)]]]),
-    periodsByLeague: periods(["QRS"], "12"), picks: {}, competition: "PL",
+    leagues: leaguesOf(["QRS"], "12"),
+    membership: new Map([["QRS", [uid(0), uid(1)]]]),
+    picks: {}, competition: "PL",
   });
   assert.equal(triples.length, 2);
   for (const t of triples) {
@@ -69,12 +69,12 @@ test("N1 · every triple carries an explicit league code and period, never a def
   }
 });
 
-test("N1 · a league with no known period produces no triple at all", () => {
+test("N1 · a league whose index entry carries no period produces no triple", () => {
   const triples = triplesForFixture({
     match: fixture("f1", new Date(KICK).toISOString()),
-    leagueCodes: ["QRS"],
-    membersByLeague: new Map([["QRS", [uid(0)]]]),
-    periodsByLeague: new Map(), picks: {}, competition: "PL",
+    leagues: [{ code: "QRS", period: undefined }],
+    membership: new Map([["QRS", [uid(0)]]]),
+    picks: {}, competition: "PL",
   });
   assert.equal(triples.length, 0, "a triple was built without the period its slate read needs");
 });
@@ -84,9 +84,8 @@ test("N1 · a league with no known period produces no triple at all", () => {
 test("the planner filters saved picks before creating any job", () => {
   const triples = triplesForFixture({
     match: fixture("f1", new Date(KICK).toISOString()),
-    leagueCodes: ["AAA"],
-    membersByLeague: new Map([["AAA", [uid(0), uid(1), uid(2)]]]),
-    periodsByLeague: periods(["AAA"]),
+    leagues: leaguesOf(["AAA"]),
+    membership: new Map([["AAA", [uid(0), uid(1), uid(2)]]]),
     picks: { [uid(1)]: { p1: 1, p2: 0, ts: 1 } }, competition: "PL",
   });
   assert.deepEqual(triples.map((t) => t.uid), [uid(0), uid(2)]);
@@ -108,7 +107,7 @@ test("C · jobs pack ACROSS fixtures, matching the frozen 445-message model", ()
   assert.notEqual(jobs.length, 460);
 });
 
-test("C · no job exceeds 45 triples, three fixtures or three leagues", () => {
+test("C · no job exceeds 45 triples or three fixtures, and none is lost", () => {
   const triples = [];
   for (let f = 0; f < 8; f++) {
     for (const code of ["AAA", "BBB", "CCC", "DDD"]) {
@@ -121,10 +120,22 @@ test("C · no job exceeds 45 triples, three fixtures or three leagues", () => {
   for (const j of jobs) {
     assert.ok(j.triples.length <= JOB_TRIPLES, `job of ${j.triples.length} triples`);
     assert.ok(new Set(j.triples.map((t) => t.fixtureId)).size <= MAX_FIXTURES_PER_JOB);
-    assert.ok(new Set(j.triples.map((t) => t.league)).size <= MAX_LEAGUES_PER_JOB);
   }
   assert.equal(jobs.reduce((n, j) => n + j.triples.length, 0), triples.length,
     "packing lost or duplicated triples");
+});
+
+test("C · leagues per job are deliberately unbounded, and priced instead", async () => {
+  const { worstCaseReads } = await import("../src/notify/consumer.js");
+  // 45 recipients, one fixture, forty-five one-person leagues.
+  const fragmented = Array.from({ length: 45 }, (_, i) => ({
+    uid: uid(i), fixtureId: "f1", league: `L${i}`, period: "7",
+  }));
+  assert.equal(packJobs(fragmented).length, 1, "a league bound split a single job");
+  assert.equal(worstCaseReads(fragmented), 45 * 2 + 1 + 45);
+  // The same 45 in one league costs less, and the reservation says so.
+  const together = fragmented.map((t) => ({ ...t, league: "AAA" }));
+  assert.equal(worstCaseReads(together), 45 * 2 + 1 + 1);
 });
 
 test("C · packing is deterministic", () => {
@@ -136,7 +147,7 @@ test("C · packing is deterministic", () => {
 
 // --- N5 · discovery costs no value reads ----------------------------------
 
-test("N5 · league discovery and membership read KEY NAMES only", async () => {
+test("N5 · league discovery and membership read KEY NAMES AND METADATA only", async () => {
   const seed = {};
   seedLeague(seed, { code: "AAA", size: 50, fixtureIds: ["f1"] });
   const kv = kvShim(seed);
@@ -144,11 +155,11 @@ test("N5 · league discovery and membership read KEY NAMES only", async () => {
   const deps = harnessDeps({ kv, client: L.client, now: () => T0, sends: [] });
 
   const before = { ...kv.counts };
-  const codes = await deps.leaguesForFixture("f1");
-  const members = await deps.membersByLeague(codes);
-  assert.deepEqual(codes, ["AAA"]);
-  assert.equal(members.get("AAA").length, 50);
-  assert.equal(kv.counts.get, before.get, "discovery performed a value read per member");
+  const leagues = await deps.leaguesForFixture("f1");
+  const { graph } = await deps.membershipGraph();
+  assert.deepEqual(leagues, [{ code: "AAA", period: "7" }]);
+  assert.equal(graph.get("AAA").length, 50);
+  assert.equal(kv.counts.get, before.get, "discovery performed a value read");
   assert.equal(kv.counts.list - before.list, 2, "discovery should be two list calls");
 });
 
@@ -365,8 +376,9 @@ test("N5 · the cron performs ZERO per-member and per-member-fixture reads", asy
   });
   const reads = w.kv.counts.get - before.get;
   // 20 fixtures x 1,000 recipients = 20,000 candidate pairs. The planner's
-  // value reads are one picks: and one slatefx: per fixture, and nothing else.
-  assert.equal(reads, 20 * 2, `the planner made ${reads} value reads for 20,000 pairs`);
+  // ONLY value read is one picks: per fixture — the period now arrives as list
+  // metadata, so there is no index read per league either.
+  assert.equal(reads, 20, `the planner made ${reads} value reads for 20,000 pairs`);
   assert.ok(reads < 1_000, "the planner is nowhere near a per-recipient read profile");
 });
 
@@ -387,7 +399,7 @@ test("N5 · planner reads do not grow with the number of recipients", async () =
   };
   const [small, large] = [await cost(10), await cost(1_000)];
   assert.equal(small, large, `10 recipients cost ${small} reads, 1,000 cost ${large}`);
-  assert.equal(large, 2, "planning one fixture should cost one picks and one index read");
+  assert.equal(large, 1, "planning one fixture should cost exactly one picks read");
 });
 
 // --- the index ------------------------------------------------------------
@@ -403,7 +415,8 @@ test("a fixture in two leagues yields both codes, sorted", async () => {
   const kv = kvShim(seed);
   const L = ledgerObject();
   const deps = harnessDeps({ kv, client: L.client, now: () => T0, sends: [] });
-  assert.deepEqual(await deps.leaguesForFixture("f1"), ["AAA", "ZZZ"]);
+  assert.deepEqual(await deps.leaguesForFixture("f1"),
+    [{ code: "AAA", period: "7" }, { code: "ZZZ", period: "7" }]);
 });
 
 // --- C · production packing and the costed model must agree ---------------
@@ -430,4 +443,237 @@ test("C · the model's normal shape also matches the packer", async () => {
   // Sorted by fixture, as the planner emits them.
   triples.sort((a, b) => a.fixtureId.localeCompare(b.fixtureId) || a.uid.localeCompare(b.uid));
   assert.equal(packJobs(triples).length, SCENARIOS.normal.day.messages);
+});
+
+// ==========================================================================
+// A · the bound must hold however the 1,000 recipients are DISTRIBUTED
+// ==========================================================================
+//
+// Every earlier maximum-shape test used one league, so a per-league cost would
+// have been invisible in all of them. These five shapes are the same 1,000
+// recipients arranged five ways; the read profile must not care which.
+
+const FIXTURES_20 = Array.from({ length: 20 }, (_, i) => `f${i}`);
+
+/**
+ * @param leagues  how many leagues the 1,000 recipients are spread across
+ * @param overlap  how many leagues each recipient belongs to
+ */
+function distributedWorld({ leagues, overlap = 1, recipients = 1_000, fixtures = FIXTURES_20 }) {
+  const seed = { __meta: {} };
+  const codes = Array.from({ length: leagues }, (_, i) => `L${String(i).padStart(4, "0")}`);
+  for (const code of codes) {
+    seed[`league:${code}`] = { code, name: code };
+    seed[`custom_slate:${code}:7`] = { status: "published", fixtureIds: fixtures, periodKey: "7" };
+    for (const id of fixtures) {
+      seed[`slatefx:${id}:${code}`] = { period: "7" };
+      seed.__meta[`slatefx:${id}:${code}`] = { period: "7" };
+    }
+  }
+  for (let i = 0; i < recipients; i++) {
+    const who = uid(i);
+    seed[`push:${who}`] = { token: `tok-${who}`, platform: "ios", mute: [] };
+    for (let o = 0; o < overlap; o++) {
+      const code = codes[(i + o * Math.floor(leagues / Math.max(overlap, 1))) % leagues];
+      seed[`member:${code}:${who}`] = { nick: who, since: 0 };
+    }
+  }
+  for (const id of fixtures) seed[`picks:${id}`] = {};
+  const kv = kvShim(seed);
+  const L = ledgerObject();
+  const sends = [];
+  const deps = harnessDeps({ kv, client: L.client, now: () => T0, sends });
+  return {
+    kv, L, sends, deps, codes,
+    matches: fixtures.map((id) => fixture(id, new Date(KICK).toISOString())),
+  };
+}
+
+async function measure(world) {
+  const before = { ...world.kv.counts };
+  const rpcBefore = world.L.client.count();
+  const result = await planWindow({
+    matches: world.matches, competitionOf: () => "PL",
+    ledger: world.L.client, deps: world.deps, now: T0,
+  });
+  return {
+    ...result,
+    gets: world.kv.counts.get - before.get,
+    lists: world.kv.counts.list - before.list,
+    rpcs: world.L.client.count() - rpcBefore,
+  };
+}
+
+test("A · 1,000 recipients in ONE league", async () => {
+  const m = await measure(distributedWorld({ leagues: 1 }));
+  assert.equal(m.triples, 20_000);
+  assert.equal(m.gets, 20, "one picks read per fixture and nothing else");
+  assert.equal(m.jobs.length, 445);
+  assert.equal(m.membershipPages, 1);
+});
+
+test("A · 1,000 recipients across THREE leagues", async () => {
+  const m = await measure(distributedWorld({ leagues: 3 }));
+  assert.equal(m.triples, 20_000);
+  assert.equal(m.gets, 20, "the read cost grew with the number of leagues");
+  assert.equal(m.jobs.length, 445);
+});
+
+test("A · 1,000 recipients across 100 leagues", async () => {
+  const m = await measure(distributedWorld({ leagues: 100 }));
+  assert.equal(m.triples, 20_000);
+  assert.equal(m.gets, 20, "the read cost grew with the number of leagues");
+  // 20 slatefx lists + the membership scan. Nothing per league.
+  assert.ok(m.lists <= 20 + 5, `discovery took ${m.lists} list calls`);
+});
+
+test("A · 1,000 recipients across 1,000 ONE-PERSON leagues", async () => {
+  const world = distributedWorld({ leagues: 1_000 });
+  const m = await measure(world);
+  assert.equal(m.triples, 20_000);
+  // The shape that would have exposed a per-league read: 1,000 leagues x 20
+  // fixtures is 20,000 index gets under the old design. It is still 20.
+  assert.equal(m.gets, 20, `1,000 leagues cost ${m.gets} value reads`);
+  assert.equal(m.membershipPages, 1, "the membership scan fragmented per league");
+  assert.equal(m.jobs.length, 445);
+  const spent = await world.L.client.call("spent", { day: DAY });
+  for (const metric of ["do_requests", "queue_ops", "worker_requests"]) {
+    assert.ok(spent[metric] <= POOL[metric], `${metric} over cap at 1,000 leagues`);
+  }
+});
+
+test("A · overlapping membership: recipients in several eligible leagues", async () => {
+  const world = distributedWorld({ leagues: 10, overlap: 3 });
+  const m = await measure(world);
+  // Still one notification each: overlap is deduplicated at planning time.
+  assert.equal(m.triples, 20_000, "overlap produced duplicate notifications");
+  assert.equal(m.gets, 20);
+  // And every triple names the smallest of that recipient's eligible codes.
+  const { jobs } = m;
+  const sample = jobs[0].triples[0];
+  const eligible = world.codes.filter((code) =>
+    world.kv.store.has(`member:${code}:${sample.uid}`));
+  assert.equal(sample.league, [...eligible].sort()[0],
+    "overlap broke smallest-eligible-league selection");
+});
+
+test("A · the read profile is IDENTICAL across all five distributions", async () => {
+  const shapes = [
+    ["one league", { leagues: 1 }],
+    ["three leagues", { leagues: 3 }],
+    ["100 leagues", { leagues: 100 }],
+    ["1,000 leagues", { leagues: 1_000 }],
+    ["overlapping", { leagues: 10, overlap: 3 }],
+  ];
+  const profiles = [];
+  for (const [label, options] of shapes) {
+    const m = await measure(distributedWorld(options));
+    profiles.push([label, m.gets, m.jobs.length, m.triples]);
+  }
+  const [, gets, messages, triples] = profiles[0];
+  for (const [label, g, j, t] of profiles) {
+    assert.equal(g, gets, `${label}: ${g} value reads against ${gets}`);
+    assert.equal(j, messages, `${label}: ${j} messages against ${messages}`);
+    assert.equal(t, triples, `${label}: ${t} triples against ${triples}`);
+  }
+  console.log(`\n  planner read profile, 1,000 recipients x 20 fixtures:`);
+  for (const [label, g, j] of profiles) {
+    console.log(`    ${label.padEnd(16)} ${String(g).padStart(3)} value reads, ${j} messages`);
+  }
+});
+
+test("A · an index key with no metadata is skipped, not chased with a read", async () => {
+  const seed = { __meta: {} };
+  seed["league:AAA"] = { code: "AAA", name: "AAA" };
+  seed["custom_slate:AAA:7"] = { status: "published", fixtureIds: ["f1"], periodKey: "7" };
+  seed["slatefx:f1:AAA"] = { period: "7" };        // value only: a legacy key
+  seed["member:AAA:" + uid(0)] = { nick: "x", since: 0 };
+  seed[`push:${uid(0)}`] = { token: "t", mute: [] };
+  seed["picks:f1"] = {};
+  const kv = kvShim(seed);
+  const L = ledgerObject();
+  const deps = harnessDeps({ kv, client: L.client, now: () => T0, sends: [] });
+  const before = kv.counts.get;
+  const leagues = await deps.leaguesForFixture("f1");
+  assert.deepEqual(leagues, [], "a metadata-less key was followed with a value read");
+  assert.equal(kv.counts.get, before, "discovery read a value to recover the period");
+});
+
+// --- the planning lease: a fixture is planned twice a day, not eight times ---
+
+test("planner · a fixture due on four consecutive ticks is planned twice", async () => {
+  const world = distributedWorld({ leagues: 1, recipients: 90, fixtures: ["f1"] });
+  const run = () => planWindow({
+    matches: world.matches, competitionOf: () => "PL",
+    ledger: world.L.client, deps: world.deps, now: T0,
+  });
+  const first = await run();
+  assert.equal(first.jobs.length, 2, "90 recipients should be two messages");
+
+  // The sweep: nobody has been sent to yet, so it re-plans the same people.
+  const second = await run();
+  assert.equal(second.jobs.length, 2);
+
+  // Ticks three and four find the lease spent and plan nothing at all.
+  const third = await run();
+  const fourth = await run();
+  assert.equal(third.jobs.length, 0, "a third planning pass ran");
+  assert.equal(fourth.jobs.length, 0);
+  assert.ok(third.skipped.some((s) => s.why === "already-planned"));
+});
+
+test("planner · the sweep carries only those still unsent", async () => {
+  const world = distributedWorld({ leagues: 1, recipients: 90, fixtures: ["f1"] });
+  const run = () => planWindow({
+    matches: world.matches, competitionOf: () => "PL",
+    ledger: world.L.client, deps: world.deps, now: T0,
+  });
+  const first = await run();
+  // Deliver the first message only; the second message's people stay unsent.
+  await deliverJob(first.jobs[0], env, world.deps);
+
+  const sweep = await run();
+  assert.equal(sweep.triples, 45, "the sweep re-planned people already notified");
+  const sweptUids = new Set(sweep.jobs.flatMap((j) => j.triples.map((t) => t.uid)));
+  const sentUids = first.jobs[0].triples.map((t) => t.uid);
+  for (const done of sentUids) {
+    assert.ok(!sweptUids.has(done), `${done} was already sent to and was swept anyway`);
+  }
+});
+
+test("planner · a fresh UTC day gets fresh passes", async () => {
+  const world = distributedWorld({ leagues: 1, recipients: 45, fixtures: ["f1"] });
+  const at = (now) => planWindow({
+    matches: world.matches, competitionOf: () => "PL",
+    ledger: world.L.client, deps: world.deps, now,
+  });
+  await at(T0);
+  await at(T0);
+  assert.equal((await at(T0)).jobs.length, 0);
+  const tomorrow = T0 + 24 * 60 * 60 * 1000;
+  assert.ok((await at(tomorrow)).jobs.length > 0, "the next day inherited the spent lease");
+});
+
+test("planner · the whole day's planning cost, counted", async () => {
+  const world = distributedWorld({ leagues: 1_000 });
+  const before = { ...world.kv.counts };
+  const rpcBefore = world.L.client.count();
+  // Four cron ticks across the window; the lease makes two of them no-ops.
+  for (let tick = 0; tick < 4; tick++) {
+    await planWindow({
+      matches: world.matches, competitionOf: () => "PL",
+      ledger: world.L.client, deps: world.deps, now: T0,
+    });
+  }
+  const gets = world.kv.counts.get - before.get;
+  const lists = world.kv.counts.list - before.list;
+  const rpcs = world.L.client.count() - rpcBefore;
+  console.log(`\n  planner, one full day at the maximum shape (1,000 leagues):`);
+  console.log(`    KV value reads : ${gets}`);
+  console.log(`    KV list calls  : ${lists}`);
+  console.log(`    ledger RPCs    : ${rpcs}\n`);
+  // Two passes x 20 fixtures = 40 picks reads. Nothing per league, nothing
+  // per recipient, and nothing at all on the two leaseless ticks.
+  assert.equal(gets, 40, `the day cost ${gets} value reads`);
+  assert.ok(lists <= 2 * (20 + 2) + 2, `the day cost ${lists} list calls`);
 });

@@ -52,8 +52,10 @@ test("the reads reserved are the message's worst case, not what it used", async 
   const w = world();
   const triples = [0, 1].map((n) => triple({ uid: uid(n), fixtureId: "f1", league: "AAA", kickoffAt: KICK }));
   const { stats } = await deliverJob(job(triples), env, w.deps);
-  assert.equal(stats.reads, worstCaseReads(2));
-  assert.equal((await w.L.client.call("spent", { day: DAY })).kv_reads, worstCaseReads(2));
+  // Priced from the job's composition: two recipients, one fixture, one league.
+  assert.equal(stats.reads, worstCaseReads(triples));
+  assert.equal(stats.reads, 2 * 2 + 1 + 1);
+  assert.equal((await w.L.client.call("spent", { day: DAY })).kv_reads, stats.reads);
 });
 
 // --- eligibility rechecked immediately before APNs ------------------------
@@ -487,6 +489,37 @@ test("B · a job at the documented bound never exceeds its reservation", async (
   const before = kv.counts.get;
   const { stats } = await deliverJob(job(triples), env, deps);
   const actual = kv.counts.get - before;
-  assert.equal(stats.reads, worstCaseReads(45));
+  assert.equal(stats.reads, worstCaseReads(triples));
+  assert.equal(stats.reads, 45 * 2 + 3 + 3);
   assert.ok(actual <= stats.reads, `spent ${actual} against ${stats.reads}`);
+});
+
+test("B · a job spread across 45 one-person leagues prices and stays inside it", async () => {
+  const seed = { __meta: {} };
+  for (let i = 0; i < 45; i++) {
+    const code = `L${String(i).padStart(3, "0")}`;
+    seed[`league:${code}`] = { code, name: code };
+    seed[`custom_slate:${code}:7`] = { status: "published", fixtureIds: ["f1"], periodKey: "7" };
+    seed[`slatefx:f1:${code}`] = { period: "7" };
+    seed.__meta[`slatefx:f1:${code}`] = { period: "7" };
+    seed[`member:${code}:${uid(i)}`] = { nick: uid(i), since: 0 };
+    seed[`push:${uid(i)}`] = { token: `tok-${uid(i)}`, mute: [] };
+  }
+  seed["picks:f1"] = {};
+  const kv = kvShim(seed);
+  const L = ledgerObject();
+  const sends = [];
+  const deps = harnessDeps({ kv, client: L.client, now: () => T0, sends });
+  const triples = Array.from({ length: 45 }, (_, i) =>
+    triple({ uid: uid(i), fixtureId: "f1", league: `L${String(i).padStart(3, "0")}`, kickoffAt: KICK }));
+
+  const before = kv.counts.get;
+  const { stats } = await deliverJob(job(triples), env, deps);
+  const actual = kv.counts.get - before;
+  assert.equal(stats.sent, 45);
+  // 45 recipients, one fixture, forty-five leagues — priced honestly, and the
+  // reservation still covers what was actually spent.
+  assert.equal(stats.reads, 45 * 2 + 1 + 45);
+  assert.ok(actual <= stats.reads, `spent ${actual} against a reservation of ${stats.reads}`);
+  assert.equal(L.client.count(), 3, "fragmentation cost extra round trips");
 });

@@ -6,6 +6,9 @@ import { kvShim } from "./notify_harness.mjs";
 import {
   verify, repair, runDirection, readChain, parseSlateKey, parseIndexKey,
   clampLimit, clampOps, MAX_OPS_PER_INVOCATION, MAX_LIST_LIMIT,
+  cleanupOrphans, normalizeAllow, CleanupRefused, MAX_CLEANUP_KEYS,
+  CLEANUP_OPS_PER_KEY, CHAIN_OPS_PER_CLEANUP, MANIFEST_OPS, MIN_CLEANUP_OPS,
+  cleanupManifestKey, readCleanupManifest, AUTHORISED_CLEANUPS,
 } from "../src/notify/backfill.js";
 import worker from "../src/worker.js";
 
@@ -541,4 +544,744 @@ test("B · a deleted resume key with an exact-match successor keeps its offset",
     { direction: "forward", apply: true, position: first.position, maxOps: 500 });
   assert.equal(second.repaired, 30 - written, "the resumed run redid finished fixtures");
   assert.equal(indexKeys(env).length, 30);
+});
+
+// ==========================================================================
+// G · orphan cleanup — the only way out of the orphaned-slate gate
+// ==========================================================================
+//
+// Production reached a state the operator could not leave: two published
+// slates whose league records were gone, an index that was otherwise perfect,
+// and a verdict that said "repair, then start a new chain" — which repair can
+// never satisfy, because repair only COUNTS orphans.
+//
+// The readiness rule is not weakened here and no scan is allowed to delete
+// anything. What may be deleted is fixed in code at deploy time; KV holds only
+// progress, idempotency and audit, because an eventually-consistent read that
+// returns nothing cannot be told apart from a key that never existed.
+
+const CLEAN = readFileSync(new URL("../src/notify/backfill.js", import.meta.url), "utf8");
+
+const ID = "test-cleanup";
+
+/**
+ * The deployment-scoped authority, for a synthetic world. Production tests use
+ * the REAL table instead, by passing no override at all.
+ */
+const withTable = (...pairs) => ({ table: Object.fromEntries(pairs) });
+const table1 = (id, authorised) => withTable([id, authorised]);
+
+/** The real, code-authorised operation this correction exists to permit. */
+const REAL_ID = "v166-b1-orphans-20260821";
+const REAL_ALLOW = [
+  { key: "custom_slate:CGALPR:1", code: "CGALPR" },
+  { key: "custom_slate:XP926U:1", code: "XP926U" },
+];
+
+/**
+ * A world with healthy leagues and orphans side by side, so every test can
+ * check what was NOT touched as well as what was.
+ */
+function orphanWorld({
+  orphans = ["OLD"], healthy = ["AAA"], drafts = [], indexed = true, period = "7",
+} = {}) {
+  const seed = { __meta: {} };
+  const slate = (code, status) => {
+    seed[`custom_slate:${code}:${period}`] = {
+      status, fixtureIds: ["f1", "f2"], periodKey: period,
+    };
+  };
+  for (const code of healthy) {
+    seed[`league:${code}`] = { code, name: code };
+    slate(code, "published");
+    if (indexed) {
+      for (const id of ["f1", "f2"]) {
+        seed[`slatefx:${id}:${code}`] = { period };
+        seed.__meta[`slatefx:${id}:${code}`] = { period };
+      }
+    }
+  }
+  // An orphan is a published slate with NO league record.
+  for (const code of orphans) slate(code, "published");
+  for (const code of drafts) slate(code, "draft");
+  return { KV: kvShim(seed) };
+}
+
+/** Production's own shape: the two real orphans beside a live league. */
+const prodWorld = (options = {}) =>
+  orphanWorld({ orphans: ["CGALPR", "XP926U"], healthy: ["LIVE"], period: "1", ...options });
+
+const slateKeys = (env) =>
+  [...env.KV.store.keys()].filter((k) => k.startsWith("custom_slate:")).sort();
+
+/**
+ * The slate keys a run actually deleted. `counts.delete` is not that number:
+ * a cleanup also deletes the chain key, so counting every delete would let a
+ * chain invalidation stand in for a second deletion — which is precisely the
+ * thing "exactly once" has to rule out.
+ */
+function watchSlateDeletes(env) {
+  const deleted = [];
+  const inner = env.KV.delete.bind(env.KV);
+  env.KV.delete = async (key) => {
+    if (String(key).startsWith("custom_slate:")) deleted.push(key);
+    return inner(key);
+  };
+  return deleted;
+}
+
+/** Every mutating KV operation, in the order it was actually issued. */
+function traceWrites(env) {
+  const order = [];
+  const put = env.KV.put.bind(env.KV);
+  const del = env.KV.delete.bind(env.KV);
+  env.KV.put = async (key, value, options) => { order.push(`put:${key}`); return put(key, value, options); };
+  env.KV.delete = async (key) => { order.push(`del:${key}`); return del(key); };
+  return order;
+}
+
+/** Fail the first delete of one exact key, once — a crash mid-cleanup. */
+function crashOnDelete(env, key) {
+  const inner = env.KV.delete.bind(env.KV);
+  let armed = true;
+  env.KV.delete = async (k) => {
+    if (armed && k === key) { armed = false; throw new Error(`KV delete failed: ${k}`); }
+    return inner(k);
+  };
+}
+
+/**
+ * Another Cloudflare location: same data, except the manifest this location
+ * has not seen yet. KV is eventually consistent, so this is not a fault — it
+ * is Tuesday.
+ */
+const forgetManifest = (env, id) => env.KV.store.delete(cleanupManifestKey(id));
+
+/** Total KV operations the store itself saw. */
+const opCount = (env) =>
+  env.KV.counts.get + env.KV.counts.put + env.KV.counts.delete + env.KV.counts.list;
+
+const writes = (env) => env.KV.counts.put + env.KV.counts.delete;
+
+// --- 1 · ordinary repair never deletes an orphan --------------------------
+
+test("G · default repair never deletes an orphan, however many times it runs", async () => {
+  const env = orphanWorld({ orphans: ["OLD", "GONE"] });
+  const before = slateKeys(env);
+  const first = await driveRepair(env);
+  const second = await driveRepair(env);
+  assert.equal(first.result.forward.orphaned, 2, "the orphans were not even seen");
+  assert.equal(second.result.forward.orphaned, 2);
+  assert.deepEqual(slateKeys(env), before, "a repair deleted a slate");
+  assert.equal(env.KV.counts.delete, 0, "a repair issued a delete");
+});
+
+test("G · nothing before the cleanup section can reach the deletion", () => {
+  const banner = CLEAN.indexOf("// Orphan cleanup");
+  assert.ok(banner > 0, "the cleanup section is not where the test thinks it is");
+  const scanners = CLEAN.slice(0, banner);
+  assert.ok(!scanners.includes("cleanupOrphans"),
+    "runDirection, verify or repair reaches the cleanup");
+  const calls = SOURCE.split("cleanupOrphanSlates(").length - 1;
+  assert.equal(calls, 1, `cleanupOrphanSlates is called from ${calls} places`);
+  const cron = SOURCE.slice(SOURCE.indexOf("async function scheduled"));
+  assert.ok(!cron.includes("cleanupOrphanSlates"), "the cron can delete slates");
+});
+
+// --- 2 · the authority is in CODE ----------------------------------------
+
+test("G · the deployment authorises exactly one cleanup, and exactly two keys", () => {
+  assert.ok(Object.isFrozen(AUTHORISED_CLEANUPS));
+  assert.deepEqual(Object.keys(AUTHORISED_CLEANUPS), [REAL_ID]);
+  assert.deepEqual(AUTHORISED_CLEANUPS[REAL_ID].map((e) => ({ ...e })), REAL_ALLOW);
+  assert.ok(Object.isFrozen(AUTHORISED_CLEANUPS[REAL_ID]));
+});
+
+test("G · the route never supplies an authority table of its own", () => {
+  const at = SOURCE.indexOf("cleanupOrphanSlates(");
+  const call = SOURCE.slice(at, SOURCE.indexOf("})) }, 200, env);", at));
+  assert.ok(!/table/.test(call),
+    "the request path can override the code-authorised table");
+  assert.match(call, /id: body\.id/);
+  assert.match(call, /allow: body\.allow/);
+});
+
+test("G · an unauthorised cleanup id is refused, with valid orphan keys and zero KV", async () => {
+  const env = prodWorld();
+  for (const id of ["v166-b1-orphans-20260822", "cleanup", "constructor", "toString",
+    "V166-B1-ORPHANS-20260821"]) {
+    const before = opCount(env);
+    await assert.rejects(() => cleanupOrphans(env, { id, allow: REAL_ALLOW }), CleanupRefused,
+      `id "${id}" was accepted`);
+    assert.equal(opCount(env), before, `id "${id}" touched KV`);
+  }
+  assert.deepEqual(slateKeys(env), [
+    "custom_slate:CGALPR:1", "custom_slate:LIVE:1", "custom_slate:XP926U:1",
+  ]);
+});
+
+test("G · a submitted list that differs from the CODE list is refused before any KV", async () => {
+  const env = prodWorld({ orphans: ["CGALPR", "XP926U", "OTHER"] });
+  const mutations = [
+    [...REAL_ALLOW, { key: "custom_slate:OTHER:1", code: "OTHER" }],       // wider
+    [REAL_ALLOW[0]],                                                       // narrower
+    [REAL_ALLOW[0], { key: "custom_slate:OTHER:1", code: "OTHER" }],        // substituted
+    [{ key: "custom_slate:CGALPR:1", code: "XP926U" }, REAL_ALLOW[1]],      // recoded
+    ["custom_slate:CGALPR:1", "custom_slate:XP926U:1"],                     // undeclared
+    [{ key: "custom_slate:LIVE:1", code: "LIVE" }],                         // a live league
+  ];
+  for (const allow of mutations) {
+    const before = opCount(env);
+    await assert.rejects(() => cleanupOrphans(env, { id: REAL_ID, allow }), CleanupRefused,
+      `a mutated list was accepted: ${JSON.stringify(allow)}`);
+    assert.equal(opCount(env), before, "a refused list read or wrote KV");
+  }
+  assert.deepEqual(slateKeys(env), [
+    "custom_slate:CGALPR:1", "custom_slate:LIVE:1", "custom_slate:OTHER:1", "custom_slate:XP926U:1",
+  ]);
+});
+
+test("G · with NO manifest visible, a mutated list is still refused with zero writes", async () => {
+  // The eventual-consistency case: this location has never seen a manifest.
+  // Under the old design that was read as permission to create one from the
+  // request, which is exactly how a wider list got in.
+  const env = prodWorld();
+  assert.equal(await readCleanupManifest(env, REAL_ID), null, "the world was seeded with a manifest");
+  const before = writes(env);
+  await assert.rejects(() => cleanupOrphans(env, {
+    id: REAL_ID, allow: [...REAL_ALLOW, { key: "custom_slate:LIVE:1", code: "LIVE" }],
+  }), CleanupRefused);
+  assert.equal(writes(env), before, "a refused request wrote to KV");
+  assert.equal(await readCleanupManifest(env, REAL_ID), null, "a refused request created a manifest");
+  assert.ok(env.KV.store.has("custom_slate:LIVE:1"));
+});
+
+test("G · a location that cannot see the manifest replays the SAME keys and no others", async () => {
+  const env = prodWorld();
+  await driveVerify(env);
+  const deletedKeys = watchSlateDeletes(env);
+
+  // Location A crashes partway through.
+  crashOnDelete(env, "custom_slate:XP926U:1");
+  await assert.rejects(() => cleanupOrphans(env, { id: REAL_ID, allow: REAL_ALLOW }),
+    /KV delete failed/);
+  assert.ok(!env.KV.store.has("custom_slate:CGALPR:1"), "the first deletion did not happen");
+  assert.ok(await readCleanupManifest(env, REAL_ID), "location A wrote no manifest");
+
+  // Location B has not replicated it yet.
+  forgetManifest(env, REAL_ID);
+  assert.equal(await readCleanupManifest(env, REAL_ID), null);
+
+  // Every mutation is still refused there — the authority never travelled.
+  for (const allow of [
+    [...REAL_ALLOW, { key: "custom_slate:LIVE:1", code: "LIVE" }],
+    [REAL_ALLOW[1]],
+    [{ key: "custom_slate:LIVE:1", code: "LIVE" }],
+  ]) {
+    const before = writes(env);
+    await assert.rejects(() => cleanupOrphans(env, { id: REAL_ID, allow }), CleanupRefused);
+    assert.equal(writes(env), before);
+  }
+
+  // The exact authorised list replays safely: the key already gone is reported,
+  // not deleted again, and the one that crashed is finished.
+  const replay = await cleanupOrphans(env, { id: REAL_ID, allow: REAL_ALLOW });
+  assert.equal(replay.done, true);
+  assert.equal(replay.deleted, 1);
+  assert.equal(replay.already_absent, 1);
+  assert.deepEqual(deletedKeys, ["custom_slate:CGALPR:1", "custom_slate:XP926U:1"],
+    `slates were deleted ${deletedKeys.length} times in total`);
+  assert.deepEqual(slateKeys(env), ["custom_slate:LIVE:1"]);
+});
+
+test("G · a stored manifest that disagrees with the code is refused, not overwritten", async () => {
+  const env = prodWorld();
+  const forged = JSON.stringify({
+    id: REAL_ID,
+    allow: [{ key: "custom_slate:LIVE:1", code: "LIVE" }],
+    identity: ["custom_slate:LIVE:1|LIVE"],
+    at: 0, status: "running", results: [], invocations: 1,
+  });
+  env.KV.store.set(cleanupManifestKey(REAL_ID), forged);
+
+  await assert.rejects(() => cleanupOrphans(env, { id: REAL_ID, allow: REAL_ALLOW }),
+    CleanupRefused);
+  assert.equal(env.KV.store.get(cleanupManifestKey(REAL_ID)), forged,
+    "the disagreeing manifest was overwritten");
+  assert.deepEqual(slateKeys(env), [
+    "custom_slate:CGALPR:1", "custom_slate:LIVE:1", "custom_slate:XP926U:1",
+  ]);
+});
+
+// --- 3 · the allowlist is the whole authority -----------------------------
+
+test("G · an unlisted orphan is untouched, and nothing outside the list is", async () => {
+  const env = prodWorld({ orphans: ["CGALPR", "XP926U", "OTHER"] });
+  const before = new Set(env.KV.store.keys());
+  const result = await cleanupOrphans(env, { id: REAL_ID, allow: REAL_ALLOW });
+
+  assert.equal(result.deleted, 2);
+  assert.ok(env.KV.store.has("custom_slate:OTHER:1"), "an unlisted orphan was deleted");
+  const after = new Set(env.KV.store.keys());
+  const removed = [...before].filter((k) => !after.has(k) && k.startsWith("custom_slate:"));
+  assert.deepEqual(removed.sort(), ["custom_slate:CGALPR:1", "custom_slate:XP926U:1"]);
+});
+
+test("G · a listed slate whose league still exists is REFUSED, not deleted", async () => {
+  // The recheck at delete time: the code authorises the key, the live league
+  // record still vetoes it.
+  const env = prodWorld();
+  env.KV.store.set("league:CGALPR", JSON.stringify({ code: "CGALPR", name: "back" }));
+  const result = await cleanupOrphans(env, { id: REAL_ID, allow: REAL_ALLOW });
+  assert.equal(result.deleted, 1);
+  const refused = result.results.find((r) => r.outcome === "refused");
+  assert.deepEqual(refused, {
+    key: "custom_slate:CGALPR:1", code: "CGALPR", outcome: "refused", reason: "league_exists",
+  });
+  assert.ok(env.KV.store.has("custom_slate:CGALPR:1"), "a live league's slate was deleted");
+});
+
+test("G · the league is re-read at DELETE time, not trusted from an earlier scan", async () => {
+  const env = prodWorld();
+  const scan = await driveVerify(env);
+  assert.equal(scan.result.chain.forward.counts.orphaned, 2, "the scan did not see the orphans");
+
+  env.KV.store.set("league:CGALPR", JSON.stringify({ code: "CGALPR" }));
+  env.KV.store.set("league:XP926U", JSON.stringify({ code: "XP926U" }));
+  const result = await cleanupOrphans(env, { id: REAL_ID, allow: REAL_ALLOW });
+  assert.equal(result.deleted, 0, "an out-of-date scan was treated as authority to delete");
+  assert.deepEqual(result.results.map((r) => r.reason), ["league_exists", "league_exists"]);
+  assert.deepEqual(slateKeys(env), [
+    "custom_slate:CGALPR:1", "custom_slate:LIVE:1", "custom_slate:XP926U:1",
+  ]);
+});
+
+test("G · malformed and mismatched keys are refused", async () => {
+  const env = orphanWorld({ orphans: ["OLD"], healthy: ["AAA"] });
+  const allow = [
+    "league:OLD",                                  // not a slate key at all
+    "slatefx:f1:AAA",                              // an index key
+    "custom_slate:OLD",                            // no period
+    "custom_slate::7",                             // no code
+    "",                                            // empty
+    42,                                            // not a string
+    { code: "OLD" },                               // no key
+    { key: "custom_slate:OLD:7", code: "AAA" },    // key and code disagree
+  ];
+  const before = new Set(env.KV.store.keys());
+  const deletedKeys = watchSlateDeletes(env);
+  const result = await cleanupOrphans(env, { id: ID, allow }, table1(ID, allow));
+
+  assert.equal(result.deleted, 0, `${result.deleted} keys were deleted`);
+  assert.equal(result.refused, 8, `${result.refused} of 8 entries were refused`);
+  assert.deepEqual(result.results.map((r) => r.reason).sort(), [
+    "malformed", "malformed", "malformed", "malformed", "malformed", "malformed",
+    "malformed", "mismatch",
+  ]);
+  const after = new Set(env.KV.store.keys());
+  assert.deepEqual([...before].filter((k) => !after.has(k)), [], "a malformed entry removed a key");
+  assert.deepEqual(deletedKeys, [], `${deletedKeys.length} slates were deleted`);
+});
+
+test("G · a draft slate is refused even when its league is gone", async () => {
+  // Only a PUBLISHED orphan is counted, and only a published one holds the
+  // gate shut. Anything wider than the gate is outside this mechanism.
+  const env = orphanWorld({ orphans: [], drafts: ["DRAFT"] });
+  const allow = ["custom_slate:DRAFT:7"];
+  const result = await cleanupOrphans(env, { id: ID, allow }, table1(ID, allow));
+  assert.equal(result.deleted, 0);
+  assert.equal(result.results[0].reason, "not_published");
+  assert.ok(env.KV.store.has("custom_slate:DRAFT:7"));
+});
+
+// --- 4 · whole-call refusals, which must write NOTHING --------------------
+
+test("G · an oversized allowlist is refused whole, and writes nothing", async () => {
+  const env = orphanWorld({ orphans: ["OLD"] });
+  const allow = Array.from({ length: MAX_CLEANUP_KEYS + 1 }, (_, i) => `custom_slate:X${i}:7`);
+  const before = writes(env);
+  await assert.rejects(() => cleanupOrphans(env, { id: ID, allow }, table1(ID, allow)),
+    CleanupRefused);
+  assert.equal(writes(env), before, "a refused request wrote to KV");
+  assert.ok(env.KV.store.has("custom_slate:OLD:7"));
+});
+
+test("G · an empty allowlist is refused, so an id cannot be burnt on nothing", async () => {
+  const env = orphanWorld({ orphans: ["OLD"] });
+  const before = writes(env);
+  await assert.rejects(
+    () => cleanupOrphans(env, { id: ID, allow: [] }, table1(ID, ["custom_slate:OLD:7"])),
+    CleanupRefused);
+  assert.equal(writes(env), before);
+  assert.equal(await readCleanupManifest(env, ID), null, "an empty run created a manifest");
+});
+
+test("G · a missing or unusable cleanup id is refused, and writes nothing", async () => {
+  const env = orphanWorld({ orphans: ["OLD"] });
+  const allow = ["custom_slate:OLD:7"];
+  for (const id of [undefined, "", "   ", 42, "has space", "colon:inside", "a".repeat(65)]) {
+    const before = writes(env);
+    await assert.rejects(() => cleanupOrphans(env, { id, allow }, table1(ID, allow)),
+      CleanupRefused, `id ${JSON.stringify(id)} was accepted`);
+    assert.equal(writes(env), before, `id ${JSON.stringify(id)} wrote to KV`);
+  }
+  assert.ok(env.KV.store.has("custom_slate:OLD:7"));
+});
+
+test("G · an undersized maxOps is REFUSED, not silently raised", async () => {
+  // Raising it silently is what let actual operations exceed the reported cap.
+  const env = prodWorld();
+  for (const maxOps of [1, 2, 3, 4, 5, 6]) {
+    const before = writes(env);
+    await assert.rejects(
+      () => cleanupOrphans(env, { id: REAL_ID, allow: REAL_ALLOW, maxOps }),
+      CleanupRefused, `maxOps ${maxOps} was accepted`);
+    assert.equal(writes(env), before, `maxOps ${maxOps} wrote to KV before refusing`);
+  }
+  assert.equal(await readCleanupManifest(env, REAL_ID), null);
+
+  const ok = await cleanupOrphans(env, { id: REAL_ID, allow: REAL_ALLOW, maxOps: MIN_CLEANUP_OPS });
+  assert.equal(ok.opsCap, MIN_CLEANUP_OPS);
+  assert.ok(ok.ops <= ok.opsCap, `${ok.ops} operations against a cap of ${ok.opsCap}`);
+});
+
+// --- 5 · the operation count is the whole invocation ----------------------
+
+test("G · reported ops are the REAL KV operations: manifest, chain and slates", async () => {
+  const env = prodWorld();
+  await driveVerify(env);
+  const before = opCount(env);
+  const result = await cleanupOrphans(env, { id: REAL_ID, allow: REAL_ALLOW });
+  const spent = opCount(env) - before;
+
+  // manifest read + manifest write + chain delete + 2 keys x 3 + progress write.
+  assert.equal(spent, MANIFEST_OPS + CHAIN_OPS_PER_CLEANUP + 2 * CLEANUP_OPS_PER_KEY);
+  assert.equal(result.ops, spent, `reported ${result.ops}, KV saw ${spent}`);
+  assert.ok(result.ops <= result.opsCap);
+});
+
+test("G · under EVERY accepted cap, real operations stay inside the reported one", async () => {
+  for (let maxOps = MIN_CLEANUP_OPS; maxOps <= MIN_CLEANUP_OPS + 8; maxOps++) {
+    const env = prodWorld();
+    let invocations = 0;
+    let result;
+    do {
+      const before = opCount(env);
+      result = await cleanupOrphans(env, { id: REAL_ID, allow: REAL_ALLOW, maxOps });
+      const spent = opCount(env) - before;
+      invocations++;
+      assert.equal(result.opsCap, maxOps, "the reported cap is not the requested one");
+      assert.equal(result.ops, spent, `maxOps ${maxOps}: reported ${result.ops}, KV saw ${spent}`);
+      assert.ok(spent <= maxOps, `maxOps ${maxOps}: invocation ${invocations} really spent ${spent}`);
+    } while (!result.done && invocations < 30);
+    assert.equal(result.done, true, `maxOps ${maxOps} never finished`);
+    assert.deepEqual(slateKeys(env), ["custom_slate:LIVE:1"]);
+  }
+});
+
+test("G · the endpoint cannot be talked into a bigger budget", async () => {
+  const env = { ...prodWorld(), MIGRATION_SECRET: SECRET, ALLOWED_ORIGIN: "*" };
+  const payload = await endpoint(env)({
+    action: "cleanup-orphans", id: REAL_ID, allow: REAL_ALLOW, maxOps: 10_000_000,
+  });
+  assert.ok(payload.opsCap <= MAX_OPS_PER_INVOCATION, `the caller raised the cap to ${payload.opsCap}`);
+  assert.ok(payload.ops <= payload.opsCap);
+});
+
+// --- 6 · ordering: manifest, then chain, then anything destructive --------
+
+test("G · the manifest is persisted BEFORE the chain and before any slate delete", async () => {
+  const env = prodWorld();
+  await driveVerify(env);
+  assert.ok(await readChain(env), "no chain to invalidate");
+
+  const order = traceWrites(env);
+  const result = await cleanupOrphans(env, { id: REAL_ID, allow: REAL_ALLOW });
+  assert.equal(result.deleted, 2);
+
+  const manifestAt = order.indexOf(`put:${cleanupManifestKey(REAL_ID)}`);
+  const chainAt = order.indexOf("del:notify:index_chain");
+  const firstSlate = order.findIndex((op) => op.startsWith("del:custom_slate:"));
+  assert.equal(manifestAt, 0, `the first write was ${order[0]}, not the manifest`);
+  assert.ok(chainAt > manifestAt, "the chain went before the manifest was persisted");
+  assert.ok(firstSlate > chainAt, "a slate was deleted before the chain was invalidated");
+  assert.equal(order.filter((op) => op === "del:notify:index_chain").length, 1,
+    "the chain was invalidated more than once in a single invocation");
+});
+
+test("G · the chain is invalidated even when every deletion is then REFUSED", async () => {
+  // A cleanup attempt is a reason to reverify whatever it concluded. Tying
+  // invalidation to deleted > 0 is exactly the inference that fails after a
+  // crash, where the retry finds nothing left to delete.
+  const env = prodWorld();
+  env.KV.store.set("league:CGALPR", JSON.stringify({ code: "CGALPR" }));
+  env.KV.store.set("league:XP926U", JSON.stringify({ code: "XP926U" }));
+  await driveVerify(env);
+  assert.ok(await readChain(env));
+
+  const result = await cleanupOrphans(env, { id: REAL_ID, allow: REAL_ALLOW });
+  assert.equal(result.deleted, 0);
+  assert.equal(result.chainInvalidated, true);
+  assert.equal(await readChain(env), null, "a refused cleanup left the old chain alive");
+});
+
+test("G · a crash DURING the first slate delete leaves the chain gone and the manifest written",
+  async () => {
+    const env = prodWorld();
+    await driveVerify(env);
+    assert.ok(await readChain(env), "no chain to strand");
+
+    crashOnDelete(env, "custom_slate:CGALPR:1");
+    await assert.rejects(() => cleanupOrphans(env, { id: REAL_ID, allow: REAL_ALLOW }),
+      /KV delete failed/);
+
+    assert.equal(await readChain(env), null,
+      "the crash stranded the chain the cleanup was about to invalidate");
+    const manifest = await readCleanupManifest(env, REAL_ID);
+    assert.ok(manifest, "the crash left no manifest");
+    assert.equal(manifest.status, "running");
+    assert.deepEqual(manifest.identity,
+      ["custom_slate:CGALPR:1|CGALPR", "custom_slate:XP926U:1|XP926U"]);
+    assert.ok(env.KV.store.has("custom_slate:CGALPR:1"), "the slate went despite the failed delete");
+  });
+
+test("G · a crash after the FIRST of two deletions retries idempotently", async () => {
+  const env = prodWorld({ indexed: false });
+  await driveRepair(env);
+  const before = await driveVerify(env);
+  assert.equal(before.result.chain.forward.counts.orphaned, 2);
+
+  const deletedKeys = watchSlateDeletes(env);
+  crashOnDelete(env, "custom_slate:XP926U:1");
+  await assert.rejects(() => cleanupOrphans(env, { id: REAL_ID, allow: REAL_ALLOW }),
+    /KV delete failed/);
+  assert.ok(!env.KV.store.has("custom_slate:CGALPR:1"), "the first deletion did not happen");
+  assert.equal(await readChain(env), null, "a stale chain survived a partial cleanup");
+
+  const retry = await cleanupOrphans(env, { id: REAL_ID, allow: REAL_ALLOW });
+  assert.equal(retry.done, true);
+  assert.equal(retry.status, "complete");
+  assert.equal(retry.deleted, 1);
+  assert.equal(retry.already_absent, 1);
+  assert.deepEqual(deletedKeys, ["custom_slate:CGALPR:1", "custom_slate:XP926U:1"],
+    `slates were deleted ${deletedKeys.length} times in total`);
+
+  const after = await driveVerify(env, {});
+  assert.equal(after.result.chain.forward.counts.orphaned, 0);
+});
+
+// --- 7 · a completed id is terminal ---------------------------------------
+
+test("G · a completed cleanup id cannot be reused for another list", async () => {
+  const env = prodWorld({ orphans: ["CGALPR", "XP926U", "OTHER"] });
+  const done = await cleanupOrphans(env, { id: REAL_ID, allow: REAL_ALLOW });
+  assert.equal(done.status, "complete");
+  assert.equal((await readCleanupManifest(env, REAL_ID)).status, "complete");
+
+  for (const allow of [
+    [...REAL_ALLOW, { key: "custom_slate:OTHER:1", code: "OTHER" }],
+    [{ key: "custom_slate:OTHER:1", code: "OTHER" }],
+    [{ key: "custom_slate:LIVE:1", code: "LIVE" }],
+  ]) {
+    await assert.rejects(() => cleanupOrphans(env, { id: REAL_ID, allow }), CleanupRefused,
+      `a completed id was reused for ${JSON.stringify(allow)}`);
+  }
+  assert.deepEqual(slateKeys(env), ["custom_slate:LIVE:1", "custom_slate:OTHER:1"]);
+});
+
+test("G · replaying a completed id with the SAME list deletes nothing", async () => {
+  const env = prodWorld();
+  const first = await cleanupOrphans(env, { id: REAL_ID, allow: REAL_ALLOW });
+  assert.equal(first.deleted, 2);
+
+  const deletedKeys = watchSlateDeletes(env);
+  const replay = await cleanupOrphans(env, { id: REAL_ID, allow: REAL_ALLOW });
+  assert.equal(replay.replay, true);
+  assert.equal(replay.done, true);
+  assert.equal(replay.deleted, 0);
+  assert.deepEqual(deletedKeys, [], "a replay deleted something");
+  // The terminal record is retained for audit.
+  assert.deepEqual(replay.results.map((r) => r.outcome), ["deleted", "deleted"]);
+  assert.deepEqual(replay.results.map((r) => r.key),
+    ["custom_slate:CGALPR:1", "custom_slate:XP926U:1"]);
+});
+
+test("G · each authorised key is deleted EXACTLY once, across every replay", async () => {
+  const env = prodWorld();
+  const deletedKeys = watchSlateDeletes(env);
+  await cleanupOrphans(env, { id: REAL_ID, allow: REAL_ALLOW });
+  await cleanupOrphans(env, { id: REAL_ID, allow: REAL_ALLOW });
+  forgetManifest(env, REAL_ID);
+  await cleanupOrphans(env, { id: REAL_ID, allow: REAL_ALLOW });
+  assert.deepEqual(deletedKeys, ["custom_slate:CGALPR:1", "custom_slate:XP926U:1"],
+    `keys were deleted ${deletedKeys.length} times`);
+});
+
+test("G · the allowlist is ordered by its CONTENT, so a stored position means the same thing", () => {
+  const a = normalizeAllow(["custom_slate:B:7", "custom_slate:A:7", "custom_slate:B:7"]);
+  const b = normalizeAllow(["custom_slate:A:7", "custom_slate:B:7"]);
+  assert.deepEqual(a.map((e) => e.id), b.map((e) => e.id));
+  assert.equal(a.length, 2, "a duplicate entry survived normalisation");
+});
+
+test("G · the same SET in a different order is the same authorisation", async () => {
+  const env = prodWorld();
+  const reordered = [REAL_ALLOW[1], REAL_ALLOW[0], REAL_ALLOW[1]];
+  const result = await cleanupOrphans(env, { id: REAL_ID, allow: reordered });
+  assert.equal(result.done, true);
+  assert.equal(result.deleted, 2);
+  assert.deepEqual(slateKeys(env), ["custom_slate:LIVE:1"]);
+});
+
+// --- 8 · and only then is the gate open ----------------------------------
+
+test("G · after cleanup a FRESH complete chain reaches ready:true", async () => {
+  const env = prodWorld({ indexed: false });
+
+  const repaired = await driveRepair(env);
+  assert.equal(repaired.result.forward.repaired, 2);
+  const blocked = await driveVerify(env);
+  assert.equal(blocked.result.complete, true);
+  assert.equal(blocked.result.ready, false);
+  assert.equal(blocked.result.chain.forward.counts.missing, 0);
+  assert.equal(blocked.result.chain.reverse.counts.stale, 0);
+  assert.equal(blocked.result.chain.forward.counts.orphaned, 2);
+
+  const cleanup = await cleanupOrphans(env, { id: REAL_ID, allow: REAL_ALLOW });
+  assert.equal(cleanup.deleted, 2);
+
+  const open = await driveVerify(env);
+  assert.equal(open.result.complete, true);
+  assert.equal(open.result.chain.forward.counts.missing, 0);
+  assert.equal(open.result.chain.reverse.counts.stale, 0);
+  assert.equal(open.result.chain.forward.counts.orphaned, 0);
+  assert.equal(open.result.ready, true, open.result.verdict);
+});
+
+test("G · ready:true needs ALL THREE at zero — one orphan out of scope is enough to hold it", async () => {
+  const env = prodWorld({ orphans: ["CGALPR", "XP926U", "OTHER"], indexed: false });
+  await driveRepair(env);
+  await cleanupOrphans(env, { id: REAL_ID, allow: REAL_ALLOW });
+  const still = await driveVerify(env);
+  assert.equal(still.result.complete, true);
+  assert.equal(still.result.chain.forward.counts.orphaned, 1);
+  assert.equal(still.result.ready, false, "an unauthorised orphan opened the gate");
+
+  // A missing index entry alone also holds it shut, with no orphan in sight.
+  const missing = orphanWorld({ orphans: [], healthy: ["AAA"], indexed: false });
+  const shut = await driveVerify(missing);
+  assert.equal(shut.result.chain.forward.counts.orphaned, 0);
+  assert.ok(shut.result.chain.forward.counts.missing > 0);
+  assert.equal(shut.result.ready, false);
+});
+
+// --- 9 · the route --------------------------------------------------------
+
+test("G · ENDPOINT: cleanup is behind the migration secret and nothing else", async () => {
+  const env = { ...prodWorld(), MIGRATION_SECRET: SECRET, ALLOWED_ORIGIN: "*" };
+  const noSecret = await worker.fetch(new Request("https://w/admin/slate-index", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ action: "cleanup-orphans", id: REAL_ID, allow: REAL_ALLOW }),
+  }), env);
+  assert.equal(noSecret.status, 403);
+
+  const raw = (body) => worker.fetch(new Request("https://w/admin/slate-index", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ secret: SECRET, ...body }),
+  }), env);
+  assert.equal((await raw({ action: "cleanup-orphan", allow: [] })).status, 400,
+    "a near-miss action name was accepted");
+  assert.equal((await raw({ action: "cleanup-orphans", allow: REAL_ALLOW })).status, 400,
+    "a cleanup with no id was accepted");
+  assert.equal((await raw({ action: "cleanup-orphans", id: "made-up", allow: REAL_ALLOW })).status,
+    400, "an unauthorised id was accepted");
+  assert.deepEqual(slateKeys(env), [
+    "custom_slate:CGALPR:1", "custom_slate:LIVE:1", "custom_slate:XP926U:1",
+  ]);
+});
+
+test("G · ENDPOINT: after a crashed cleanup, ready still needs a fresh 0/0/0 chain", async () => {
+  const env = { ...prodWorld({ indexed: false }), MIGRATION_SECRET: SECRET, ALLOWED_ORIGIN: "*" };
+  const post = endpoint(env);
+
+  let repairResult = await post({ action: "repair" });
+  while (!repairResult.done) repairResult = await post({ action: "repair", resume: repairResult.resume });
+  let blocked = await post({ action: "verify", restart: true });
+  while (!blocked.complete) blocked = await post({ action: "verify" });
+  assert.equal(blocked.ready, false);
+  assert.match(blocked.verdict, /2 orphaned/);
+
+  // Crash partway through the authorised cleanup.
+  crashOnDelete(env, "custom_slate:XP926U:1");
+  const crashed = await worker.fetch(new Request("https://w/admin/slate-index", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ secret: SECRET, action: "cleanup-orphans", id: REAL_ID, allow: REAL_ALLOW }),
+  }), env);
+  assert.equal(crashed.status, 500, "a failed KV delete was reported as success");
+  assert.equal(await readChain(env), null, "the crashed cleanup left a chain behind");
+
+  // The retry cannot be widened over HTTP, with or without a visible manifest.
+  for (const seen of [true, false]) {
+    if (!seen) forgetManifest(env, REAL_ID);
+    const widened = await worker.fetch(new Request("https://w/admin/slate-index", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        secret: SECRET, action: "cleanup-orphans", id: REAL_ID,
+        allow: [...REAL_ALLOW, { key: "custom_slate:LIVE:1", code: "LIVE" }],
+      }),
+    }), env);
+    assert.equal(widened.status, 400, `manifest visible=${seen}: a wider list was accepted`);
+    assert.match((await widened.json()).error, /does not match the 2 key\(s\) authorised in code/);
+  }
+
+  // One orphan left: a complete chain still refuses to open the gate.
+  let still = await post({ action: "verify", restart: true });
+  while (!still.complete) still = await post({ action: "verify" });
+  assert.equal(still.forward.counts.orphaned, 1);
+  assert.equal(still.ready, false, "one remaining orphan opened the gate");
+
+  const finished = await post({ action: "cleanup-orphans", id: REAL_ID, allow: REAL_ALLOW });
+  assert.equal(finished.deleted, 1);
+  assert.equal(finished.already_absent, 1);
+  assert.equal(finished.done, true);
+  assert.equal(finished.chainInvalidated, true);
+  assert.equal(await readChain(env), null);
+
+  let fresh = await post({ action: "verify", restart: true });
+  while (!fresh.complete) fresh = await post({ action: "verify" });
+  assert.equal(fresh.forward.counts.missing, 0);
+  assert.equal(fresh.reverse.counts.stale, 0);
+  assert.equal(fresh.forward.counts.orphaned, 0);
+  assert.equal(fresh.ready, true, fresh.verdict);
+  assert.deepEqual(slateKeys(env), ["custom_slate:LIVE:1"]);
+});
+
+test("G · ENDPOINT: the whole operator sequence, over HTTP alone", async () => {
+  const env = { ...prodWorld({ indexed: false }), MIGRATION_SECRET: SECRET, ALLOWED_ORIGIN: "*" };
+  const post = endpoint(env);
+
+  let repairResult = await post({ action: "repair" });
+  while (!repairResult.done) repairResult = await post({ action: "repair", resume: repairResult.resume });
+
+  let verifyResult = await post({ action: "verify", restart: true });
+  while (!verifyResult.complete) verifyResult = await post({ action: "verify" });
+  assert.equal(verifyResult.ready, false);
+  assert.match(verifyResult.verdict, /2 orphaned/);
+
+  const cleaned = await post({ action: "cleanup-orphans", id: REAL_ID, allow: REAL_ALLOW });
+  assert.equal(cleaned.deleted, 2);
+  assert.equal(cleaned.done, true);
+  assert.equal(cleaned.chainInvalidated, true);
+  assert.deepEqual(cleaned.results.map((r) => r.key),
+    ["custom_slate:CGALPR:1", "custom_slate:XP926U:1"]);
+
+  let fresh = await post({ action: "verify", restart: true });
+  while (!fresh.complete) fresh = await post({ action: "verify" });
+  assert.equal(fresh.ready, true, fresh.verdict);
+  assert.equal(fresh.forward.counts.orphaned, 0);
+  assert.deepEqual(slateKeys(env), ["custom_slate:LIVE:1"]);
 });

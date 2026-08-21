@@ -394,3 +394,333 @@ export async function repair(env, {
       : "Repair incomplete. Call repair again with the resume positions.",
   };
 }
+
+// ---------------------------------------------------------------------------
+// Orphan cleanup — narrow, allowlisted, manifested, and never automatic
+// ---------------------------------------------------------------------------
+
+/**
+ * An orphan is a PUBLISHED slate whose `league:` record is gone. The forward
+ * scan refuses to index one — correctly, because indexing it would resurrect a
+ * league nobody plays — and `chainVerdict` refuses to report ready while one
+ * exists. Between those two facts sits a state the operator cannot leave:
+ * repair only COUNTS orphans, so "repair, then start a new chain" returns the
+ * same verdict for ever.
+ *
+ * The way out is not to weaken the readiness rule, and not to let a scan delete
+ * production data because one KV read could not see a league. It is to make the
+ * deletion a separate, explicit, RECORDED act:
+ *
+ *   - it has its own action, so no repair or verify can reach it;
+ *   - it deletes ONLY keys the operator listed by their exact full name;
+ *   - it re-reads `league:<code>` immediately before every delete, so a league
+ *     that has come back — or was never gone — is never destroyed on the
+ *     strength of an earlier scan;
+ *   - it writes a MANIFEST before it can delete anything, pinning the authorised
+ *     list to a cleanup ID for every later invocation;
+ *   - and it invalidates the verification chain before it can delete anything.
+ *
+ * The last two are orderings, not details.
+ *
+ * The manifest exists because a returned resume token only pins the allowlist
+ * across a CLEAN return. A crash returns no token at all, so the retry was free
+ * to present a longer list and have it honoured — the authorisation lived only
+ * in the caller's hand, which is the one place a crash can empty. Now it lives
+ * in KV under an operator-chosen ID, is written before any destruction, and is
+ * kept after the run finishes so the same ID can never be reused for a wider
+ * deletion.
+ *
+ * The chain invalidation is first for the same reason. Invalidating afterwards
+ * left a window: a crash between a slate deletion and the invalidation strands a
+ * chain that no longer describes the key space, and the retry finds the slate
+ * already absent, so deletes nothing, so never invalidates. A stale `ready`
+ * outlives the data it described.
+ *
+ * Everything it will not do is as important as what it will: a draft slate is
+ * refused, because only a published one is counted as an orphan and only a
+ * published one holds the gate shut.
+ */
+
+/** The allowlist is meant to be read by a person before it is sent. */
+export const MAX_CLEANUP_KEYS = 50;
+
+/** slate read, league recheck, delete. */
+export const CLEANUP_OPS_PER_KEY = 3;
+/** The one real KV delete that invalidates the chain. */
+export const CHAIN_OPS_PER_CLEANUP = 1;
+/** Manifest read, the pre-destruction write, and the progress write. */
+export const MANIFEST_OPS = 3;
+/**
+ * The floor below which an invocation cannot do its bookkeeping AND one whole
+ * key. A cap under this is refused rather than quietly raised, because raising
+ * it would mean spending more operations than the figure we report.
+ */
+export const MIN_CLEANUP_OPS = MANIFEST_OPS + CHAIN_OPS_PER_CLEANUP + CLEANUP_OPS_PER_KEY;
+
+const CLEANUP_PREFIX = "notify:cleanup:";
+/** Constrained so an ID can never escape its own key space. */
+const CLEANUP_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+
+/**
+ * THE AUTHORITY. Every cleanup this deployment is permitted to perform, by id,
+ * with the exact keys it may delete.
+ *
+ * It is here rather than in KV because KV is eventually consistent and a read
+ * that returns nothing is indistinguishable from a key that does not exist. A
+ * retry routed to a location that has not yet seen the manifest would find no
+ * record, and a design that treats an absent manifest as permission to create
+ * one from the request would accept whatever list that request carried — which
+ * is the widening a crash was supposed to make impossible.
+ *
+ * So the manifest is demoted to what it can be trusted for: progress,
+ * idempotency and audit. What may be deleted is fixed at deploy time, and
+ * authorising another cleanup means a reviewed code change and a deployment.
+ */
+export const AUTHORISED_CLEANUPS = Object.freeze({
+  // v1.6.6 Phase B1. Two published slates left behind by an account deletion
+  // that removed everything else: no league record, no members, no index keys.
+  // They are the only thing holding the readiness gate shut.
+  "v166-b1-orphans-20260821": Object.freeze([
+    Object.freeze({ key: "custom_slate:CGALPR:1", code: "CGALPR" }),
+    Object.freeze({ key: "custom_slate:XP926U:1", code: "XP926U" }),
+  ]),
+});
+
+export const cleanupManifestKey = (id) => `${CLEANUP_PREFIX}${id}`;
+export const readCleanupManifest = (env, id) => env.KV.get(cleanupManifestKey(id), "json");
+
+/** A refusal of the WHOLE call: the request itself is not one we will act on. */
+export class CleanupRefused extends Error {}
+
+/**
+ * One entry, normalised. A bare string is the key; the object form also names
+ * the code, and the two must agree — which is the only way a typo in a
+ * hand-written key is caught before it is acted on.
+ */
+function normalizeEntry(entry) {
+  if (typeof entry === "string") return { key: entry, declared: null };
+  if (entry && typeof entry === "object" && typeof entry.key === "string") {
+    return { key: entry.key, declared: entry.code == null ? null : String(entry.code) };
+  }
+  return { key: null, declared: null };
+}
+
+/**
+ * The identity of one entry: the exact key AND the code the operator declared
+ * for it. Both, because a list that names the same keys under different codes
+ * is a different authorisation.
+ */
+const entryIdentity = (entry, at) =>
+  (entry.key == null ? `!malformed#${at}` : `${entry.key}|${entry.declared ?? ""}`);
+
+/**
+ * Sorted and de-duplicated, so the order a run works through is a property of
+ * the SET and not of the order the operator happened to type it in — without
+ * which a stored progress position means nothing.
+ */
+export function normalizeAllow(allow) {
+  const list = Array.isArray(allow) ? allow : [];
+  const seen = new Map();
+  list.forEach((raw, at) => {
+    const entry = normalizeEntry(raw);
+    const id = entryIdentity(entry, at);
+    if (!seen.has(id)) seen.set(id, { ...entry, id });
+  });
+  return [...seen.values()].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+}
+
+const sameIdentity = (a, b) =>
+  Array.isArray(a) && Array.isArray(b) && a.length === b.length
+  && a.every((value, at) => value === b[at]);
+
+/**
+ * Delete allowlisted orphan slates. Bounded, resumable and idempotent.
+ *
+ * Idempotent because a key that is already gone is reported as `already_absent`
+ * rather than deleted, so a retry — after a clean stop or after a crash —
+ * deletes each authorised key at most once.
+ */
+export async function cleanupOrphans(
+  env, { id, allow = [], maxOps } = {}, { table = AUTHORISED_CLEANUPS } = {},
+) {
+  // ---- authority is settled HERE, from code, before KV is touched at all ---
+  // Everything in this block is free and refuses without reading or writing.
+  const cleanupId = typeof id === "string" ? id.trim() : "";
+  if (!CLEANUP_ID.test(cleanupId)) {
+    throw new CleanupRefused(
+      "a cleanup id is required, and must be 1-64 characters of [A-Za-z0-9._-]");
+  }
+  // hasOwn, not a plain lookup: "constructor" and "toString" are valid ids by
+  // shape and would otherwise resolve to something on the prototype.
+  if (!Object.hasOwn(table, cleanupId)) {
+    throw new CleanupRefused(
+      `cleanup id "${cleanupId}" is not authorised in this deployment; `
+      + "authorising one is a reviewed code change");
+  }
+  const submitted = normalizeAllow(allow);
+  if (!submitted.length) throw new CleanupRefused("the allowlist is empty");
+  if (submitted.length > MAX_CLEANUP_KEYS) {
+    throw new CleanupRefused(
+      `allowlist has ${submitted.length} keys; the ceiling is ${MAX_CLEANUP_KEYS}`);
+  }
+
+  // The list that gets walked is the CODE list, never the request's. The
+  // request still has to match it exactly — an operator who submits something
+  // else is told so rather than quietly having it ignored.
+  const entries = normalizeAllow(table[cleanupId]);
+  const identity = entries.map((entry) => entry.id);
+  if (!sameIdentity(submitted.map((entry) => entry.id), identity)) {
+    throw new CleanupRefused(
+      `the submitted allowlist does not match the ${identity.length} key(s) `
+      + `authorised in code for "${cleanupId}"`);
+  }
+
+  const cap = clampOps(maxOps);
+  if (cap < MIN_CLEANUP_OPS) {
+    // Raising it silently is what let actual operations exceed the reported
+    // cap. The cap we enforce and the cap we report are the same number.
+    throw new CleanupRefused(
+      `maxOps ${cap} is below the minimum of ${MIN_CLEANUP_OPS} for one key`);
+  }
+  const canonical = entries.map((entry) => ({ key: entry.key, code: entry.declared }));
+
+  const budget = { ops: 0, max: cap };
+  const kv = meter(env, budget);
+  const manifestKey = cleanupManifestKey(cleanupId);
+
+  // ---- the manifest is the authority, not the request ----------------------
+  // ---- the manifest is progress, idempotency and audit. Not authority ------
+  // An absent read is safe: KV is eventually consistent, so "no manifest" may
+  // simply mean "not here yet". Starting over replays the SAME code-authorised
+  // keys, and a key already deleted reports already_absent rather than being
+  // deleted twice. A manifest that disagrees with the code is refused rather
+  // than overwritten — it can only mean this deployment and the record were
+  // written under different authority, and that is not ours to reconcile.
+  const existing = await kv.get(manifestKey);
+  if (existing && !sameIdentity(existing.identity, identity)) {
+    throw new CleanupRefused(
+      `the stored manifest for "${cleanupId}" records a different allowlist `
+      + `(${existing.identity?.length ?? 0} keys, ${existing.status}); `
+      + "refusing rather than overwriting it");
+  }
+  if (existing?.status === "complete") {
+    // Terminal, and retained. Replaying it reads the record and does nothing
+    // else — there is no deletion to perform and so nothing to invalidate.
+    return {
+      action: "cleanup-orphans",
+      id: cleanupId,
+      total: entries.length,
+      at: existing.at,
+      done: true,
+      replay: true,
+      status: "complete",
+      deleted: 0,
+      refused: 0,
+      already_absent: 0,
+      results: existing.results ?? [],
+      chainInvalidated: false,
+      ops: budget.ops,
+      opsCap: cap,
+      next: "This cleanup id is complete. Run verify with restart:true to begin a fresh chain.",
+    };
+  }
+
+  const manifest = existing ?? {
+    id: cleanupId,
+    allow: canonical,
+    identity,
+    at: 0,
+    status: "running",
+    results: [],
+    invocations: 0,
+  };
+  manifest.invocations = (manifest.invocations ?? 0) + 1;
+  manifest.status = "running";
+
+  // FIRST WRITE, before the chain and before any slate: from this point the
+  // authorised list survives a crash, and a retry is bound to it.
+  await kv.put(manifestKey, JSON.stringify(manifest));
+
+  // THEN the chain, still before any slate can be deleted, and on every
+  // invocation — including the retry after a crash, where the deletion has
+  // already happened and there is nothing left to infer it from.
+  await kv.del(CHAIN_KEY);
+
+  let index = Number.isInteger(manifest.at) && manifest.at > 0
+    ? Math.min(manifest.at, entries.length) : 0;
+  const results = [];
+  const refuse = (key, reason, code) => results.push({ key, code, outcome: "refused", reason });
+
+  for (; index < entries.length; index++) {
+    const entry = entries[index];
+
+    // Shape first, because it costs nothing and a key we cannot parse is a key
+    // we must not act on. Anything outside the slate prefix is refused here,
+    // which is what keeps a `league:` or `slatefx:` name in the list inert.
+    if (typeof entry.key !== "string" || !entry.key.startsWith(SLATE_PREFIX)) {
+      refuse(entry.key ?? null, "malformed", null);
+      continue;
+    }
+    const parsed = parseSlateKey(entry.key);
+    if (!parsed?.code || !parsed.period) { refuse(entry.key, "malformed", null); continue; }
+    if (entry.declared != null && entry.declared !== parsed.code) {
+      refuse(entry.key, "mismatch", parsed.code);
+      continue;
+    }
+
+    // From here the entry costs operations. Stop cleanly rather than starting
+    // one we cannot finish — a half-checked key must never be deleted — and
+    // keep back the progress write, without which the next invocation would
+    // not know this one got here.
+    if (budget.max - budget.ops < CLEANUP_OPS_PER_KEY + 1) break;
+
+    const slate = await kv.get(entry.key);
+    if (!slate) {
+      results.push({ key: entry.key, code: parsed.code, outcome: "already_absent" });
+      continue;
+    }
+    if (slate.status !== "published") { refuse(entry.key, "not_published", parsed.code); continue; }
+
+    // The recheck, immediately before the delete. A scan minutes old is not
+    // authority to destroy anything.
+    const league = await kv.get(`league:${parsed.code}`);
+    if (league) { refuse(entry.key, "league_exists", parsed.code); continue; }
+
+    await kv.del(entry.key);
+    results.push({
+      key: entry.key, code: parsed.code, period: parsed.period, outcome: "deleted",
+    });
+  }
+
+  const done = index >= entries.length;
+  manifest.at = index;
+  manifest.status = done ? "complete" : "running";
+  manifest.results = [...(manifest.results ?? []), ...results];
+  // The progress write. A crash before it costs only the pointer: the retry
+  // re-walks from the last recorded position and finds the keys it already
+  // deleted absent, which is why re-walking cannot delete anything twice.
+  await kv.put(manifestKey, JSON.stringify(manifest));
+
+  return {
+    action: "cleanup-orphans",
+    id: cleanupId,
+    total: entries.length,
+    at: index,
+    done,
+    replay: false,
+    status: manifest.status,
+    deleted: results.filter((r) => r.outcome === "deleted").length,
+    refused: results.filter((r) => r.outcome === "refused").length,
+    already_absent: results.filter((r) => r.outcome === "already_absent").length,
+    results,
+    manifest_results: manifest.results,
+    // Always. Any cleanup ATTEMPT means the next verification has to be a fresh
+    // one, whether or not this attempt found anything left to delete.
+    chainInvalidated: true,
+    ops: budget.ops,
+    opsCap: cap,
+    next: done
+      ? "Cleanup complete. Run verify with restart:true to begin a fresh chain."
+      : `Cleanup incomplete. Call again with id "${cleanupId}" and the SAME allowlist.`,
+  };
+}

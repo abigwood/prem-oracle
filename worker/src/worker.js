@@ -52,7 +52,10 @@ import {
   dueFixtures, planWindow, slateFixtureKey, slateFixturePrefix,
 } from "./notify/planner.js";
 import { deliverJob } from "./notify/consumer.js";
-import { verify as verifySlateIndex, repair as repairSlateIndex } from "./notify/backfill.js";
+import {
+  verify as verifySlateIndex, repair as repairSlateIndex,
+  cleanupOrphans as cleanupOrphanSlates, CleanupRefused,
+} from "./notify/backfill.js";
 import { RETRY_DELAY_S as NOTIFY_RETRY_DELAY_S } from "./notify/ledger.js";
 import { autoSettleResults, feedForCompetition } from "./results_feed.js";
 import {
@@ -1225,7 +1228,25 @@ async function slateIndexAdmin(env, body) {
       maxOps: body.maxOps,
     })) }, 200, env);
   }
-  return json({ error: "action must be verify or repair" }, 400, env);
+  if (body.action === "cleanup-orphans") {
+    // Its own action, so neither verify nor repair can reach it. What it may
+    // delete is fixed in AUTHORISED_CLEANUPS at deploy time: the request names
+    // an id and repeats the list, and both have to match the code before any
+    // KV is touched. Nothing here can widen that — no table override is passed,
+    // and there is no request field that could supply one. A refusal of the
+    // whole request is a 400 and writes nothing.
+    try {
+      return json({ ok: true, ...(await cleanupOrphanSlates(env, {
+        id: body.id,
+        allow: body.allow,
+        maxOps: body.maxOps,
+      })) }, 200, env);
+    } catch (error) {
+      if (error instanceof CleanupRefused) return json({ error: String(error.message) }, 400, env);
+      throw error;
+    }
+  }
+  return json({ error: "action must be verify, repair or cleanup-orphans" }, 400, env);
 }
 
 async function migrationAdmin(env, body) {

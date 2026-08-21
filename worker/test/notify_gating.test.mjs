@@ -45,11 +45,38 @@ test("the Durable Object class is exported for the migration to bind", () => {
   assert.match(SOURCE, /export \{ NotifyLedger \};/);
 });
 
-test("no queue or Durable Object configuration is added by this slice", () => {
-  const wrangler = readFileSync(new URL("../wrangler.toml", import.meta.url), "utf8");
-  assert.ok(!/\[\[queues/.test(wrangler), "a queue binding was added before approval");
-  assert.ok(!/durable_object/i.test(wrangler), "a Durable Object binding was added before approval");
-  assert.ok(!/migrations/.test(wrangler), "a migration was added before approval");
+/**
+ * The gate is BINDINGS, not infrastructure.
+ *
+ * Phase B1 deliberately created the queue and applied the SQLite migration that
+ * declares NotifyLedger, because creating infrastructure and activating it are
+ * separate decisions and only the first was approved. This test used to forbid
+ * both — and it read the whole file, so the comment EXPLAINING that there is no
+ * durable_objects binding tripped the check that looks for one.
+ *
+ * So it reads ACTIVE DIRECTIVES ONLY, and asserts the thing that actually keeps
+ * the live worker on the legacy path: the worker has no way to reach either.
+ */
+const directives = () => readFileSync(new URL("../wrangler.toml", import.meta.url), "utf8")
+  .split("\n").map((line) => line.replace(/#.*$/, "").trim()).filter(Boolean).join("\n");
+
+test("no queue or Durable Object BINDING is configured", () => {
+  const active = directives();
+  assert.ok(!/\[\[queues/.test(active), "a queue producer or consumer was added before approval");
+  assert.ok(!/\[\[durable_objects\.bindings\]\]/.test(active),
+    "a Durable Object binding was added before approval");
+  assert.ok(!/\bNOTIFY_(QUEUE|LEDGER)\b/.test(active), "a NOTIFY_* binding was added before approval");
+  assert.ok(!/^\s*binding\s*=\s*"NOTIFY/m.test(active));
+});
+
+test("the approved migration declares the CLASS and binds nothing", () => {
+  const active = directives();
+  // It has to be here: without it the namespace does not exist. What it must
+  // not do is give the worker a name to call it by.
+  assert.match(active, /\[\[migrations\]\]/);
+  assert.match(active, /new_sqlite_classes = \["NotifyLedger"\]/);
+  const migration = active.slice(active.indexOf("[[migrations]]"));
+  assert.ok(!/binding/.test(migration), "the migration block carries a binding");
 });
 
 // --- X1 · payload compatibility -------------------------------------------

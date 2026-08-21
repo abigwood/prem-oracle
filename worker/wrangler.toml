@@ -16,3 +16,14 @@ ALLOWED_ORIGIN = "https://abigwood.github.io"
 binding = "KV"
 id = "4d6fa971722242a69e1644725ef2b11b"
 preview_id = "b9f71204465f4ea38be82bd2359e70e9"
+
+# The NotifyLedger Durable Object class, declared so its SQLite-backed namespace
+# exists and the migration is applied ONCE, ahead of time.
+#
+# There is deliberately NO [[durable_objects.bindings]] entry and no queue
+# producer or consumer: the class exists, the namespace exists, and the worker
+# still has no way to reach either. Creating the infrastructure and activating
+# it are separate decisions, and only the first has been approved.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["NotifyLedger"]

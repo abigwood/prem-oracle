@@ -90,12 +90,25 @@ export function kvShim(seed = {}, { pageSize = 1000 } = {}) {
   const store = new Map(Object.entries(rest).map(([k, v]) => [k, JSON.stringify(v)]));
   const meta = new Map(Object.entries(seededMeta));
   const counts = { get: 0, put: 0, delete: 0, list: 0 };
+  // Sorting the whole key space on every list turns a resumable scan of twenty
+  // thousand keys into a quadratic one, which is a property of the shim and not
+  // of the code under test. Cached, invalidated on any mutation.
+  let sorted = null;
+  let sortedSize = -1;
+  const invalidate = () => { sorted = null; };
+  const keysInOrder = () => {
+    // Validated against the store's size, so a test that writes through
+    // `store.set` directly — as several do — is still seen by list().
+    if (!sorted || sortedSize !== store.size) {
+      sorted = [...store.keys()].sort();
+      sortedSize = store.size;
+    }
+    return sorted;
+  };
   return {
     counts,
     store,
     meta,
-    /** Seed a key's list metadata, as a metadata-carrying put would have. */
-    setMeta(key, metadata) { meta.set(key, metadata); },
     async get(key, type) {
       counts.get++;
       const raw = store.get(key);
@@ -104,14 +117,25 @@ export function kvShim(seed = {}, { pageSize = 1000 } = {}) {
     },
     async put(key, value, options) {
       counts.put++;
+      if (!store.has(key)) invalidate();
       store.set(key, value);
       if (options?.metadata) meta.set(key, options.metadata);
       else meta.delete(key);
     },
-    async delete(key) { counts.delete++; store.delete(key); meta.delete(key); },
+    async delete(key) { counts.delete++; store.delete(key); meta.delete(key); invalidate(); },
+    setMeta(key, metadata) { meta.set(key, metadata); },
     async list({ prefix = "", cursor, limit = pageSize } = {}) {
       counts.list++;
-      const names = [...store.keys()].filter((k) => k.startsWith(prefix)).sort();
+      const all = keysInOrder();
+      // Binary-search the prefix range rather than filtering the whole space.
+      let lo = 0;
+      let hi = all.length;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (all[mid] < prefix) lo = mid + 1; else hi = mid;
+      }
+      const names = [];
+      for (let i = lo; i < all.length && all[i].startsWith(prefix); i++) names.push(all[i]);
       // The cursor is the last key returned, so a resumed scan continues from
       // after it rather than from the top.
       const start = cursor ? names.findIndex((n) => n > cursor) : 0;

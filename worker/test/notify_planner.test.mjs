@@ -421,28 +421,22 @@ test("a fixture in two leagues yields both codes, sorted", async () => {
 
 // --- C · production packing and the costed model must agree ---------------
 
-test("C · the production packer produces exactly the message count Gate 0 costed", async () => {
-  const { SCENARIOS } = await import("../../docs/design/notify-budget.spec.mjs");
-  const triples = [];
-  for (let f = 0; f < 20; f++) {
-    for (let u = 0; u < 1_000; u++) {
-      triples.push({ uid: uid(u), fixtureId: `f${f}`, league: "AAA", period: "7" });
-    }
+test("C · the cost model and the production planner agree at every distribution", async () => {
+  const { scenario, DISTRIBUTIONS } = await import("../../docs/design/notify-budget.spec.mjs");
+  for (const distribution of Object.keys(DISTRIBUTIONS)) {
+    const modelled = scenario(distribution, "worst").day;
+    const world = distributedWorld({
+      leagues: DISTRIBUTIONS[distribution].leagues,
+      overlap: DISTRIBUTIONS[distribution].overlap ?? 1,
+    });
+    const produced = await planWindow({
+      matches: world.matches, competitionOf: () => "PL",
+      ledger: world.L.client, deps: world.deps, now: T0,
+    });
+    assert.equal(produced.jobs.length, modelled.messages,
+      `${distribution}: production packs ${produced.jobs.length}, the model assumes ${modelled.messages}`);
+    assert.equal(produced.triples, modelled.planned);
   }
-  const produced = packJobs(triples).length;
-  assert.equal(produced, SCENARIOS.worst.day.messages,
-    `production packs ${produced} messages, the cost model assumes ${SCENARIOS.worst.day.messages}`);
-});
-
-test("C · the model's normal shape also matches the packer", async () => {
-  const { SCENARIOS } = await import("../../docs/design/notify-budget.spec.mjs");
-  const planned = SCENARIOS.normal.day.planned;
-  const triples = Array.from({ length: planned }, (_, i) => ({
-    uid: uid(i), fixtureId: `f${i % 20}`, league: "AAA", period: "7",
-  }));
-  // Sorted by fixture, as the planner emits them.
-  triples.sort((a, b) => a.fixtureId.localeCompare(b.fixtureId) || a.uid.localeCompare(b.uid));
-  assert.equal(packJobs(triples).length, SCENARIOS.normal.day.messages);
 });
 
 // ==========================================================================
@@ -599,81 +593,137 @@ test("A · an index key with no metadata is skipped, not chased with a read", as
   assert.equal(kv.counts.get, before, "discovery read a value to recover the period");
 });
 
-// --- the planning lease: a fixture is planned twice a day, not eight times ---
+// ==========================================================================
+// C · the two passes are the INITIAL plan and a LATE sweep
+// ==========================================================================
 
-test("planner · a fixture due on four consecutive ticks is planned twice", async () => {
-  const world = distributedWorld({ leagues: 1, recipients: 90, fixtures: ["f1"] });
-  const run = () => planWindow({
-    matches: world.matches, competitionOf: () => "PL",
-    ledger: world.L.client, deps: world.deps, now: T0,
-  });
-  const first = await run();
-  assert.equal(first.jobs.length, 2, "90 recipients should be two messages");
+const MINUTES = 60 * 1000;
+/** Ticks across the window, expressed as minutes before kick-off. */
+const tickAt = (minutesBefore) => KICK - minutesBefore * MINUTES;
 
-  // The sweep: nobody has been sent to yet, so it re-plans the same people.
-  const second = await run();
-  assert.equal(second.jobs.length, 2);
-
-  // Ticks three and four find the lease spent and plan nothing at all.
-  const third = await run();
-  const fourth = await run();
-  assert.equal(third.jobs.length, 0, "a third planning pass ran");
-  assert.equal(fourth.jobs.length, 0);
-  assert.ok(third.skipped.some((s) => s.why === "already-planned"));
-});
-
-test("planner · the sweep carries only those still unsent", async () => {
-  const world = distributedWorld({ leagues: 1, recipients: 90, fixtures: ["f1"] });
-  const run = () => planWindow({
-    matches: world.matches, competitionOf: () => "PL",
-    ledger: world.L.client, deps: world.deps, now: T0,
-  });
-  const first = await run();
-  // Deliver the first message only; the second message's people stay unsent.
-  await deliverJob(first.jobs[0], env, world.deps);
-
-  const sweep = await run();
-  assert.equal(sweep.triples, 45, "the sweep re-planned people already notified");
-  const sweptUids = new Set(sweep.jobs.flatMap((j) => j.triples.map((t) => t.uid)));
-  const sentUids = first.jobs[0].triples.map((t) => t.uid);
-  for (const done of sentUids) {
-    assert.ok(!sweptUids.has(done), `${done} was already sent to and was swept anyway`);
+function windowWorld({ leagues = 1, recipients = 90, indexed = true } = {}) {
+  const seed = { __meta: {} };
+  const codes = Array.from({ length: leagues }, (_, i) => `L${String(i).padStart(2, "0")}`);
+  for (const code of codes) {
+    seed[`league:${code}`] = { code, name: code };
+    seed[`custom_slate:${code}:7`] = { status: "published", fixtureIds: ["f1"], periodKey: "7" };
+    if (indexed) {
+      seed[`slatefx:f1:${code}`] = { period: "7" };
+      seed.__meta[`slatefx:f1:${code}`] = { period: "7" };
+    }
   }
-});
-
-test("planner · a fresh UTC day gets fresh passes", async () => {
-  const world = distributedWorld({ leagues: 1, recipients: 45, fixtures: ["f1"] });
-  const at = (now) => planWindow({
-    matches: world.matches, competitionOf: () => "PL",
-    ledger: world.L.client, deps: world.deps, now,
+  for (let i = 0; i < recipients; i++) {
+    const who = uid(i);
+    seed[`member:${codes[i % leagues]}:${who}`] = { nick: who, since: 0 };
+    seed[`push:${who}`] = { token: `tok-${who}`, mute: [] };
+  }
+  seed["picks:f1"] = {};
+  const kv = kvShim(seed);
+  const L = ledgerObject();
+  const sends = [];
+  const deps = harnessDeps({ kv, client: L.client, now: () => T0, sends });
+  const matches = [fixture("f1", new Date(KICK).toISOString())];
+  const plan = (now) => planWindow({
+    matches, competitionOf: () => "PL", ledger: L.client,
+    deps: harnessDeps({ kv, client: L.client, now: () => now, sends }), now,
   });
-  await at(T0);
-  await at(T0);
-  assert.equal((await at(T0)).jobs.length, 0);
-  const tomorrow = T0 + 24 * 60 * 60 * 1000;
-  assert.ok((await at(tomorrow)).jobs.length > 0, "the next day inherited the spent lease");
+  return { kv, L, sends, deps, matches, plan, codes, seed };
+}
+
+test("C1 · the sweep waits for the late window, not the next tick", async () => {
+  const w = windowWorld();
+  const initial = await w.plan(tickAt(60));
+  assert.equal(initial.jobs.length, 2, "the initial pass did not plan");
+
+  // T-45 and T-30 are still early: the sweep must not be spent on them.
+  for (const minutes of [45, 30]) {
+    const early = await w.plan(tickAt(minutes));
+    assert.equal(early.jobs.length, 0, `the sweep was consumed at T-${minutes}`);
+    assert.ok(early.skipped.some((s) => s.why === "already-planned"));
+  }
+
+  // T-15 is inside the closing stretch: this is the sweep.
+  const sweep = await w.plan(tickAt(15));
+  assert.equal(sweep.jobs.length, 2, "the late sweep never ran");
+
+  // And there is no third wave.
+  assert.equal((await w.plan(tickAt(5))).jobs.length, 0, "a third planning wave ran");
 });
 
-test("planner · the whole day's planning cost, counted", async () => {
+test("C2 · a slate published later in the window is still planned", async () => {
+  // Nothing indexed at all to begin with: the early ticks find no league.
+  const w = windowWorld({ indexed: false });
+  assert.equal((await w.plan(tickAt(60))).jobs.length, 0);
+  assert.equal((await w.plan(tickAt(45))).jobs.length, 0);
+
+  // The host publishes at roughly T-30; the index gains its key.
+  w.kv.store.set("slatefx:f1:L00", JSON.stringify({ period: "7" }));
+  w.kv.setMeta("slatefx:f1:L00", { period: "7" });
+
+  const later = await w.plan(tickAt(30));
+  assert.equal(later.triples, 90, "a slate published inside the window was never planned");
+  assert.equal(later.jobs.length, 2);
+  // The late sweep is still available afterwards.
+  assert.equal((await w.plan(tickAt(10))).jobs.length, 2);
+});
+
+test("C3 · a league becoming eligible later is caught by the sweep", async () => {
+  const w = windowWorld({ leagues: 1, recipients: 45 });
+  const initial = await w.plan(tickAt(60));
+  assert.equal(initial.triples, 45);
+  // Everyone in the first league is notified.
+  for (const j of initial.jobs) await deliverJob(j, env, w.deps);
+  assert.equal(w.sends.length, 45);
+
+  // A second league publishes the same fixture, bringing new recipients.
+  w.kv.store.set("league:L01", JSON.stringify({ code: "L01", name: "L01" }));
+  w.kv.store.set("custom_slate:L01:7",
+    JSON.stringify({ status: "published", fixtureIds: ["f1"], periodKey: "7" }));
+  w.kv.store.set("slatefx:f1:L01", JSON.stringify({ period: "7" }));
+  w.kv.setMeta("slatefx:f1:L01", { period: "7" });
+  for (let i = 45; i < 60; i++) {
+    w.kv.store.set(`member:L01:${uid(i)}`, JSON.stringify({ nick: uid(i), since: 0 }));
+    w.kv.store.set(`push:${uid(i)}`, JSON.stringify({ token: `tok-${uid(i)}`, mute: [] }));
+  }
+
+  const sweep = await w.plan(tickAt(10));
+  assert.equal(sweep.triples, 15, "the sweep re-planned people already notified");
+  const swept = sweep.jobs.flatMap((j) => j.triples.map((t) => t.uid));
+  assert.deepEqual(swept.sort(), Array.from({ length: 15 }, (_, i) => uid(45 + i)).sort());
+});
+
+test("C4 · four ticks never duplicate a sent or terminally dropped recipient", async () => {
+  const w = windowWorld({ recipients: 45 });
+  const seen = [];
+  for (const minutes of [60, 45, 30, 15, 5]) {
+    const pass = await w.plan(tickAt(minutes));
+    for (const j of pass.jobs) {
+      const before = w.sends.length;
+      await deliverJob(j, env, w.deps);
+      seen.push(w.sends.length - before);
+    }
+  }
+  // Exactly one notification per recipient across the whole window.
+  assert.equal(w.sends.length, 45, `${w.sends.length} notifications for 45 recipients`);
+  const tokens = w.sends.map((s) => s.token);
+  assert.equal(new Set(tokens).size, 45, "somebody was notified twice");
+});
+
+test("C5 · the corrected timing leaves every cap intact", async () => {
   const world = distributedWorld({ leagues: 1_000 });
+  const plan = (now) => planWindow({
+    matches: world.matches, competitionOf: () => "PL", ledger: world.L.client,
+    deps: harnessDeps({ kv: world.kv, client: world.L.client, now: () => now, sends: world.sends }),
+    now,
+  });
   const before = { ...world.kv.counts };
-  const rpcBefore = world.L.client.count();
-  // Four cron ticks across the window; the lease makes two of them no-ops.
-  for (let tick = 0; tick < 4; tick++) {
-    await planWindow({
-      matches: world.matches, competitionOf: () => "PL",
-      ledger: world.L.client, deps: world.deps, now: T0,
-    });
+  for (const minutes of [60, 45, 30, 15]) await plan(tickAt(minutes));
+  const spent = await world.L.client.call("spent", { day: DAY });
+  for (const metric of ["do_requests", "queue_ops", "worker_requests", "kv_reads"]) {
+    assert.ok(spent[metric] <= POOL[metric], `${metric} over cap after four ticks`);
   }
   const gets = world.kv.counts.get - before.get;
-  const lists = world.kv.counts.list - before.list;
-  const rpcs = world.L.client.count() - rpcBefore;
-  console.log(`\n  planner, one full day at the maximum shape (1,000 leagues):`);
-  console.log(`    KV value reads : ${gets}`);
-  console.log(`    KV list calls  : ${lists}`);
-  console.log(`    ledger RPCs    : ${rpcs}\n`);
-  // Two passes x 20 fixtures = 40 picks reads. Nothing per league, nothing
-  // per recipient, and nothing at all on the two leaseless ticks.
-  assert.equal(gets, 40, `the day cost ${gets} value reads`);
-  assert.ok(lists <= 2 * (20 + 2) + 2, `the day cost ${lists} list calls`);
+  console.log(`\n  four ticks at the maximum shape: ${gets} planner value reads\n`);
+  // Two productive passes x 20 fixtures.
+  assert.equal(gets, 40, `four ticks cost ${gets} value reads`);
 });

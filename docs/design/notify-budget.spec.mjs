@@ -1,8 +1,14 @@
 // EXECUTABLE SPECIFICATION — the arithmetic authority for Gate 0.
 //
-// Every figure in the Gate-0 operation, budget and capacity tables is computed
-// here, so caps, scenarios and capacity claims cannot drift apart in prose.
-// Verified by test/budget.test.mjs.
+// It imports the PRODUCTION read-pricing rule and the PRODUCTION packer rather
+// than restating them. An arithmetic authority that models a different
+// architecture from the one that ships is not an authority; it is a second
+// opinion that nobody checks.
+import { worstCaseReads } from "../../worker/src/notify/consumer.js";
+import { packJobs, JOB_TRIPLES } from "../../worker/src/notify/planner.js";
+import { POOL, PER_MESSAGE_WORST_CASE } from "../../worker/src/notify/ledger.js";
+
+export { POOL, PER_MESSAGE_WORST_CASE, JOB_TRIPLES };
 
 /** Cloudflare Workers PAID included monthly allowances (from the pricing docs). */
 export const INCLUDED = {
@@ -17,172 +23,147 @@ export const INCLUDED = {
   kv_writes: 1_000_000,
 };
 
-/**
- * The planner filters saved picks BEFORE creating jobs.
- *
- * It costs one bounded `picks:<fixtureId>` read per due fixture — ten reads for
- * a ten-fixture window, independent of how many recipients there are — and it
- * is the difference between enqueueing work for everybody and enqueueing it for
- * the people who still owe a prediction. Queue message counts below are
- * therefore based on PLANNED triples, never on successful APNs sends.
- *
- * The consumer still re-reads picks authoritatively before sending: this filter
- * is an economy, not the correctness check (D2 requires the re-check).
- */
-export const PLANNER = {
-  FILTERS_SAVED_PICKS: true,
-  PICK_READS_PER_FIXTURE: 1,
-  /**
-   * Reserved before sendBatch, because enqueueing makes these unavoidable.
-   * do_requests is FOUR deliveries x THREE calls: an earlier value of 8 assumed
-   * some deliveries would be refused cheaply, which is an average, not a bound.
-   */
-  PER_MESSAGE_WORST_CASE: { queue_ops: 7, worker_requests: 4, do_requests: 12 },
-};
-
 export const DESIGN = {
-  JOB_TRIPLES: 45,
-  KV_READS_PER_TRIPLE: 2,       // push: + member:
-  KV_READS_FIXED: 6,            // <=3 picks: + <=3 custom_slate: per message
+  /** The product's maximum published round. */
+  FIXTURES_PER_WINDOW: 20,
+  RECIPIENTS: 1_000,
   MAX_RETRIES: 3,
   DELIVERIES: 4,
-  QUEUE_READS_MAX: 5,           // documented ceiling for a retried message
+  QUEUE_READS_MAX: 5,          // documented ceiling for a retried message
   QUEUE_WRITE: 1,
   QUEUE_DELETE: 1,
   CRON_TICKS: 96,
-  /**
-   * The PRODUCT'S MAXIMUM SHAPE. The frozen authority's executed worst case is
-   * a 20-fixture round, and league rules permit up to 20 published fixtures.
-   * Modelling ten understated every downstream figure by half.
-   */
-  FIXTURES_PER_WINDOW: 20,
-  CONSUMER_CPU_MS: 10,
-  CRON_CPU_MS: 50,
+  /** The initial plan and one late sweep. */
+  PLAN_PASSES: 2,
   DO_CALLS_PER_DELIVERY: 3,
   DIAGNOSTIC_ROWS_PER_DAY: 40,
+  CONSUMER_CPU_MS: 10,
+  CRON_CPU_MS: 50,
   DO_MEM_GB: 0.128,
   DO_CALL_MS: 10,
   DAYS: 31,
 };
 
-/**
- * Two pools, so a retry can never starve a recipient's first attempt.
- * INITIAL is sized to the maximum shape: 20 fixtures x 1,000 recipients.
- */
-export const POOL = {
-  apns_initial: 20_000,
-  apns_retry: 5_000,
-  kv_reads: 110_000,
-};
-export const APNS_ATTEMPT_CAP = POOL.apns_initial + POOL.apns_retry;
-
 const D = DESIGN;
-const readsPerDelivery = D.JOB_TRIPLES * D.KV_READS_PER_TRIPLE + D.KV_READS_FIXED;  // 96
 
 /**
- * One day of the notification path.
+ * The distributions the read cost actually depends on.
  *
- * `planned` is the triple count AFTER the planner's pick filter. `deliveries`
- * models redelivery; the conservative ceiling assumes every message is
- * delivered the full four times even though a message whose remainder is
- * budget-dropped is acked and stops coming back.
- *
- * Ordering matters to the arithmetic: a delivery reserves its worst-case KV
- * read allowance BEFORE any read, so a retry delivery that then finds no APNs
- * budget has still spent its reads. That is deliberate — correctness over
- * optimistic accounting — and it is why KV reads, not attempts, is the metric
- * that binds first.
+ * A job's reads are 2 per recipient plus one pick map per distinct fixture plus
+ * one slate per distinct league/period — so the SAME thousand recipients cost
+ * different amounts depending on how many leagues they are spread across. The
+ * model has to carry that, because production does.
  */
-export function modelDay({ planned, deliveriesPerMessage = 1 }) {
-  const messages = Math.ceil(planned / D.JOB_TRIPLES);
+export const DISTRIBUTIONS = {
+  one_league: { leagues: 1, label: "1,000 recipients in one league" },
+  fragmented: { leagues: 1_000, label: "1,000 recipients in 1,000 one-person leagues" },
+  overlapping: { leagues: 10, overlap: 3, label: "overlapping membership, 10 leagues" },
+};
 
-  // Attempts, drawn from the pool each one belongs in.
+/** Build the triples a planning window would produce for a distribution. */
+export function planTriples({ leagues, fixtures = D.FIXTURES_PER_WINDOW, recipients = D.RECIPIENTS, plannedFraction = 1 }) {
+  const triples = [];
+  const planned = Math.round(recipients * plannedFraction);
+  for (let f = 0; f < fixtures; f++) {
+    for (let u = 0; u < planned; u++) {
+      triples.push({
+        uid: `u${String(u).padStart(5, "0")}`,
+        fixtureId: `f${String(f).padStart(2, "0")}`,
+        // Deterministic smallest-eligible selection puts each recipient in one
+        // league; which one depends only on how the leagues are laid out.
+        league: `L${String(u % leagues).padStart(4, "0")}`,
+        period: "7",
+      });
+    }
+  }
+  return triples;
+}
+
+/**
+ * One day, modelled from REAL packed jobs and REAL per-job read pricing.
+ *
+ * `deliveriesPerMessage` models redelivery. Reservations are dynamic: each
+ * delivery asks for what its own job will read, and the pool refuses once it is
+ * spent — which is exactly what production does, and the only way the totals
+ * here can be trusted.
+ */
+export function modelDay({ distribution, plannedFraction = 1, deliveriesPerMessage = 1 }) {
+  const { leagues, overlap = 1 } = DISTRIBUTIONS[distribution];
+  const triples = planTriples({ leagues: leagues * overlap, plannedFraction });
+  const jobs = packJobs(triples);
+
+  // Attempts, from the two pools.
+  const planned = triples.length;
   const initial = Math.min(planned, POOL.apns_initial);
   const wantRetry = planned * (deliveriesPerMessage - 1);
   const retry = Math.min(wantRetry, POOL.apns_retry);
   const attempts = initial + retry;
 
-  /**
-   * Deliveries. A message whose remainder is budget-dropped is ACKED, so it
-   * stops coming back: redelivery is bounded by the retry budget, not by
-   * max_retries alone. The ceiling modelled is the first pass, plus the retry
-   * deliveries the pool can actually fund, plus one final pass per message
-   * that returns and finds nothing left — capped by max_retries throughout.
-   */
-  const retryWorking = Math.ceil(retry / D.JOB_TRIPLES);
-  const finalDropPass = deliveriesPerMessage > 1 ? messages : 0;
-  const deliveries = Math.min(messages * deliveriesPerMessage,
-    messages + retryWorking + finalDropPass);
-
-  // Reads are reserved per delivery, capped by their own pool.
-  const affordableDeliveries = Math.min(deliveries, Math.floor(POOL.kv_reads / readsPerDelivery));
-  const kvReads = affordableDeliveries * readsPerDelivery;
+  // Deliveries: the first pass, the retries the pool can fund, and one final
+  // pass per message that returns and finds nothing left.
+  const retryWorking = retry === 0 ? 0 : Math.ceil(retry / JOB_TRIPLES);
+  const finalDropPass = deliveriesPerMessage > 1 ? jobs.length : 0;
+  const deliveries = Math.min(jobs.length * deliveriesPerMessage,
+    jobs.length + retryWorking + finalDropPass);
 
   /**
-   * Durable Object calls. A WORKING delivery is three round trips:
-   *   1. reserve the read allowance and claim the batch
-   *   2. the batched atomic attempt grants, after eligibility
-   *   3. record sent/failed/dropped outcomes, after APNs
-   * A delivery refused its read allowance costs one.
+   * Reads, spent job by job against the pool until it refuses. Every delivery
+   * reserves its OWN job's worst case, so a fragmented round costs more per
+   * delivery than a consolidated one and the pool binds sooner.
    */
-  const doCalls = deliveries * D.DO_CALLS_PER_DELIVERY + D.FIXTURES_PER_WINDOW * 2;
-  /**
-   * What the DO-request BUDGET actually holds. The planner books each message's
-   * unavoidable worst case up front and, as with reads, does not hand back what
-   * goes unused — so the cap is checked against the reservation, not the calls.
-   */
-  const doReserved = messages * PLANNER.PER_MESSAGE_WORST_CASE.do_requests
-    + D.FIXTURES_PER_WINDOW * 2;
+  let kvReads = 0;
+  let refusedDeliveries = 0;
+  const perJob = jobs.map((j) => worstCaseReads(j.triples));
+  for (let d = 0; d < deliveries; d++) {
+    const want = perJob[d % jobs.length];
+    if (kvReads + want > POOL.kv_reads) { refusedDeliveries++; continue; }
+    kvReads += want;
+  }
 
-  /**
-   * Rows written. The old `attempts * 2 + deliveries` understated the case
-   * where work is claimed and then dropped without an APNs attempt at all.
-   * Every write is now named:
-   */
-  const claimed = Math.min(deliveries * D.JOB_TRIPLES, planned * deliveriesPerMessage);
+  const doReserved = jobs.length * PER_MESSAGE_WORST_CASE.do_requests
+    + D.FIXTURES_PER_WINDOW * D.PLAN_PASSES;
+  const doCalls = deliveries * D.DO_CALLS_PER_DELIVERY + D.FIXTURES_PER_WINDOW * D.PLAN_PASSES;
+  const claimed = Math.min(deliveries * JOB_TRIPLES, planned * deliveriesPerMessage);
   const droppedNoAttempt = Math.max(0, claimed - attempts);
-  const rowsWritten =
-      claimed                       // claims and reclaims
-    + attempts                      // apns_tried
-    + attempts                      // sent | failed outcome
-    + droppedNoAttempt              // dropped outcome, no attempt made
-    + deliveries * 2                // budget rows: read reservation + attempt grants
-    + D.DIAGNOSTIC_ROWS_PER_DAY;    // bounded dropped_log
-
   const queueReads = deliveriesPerMessage === 1 ? 1 : D.QUEUE_READS_MAX;
 
   return {
-    planned, messages, deliveries, claimed, dropped_no_attempt: droppedNoAttempt,
+    distribution, planned,
+    messages: jobs.length,
+    deliveries,
+    refused_deliveries: refusedDeliveries,
+    reads_per_job_min: Math.min(...perJob),
+    reads_per_job_max: Math.max(...perJob),
     apns_initial: initial,
     apns_retry: retry,
     apns_attempts: attempts,
     unmet_retry: wantRetry - retry,
-    queue_ops: messages * (D.QUEUE_WRITE + queueReads + D.QUEUE_DELETE),
+    kv_reads: kvReads,
+    queue_ops: jobs.length * (D.QUEUE_WRITE + queueReads + D.QUEUE_DELETE),
     do_requests: Math.max(doCalls, doReserved),
     do_calls_actual: doCalls,
     do_requests_reserved: doReserved,
-    do_rows_written: rowsWritten,
+    do_rows_written: claimed + attempts * 2 + droppedNoAttempt
+      + deliveries * 2 + D.DIAGNOSTIC_ROWS_PER_DAY,
     do_rows_read: attempts * 5 + claimed,
     do_duration_gbs: +(doCalls * D.DO_CALL_MS / 1000 * D.DO_MEM_GB).toFixed(2),
     worker_requests: D.CRON_TICKS + deliveries,
     worker_cpu_ms: deliveries * D.CONSUMER_CPU_MS + D.CRON_TICKS * D.CRON_CPU_MS,
-    kv_reads: kvReads,
   };
 }
 
-/**
- * 1,000 recipients, ten due fixtures.
- * normal      — the planner's pick filter leaves ~30% of candidates planned
- * worst       — nobody has saved a pick, so every candidate is planned
- * max_retry   — worst shape, every message delivered the full four times
- */
-export const RECIPIENTS = 1_000;
-export const CANDIDATES = RECIPIENTS * D.FIXTURES_PER_WINDOW;    // 20,000
-export const SCENARIOS = {
-  normal: { day: modelDay({ planned: Math.round(CANDIDATES * 0.3) }), days: 20 },
-  worst: { day: modelDay({ planned: CANDIDATES }), days: D.DAYS },
-  max_retry: { day: modelDay({ planned: CANDIDATES, deliveriesPerMessage: D.DELIVERIES }), days: D.DAYS },
+/** normal / worst / max-retry, for each distribution. */
+export const SEQUENCES = ["normal", "worst", "max_retry"];
+export const sequenceOptions = {
+  normal: { plannedFraction: 0.3, deliveriesPerMessage: 1, days: 20 },
+  worst: { plannedFraction: 1, deliveriesPerMessage: 1, days: D.DAYS },
+  max_retry: { plannedFraction: 1, deliveriesPerMessage: D.DELIVERIES, days: D.DAYS },
 };
+
+export function scenario(distribution, sequence) {
+  const { days, ...options } = sequenceOptions[sequence];
+  return { day: modelDay({ distribution, ...options }), days };
+}
 
 export const MONTHLY_CAP = {
   queue_ops: 232_500,
@@ -194,30 +175,30 @@ export const MONTHLY_CAP = {
   worker_cpu_ms: 1_798_000,
   kv_reads: POOL.kv_reads * D.DAYS,
   kv_writes: 35_960,
-  apns_attempts: APNS_ATTEMPT_CAP * D.DAYS,
+  apns_attempts: (POOL.apns_initial + POOL.apns_retry) * D.DAYS,
 };
 export const DAILY_CAP = Object.fromEntries(
   Object.entries(MONTHLY_CAP).map(([k, v]) => [k, Math.floor(v / D.DAYS)]));
 
-export const KV_WRITES_PER_DAY = 714;   // 20 fixtures per slate, not 10
-
-export const monthly = (name, metric) => {
-  const { day, days } = SCENARIOS[name];
-  return metric === "kv_writes" ? KV_WRITES_PER_DAY * D.DAYS : day[metric] * days;
-};
+export const KV_WRITES_PER_DAY = 714;
 
 export const METRICS = ["queue_ops", "do_requests", "do_rows_written", "do_rows_read",
   "do_duration_gbs", "worker_requests", "worker_cpu_ms", "kv_reads", "apns_attempts"];
 
-/**
- * Capacity, stated honestly.
- *
- * With ten fixtures and up to four deliveries, ONE user can absorb forty
- * attempts — which is why the earlier "10 attempts per user" figure, and the
- * 50%-margin claim built on it, were wrong.
- */
-export const capacity = (plannedFixturesPerUser, deliveries = 1) => ({
-  attempts_per_user: plannedFixturesPerUser * deliveries,
-  on_total_cap: Math.floor(APNS_ATTEMPT_CAP / (plannedFixturesPerUser * deliveries)),
-  on_initial_pool: Math.floor(POOL.apns_initial / plannedFixturesPerUser),
-});
+export function monthly(distribution, sequence, metric) {
+  if (metric === "kv_writes") return KV_WRITES_PER_DAY * D.DAYS;
+  const { day, days } = scenario(distribution, sequence);
+  return day[metric] * days;
+}
+
+/** The worst month for a metric, across every distribution and sequence. */
+export function worstMonthly(metric) {
+  let worst = { value: 0, distribution: null, sequence: null };
+  for (const distribution of Object.keys(DISTRIBUTIONS)) {
+    for (const sequence of SEQUENCES) {
+      const value = monthly(distribution, sequence, metric);
+      if (value > worst.value) worst = { value, distribution, sequence };
+    }
+  }
+  return worst;
+}

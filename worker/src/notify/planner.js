@@ -149,6 +149,7 @@ export async function planWindow({ matches, competitionOf, ledger, deps, now }) 
   const day = utcDay(now);
   const all = [];
   const skipped = [];
+  const barren = [];
   // ONE membership scan for the whole window, not one per league and not one
   // per fixture. Its cost tracks total memberships, so a thousand one-person
   // leagues costs what one thousand-person league costs.
@@ -156,7 +157,8 @@ export async function planWindow({ matches, competitionOf, ledger, deps, now }) 
   // a one-hour window, and without this each of those ticks would re-plan the
   // same fixture — four times the messages for the same reminders.
   const passes = await ledger.call("claimPlanPasses", {
-    day, fixtureIds: matches.map((m) => String(m.id)),
+    day, now,
+    fixtures: matches.map((m) => ({ id: String(m.id), kickoffAt: Date.parse(m.startAt) })),
   });
   const planning = matches.filter((m) => passes[String(m.id)]);
   for (const m of matches) {
@@ -169,7 +171,13 @@ export async function planWindow({ matches, competitionOf, ledger, deps, now }) 
     // One list, reading names and metadata: the league codes AND the period
     // each published in, with no value read per league.
     const leagues = await deps.leaguesForFixture(match.id);
-    if (!leagues.length) { skipped.push({ id: match.id, why: "no-league" }); continue; }
+    if (!leagues.length) {
+      // No league has published this fixture YET. That is not a plan; hand the
+      // pass back so a slate published later in the window is still seen.
+      skipped.push({ id: match.id, why: "no-league" });
+      barren.push(String(match.id));
+      continue;
+    }
     const picks = await deps.readPicks(String(match.id));
     let triples = triplesForFixture({
       match, leagues, membership, picks, competition: competitionOf(match),
@@ -181,8 +189,13 @@ export async function planWindow({ matches, competitionOf, ledger, deps, now }) 
       }));
       triples = triples.filter((t) => unsent.has(t.uid));
     }
+    if (!triples.length) barren.push(String(match.id));
     all.push(...triples);
   }
+  // A fixture whose leagues have published nothing yet did not use its pass.
+  // Handing it back is what lets a slate published later in the window still
+  // reach the people it is asking to predict.
+  if (barren.length) await ledger.call("releasePlanPasses", { day, fixtureIds: barren });
   if (!all.length) return { jobs: [], triples: 0, refused: 0, skipped, membershipPages };
 
   const jobs = packJobs(all);

@@ -1194,16 +1194,25 @@ async function slateIndexAdmin(env, body) {
   if (!env.MIGRATION_SECRET || body.secret !== env.MIGRATION_SECRET) {
     return json({ error: "forbidden" }, 403, env);
   }
-  // Two prefixes, two cursors: a position in custom_slate: means nothing in
-  // slatefx:, so they are never conflated into one resumption token.
+  // Both directions carry their own position, and a position is a cursor PLUS
+  // an offset into the current slate's fixture list — a twenty-fixture slate
+  // has to be stoppable partway through. `limit` and `maxOps` are clamped to
+  // server constants: a request body may ask for less work, never for more.
   const options = {
-    forwardCursor: body.forwardCursor || undefined,
-    reverseCursor: body.reverseCursor || undefined,
-    limit: Number(body.limit) || undefined,
-    maxPages: Number(body.maxPages) || undefined,
+    forward: body.forward || null,
+    reverse: body.reverse || null,
+    limit: body.limit,
+    maxOps: body.maxOps,
   };
-  if (body.action === "verify") return json({ ok: true, ...(await verifySlateIndex(env, options)) }, 200, env);
-  if (body.action === "repair") return json({ ok: true, ...(await repairSlateIndex(env, options)) }, 200, env);
+  if (body.action === "verify") {
+    return json({ ok: true, ...(await verifySlateIndex(env, {
+      restart: body.restart === true, at: Date.now(),
+      limit: body.limit, maxOps: body.maxOps,
+    })) }, 200, env);
+  }
+  if (body.action === "repair") {
+    return json({ ok: true, ...(await repairSlateIndex(env, options)) }, 200, env);
+  }
   return json({ error: "action must be verify or repair" }, 400, env);
 }
 

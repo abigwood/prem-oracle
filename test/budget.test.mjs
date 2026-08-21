@@ -1,43 +1,97 @@
 // Gate 0 — executed arithmetic for the operation table, cost guards and capacity.
+//
+// The model imports the production read-pricing rule and the production packer,
+// so a change to either shows up here rather than quietly invalidating a table.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { INCLUDED, DESIGN, PLANNER, POOL, APNS_ATTEMPT_CAP, SCENARIOS, MONTHLY_CAP,
-  DAILY_CAP, METRICS, monthly, modelDay, capacity, CANDIDATES, RECIPIENTS }
-  from "../docs/design/notify-budget.spec.mjs";
+import {
+  INCLUDED, DESIGN, POOL, PER_MESSAGE_WORST_CASE, DISTRIBUTIONS, SEQUENCES,
+  MONTHLY_CAP, DAILY_CAP, METRICS, modelDay, scenario, monthly, worstMonthly,
+  planTriples, JOB_TRIPLES,
+} from "../docs/design/notify-budget.spec.mjs";
+import { worstCaseReads } from "../worker/src/notify/consumer.js";
+import { packJobs } from "../worker/src/notify/planner.js";
 
-test("A · the model uses the product's MAXIMUM shape, not a convenient one", () => {
-  // The frozen authority's executed worst case is a 20-fixture round, and
-  // league rules permit up to 20 published fixtures.
-  assert.equal(DESIGN.FIXTURES_PER_WINDOW, 20);
-  assert.equal(RECIPIENTS, 1_000);
-  assert.equal(CANDIDATES, 20_000, "1,000 recipients x 20 fixtures is 20,000 triples");
-  assert.equal(SCENARIOS.worst.day.planned, 20_000);
+const OBSERVED_KV_READS = 3_479_700;   // the account's own rolling 31 days
+
+// --- A · the model prices the architecture that ships ---------------------
+
+test("A · the model uses the PRODUCTION read-pricing rule, not a copy of it", () => {
+  const oneLeague = planTriples({ leagues: 1, fixtures: 1, recipients: 45 });
+  const fragmented = planTriples({ leagues: 45, fixtures: 1, recipients: 45 });
+  // 45 recipients, one fixture: 94 reads together, 136 spread across 45 leagues.
+  assert.equal(worstCaseReads(oneLeague), 45 * 2 + 1 + 1);
+  assert.equal(worstCaseReads(fragmented), 45 * 2 + 1 + 45);
+  // And the model's per-job range reflects it.
+  const consolidated = modelDay({ distribution: "one_league" });
+  const spread = modelDay({ distribution: "fragmented" });
+  assert.ok(spread.reads_per_job_max > consolidated.reads_per_job_max,
+    "the model prices a fragmented job the same as a consolidated one");
 });
 
-test("A · the INITIAL pool protects every first attempt at the required scale", () => {
-  assert.equal(POOL.apns_initial, 20_000);
-  assert.equal(SCENARIOS.worst.day.apns_initial, CANDIDATES,
-    "some first attempts at 1,000 recipients were refused");
-  assert.equal(SCENARIOS.max_retry.day.apns_initial, CANDIDATES,
-    "retries ate into first delivery at the maximum shape");
+test("A · the model uses the PRODUCTION packer", () => {
+  const triples = planTriples({ leagues: 1_000 });
+  assert.equal(packJobs(triples).length, modelDay({ distribution: "fragmented" }).messages);
+  assert.equal(modelDay({ distribution: "one_league" }).messages, Math.ceil(20_000 / JOB_TRIPLES));
 });
 
-test("A · capacity reported honestly at 100, 1,000 and unsupported 10,000", () => {
-  const F = DESIGN.FIXTURES_PER_WINDOW;
-  const firstAttempts = (recipients) => recipients * F;
-  // 100 recipients: comfortable.
-  assert.equal(firstAttempts(100), 2_000);
-  assert.ok(firstAttempts(100) * 10 === POOL.apns_initial, "100 recipients should have 10x headroom");
-  // 1,000 recipients: exactly protected, no margin.
-  assert.equal(firstAttempts(1_000), POOL.apns_initial);
-  // 10,000 recipients: ten times over the pool. Formally unsupported.
-  assert.equal(firstAttempts(10_000), 200_000);
-  assert.equal(firstAttempts(10_000) / POOL.apns_initial, 10);
+test("A · every distribution plans the same 20,000 triples and 445 messages", () => {
+  for (const distribution of Object.keys(DISTRIBUTIONS)) {
+    const day = modelDay({ distribution });
+    assert.equal(day.planned, 20_000, `${distribution}: ${day.planned} triples`);
+    assert.equal(day.messages, 445, `${distribution}: ${day.messages} messages`);
+  }
 });
 
-// --- C · caps -------------------------------------------------------------
+// --- A · every first attempt still fits, at every distribution -------------
 
-test("C · every daily cap is monthly / 31, so the daily guard cannot breach the monthly one", () => {
+test("A · every first attempt fits, at every distribution", () => {
+  for (const distribution of Object.keys(DISTRIBUTIONS)) {
+    const day = modelDay({ distribution });
+    assert.equal(day.apns_initial, 20_000,
+      `${distribution}: only ${day.apns_initial} first attempts were granted`);
+    assert.equal(day.refused_deliveries, 0,
+      `${distribution}: ${day.refused_deliveries} first-pass deliveries were refused reads`);
+    assert.ok(day.kv_reads <= POOL.kv_reads,
+      `${distribution}: first pass wanted ${day.kv_reads} reads`);
+  }
+});
+
+// --- A · dynamic reservations never exceed the pool ------------------------
+
+test("A · dynamic reservations never exceed the configured pool", () => {
+  for (const distribution of Object.keys(DISTRIBUTIONS)) {
+    for (const sequence of SEQUENCES) {
+      const { day } = scenario(distribution, sequence);
+      assert.ok(day.kv_reads <= POOL.kv_reads,
+        `${distribution}/${sequence}: ${day.kv_reads} reads against a pool of ${POOL.kv_reads}`);
+      assert.ok(day.apns_initial + day.apns_retry <= POOL.apns_initial + POOL.apns_retry);
+    }
+  }
+});
+
+test("A · a fragmented max-retry day exhausts the read pool, and says so", () => {
+  const day = modelDay({ distribution: "fragmented", deliveriesPerMessage: DESIGN.DELIVERIES });
+  // The pool is spent to within one job's worth: what is left cannot fund the
+  // next delivery, so the remainder is refused rather than half-served.
+  assert.ok(POOL.kv_reads - day.kv_reads < day.reads_per_job_max,
+    `${POOL.kv_reads - day.kv_reads} reads left over, which is more than one job needs`);
+  assert.ok(day.refused_deliveries > 0,
+    "the pool filled without any delivery being refused, which cannot be right");
+
+  // Fragmentation genuinely costs more: consolidation fits with room to spare.
+  const consolidated = modelDay({ distribution: "one_league", deliveriesPerMessage: DESIGN.DELIVERIES });
+  assert.equal(consolidated.refused_deliveries, 0, "consolidation should fit comfortably");
+  assert.ok(consolidated.kv_reads < day.kv_reads);
+
+  // The refusals are safe: those deliveries drop terminally with a diagnostic,
+  // and every FIRST attempt was made before any of them.
+  assert.equal(day.apns_initial, 20_000);
+});
+
+// --- caps ------------------------------------------------------------------
+
+test("C · every daily cap is monthly / 31", () => {
   for (const [metric, cap] of Object.entries(MONTHLY_CAP)) {
     assert.ok(DAILY_CAP[metric] * DESIGN.DAYS <= cap,
       `${metric}: daily ${DAILY_CAP[metric]} x 31 exceeds monthly ${cap}`);
@@ -46,181 +100,88 @@ test("C · every daily cap is monthly / 31, so the daily guard cannot breach the
 
 test("C · every monthly cap sits inside the Paid included allowance", () => {
   for (const metric of METRICS) {
-    if (metric === "apns_attempts") continue;              // Apple, not Cloudflare
+    if (metric === "apns_attempts") continue;
     assert.ok(MONTHLY_CAP[metric] <= INCLUDED[metric],
       `${metric}: cap ${MONTHLY_CAP[metric]} exceeds included ${INCLUDED[metric]}`);
   }
 });
 
-test("C · queue accounting uses the documented 5-read retry ceiling and no DLQ", () => {
-  assert.equal(DESIGN.QUEUE_READS_MAX, 5);
-  assert.equal(modelDay({ planned: 45 }).queue_ops, 3);
-  assert.equal(modelDay({ planned: 45, deliveriesPerMessage: 4 }).queue_ops, 7);
-});
-
-test("A · the pre-enqueue reservation is FOUR deliveries x THREE calls", () => {
-  assert.equal(PLANNER.PER_MESSAGE_WORST_CASE.queue_ops, 7);
-  assert.equal(PLANNER.PER_MESSAGE_WORST_CASE.worker_requests, DESIGN.DELIVERIES);
-  assert.equal(PLANNER.PER_MESSAGE_WORST_CASE.do_requests,
-    DESIGN.DELIVERIES * DESIGN.DO_CALLS_PER_DELIVERY);
-  assert.equal(PLANNER.PER_MESSAGE_WORST_CASE.do_requests, 12);
-});
-
-test("A · the DO-request budget is checked against the RESERVATION, not the calls", () => {
-  for (const name of ["normal", "worst", "max_retry"]) {
-    const day = SCENARIOS[name].day;
-    assert.ok(day.do_requests_reserved >= day.do_calls_actual,
-      `${name}: reserved ${day.do_requests_reserved} < actual ${day.do_calls_actual}`);
-    assert.equal(day.do_requests, day.do_requests_reserved,
-      `${name}: the cap is being checked against actual calls, not the reservation`);
-    assert.equal(day.do_requests_reserved,
-      day.messages * 12 + DESIGN.FIXTURES_PER_WINDOW * 2);
+test("C · the WORST month across every distribution clears its cap", () => {
+  for (const metric of METRICS) {
+    const worst = worstMonthly(metric);
+    assert.ok(worst.value <= MONTHLY_CAP[metric],
+      `${metric}: ${worst.distribution}/${worst.sequence} needs ${worst.value}, `
+      + `cap is ${MONTHLY_CAP[metric]}`);
   }
 });
 
-test("C · the planner reserves each message's unavoidable worst case before enqueueing", () => {
-  assert.deepEqual(PLANNER.PER_MESSAGE_WORST_CASE,
-    { queue_ops: 7, worker_requests: 4, do_requests: 12 });
+test("C · the WORST day across every distribution clears its daily cap", () => {
+  for (const distribution of Object.keys(DISTRIBUTIONS)) {
+    for (const sequence of SEQUENCES) {
+      const { day } = scenario(distribution, sequence);
+      for (const metric of METRICS) {
+        assert.ok(day[metric] <= DAILY_CAP[metric],
+          `${distribution}/${sequence} ${metric}: ${day[metric]} over ${DAILY_CAP[metric]}`);
+      }
+    }
+  }
 });
 
-// --- D · the planner's pick filter ---------------------------------------
-
-test("D · the planner filters saved picks with one bounded read per fixture", () => {
-  assert.equal(PLANNER.FILTERS_SAVED_PICKS, true);
-  assert.equal(PLANNER.PICK_READS_PER_FIXTURE, 1);
-  // Twenty fixtures cost twenty reads regardless of how many recipients exist.
-  assert.equal(DESIGN.FIXTURES_PER_WINDOW * PLANNER.PICK_READS_PER_FIXTURE, 20);
-});
-
-test("D · message counts follow PLANNED triples, not successful sends", () => {
-  assert.equal(SCENARIOS.worst.day.planned, CANDIDATES);
-  assert.equal(SCENARIOS.worst.day.messages, Math.ceil(CANDIDATES / DESIGN.JOB_TRIPLES));
-  assert.equal(SCENARIOS.normal.day.planned, 6_000);
-  assert.equal(SCENARIOS.normal.day.messages, Math.ceil(6_000 / DESIGN.JOB_TRIPLES));
-  // A wholesale-failure day sends nothing, yet its message count is unchanged.
-  assert.equal(SCENARIOS.max_retry.day.messages, SCENARIOS.worst.day.messages);
-});
-
-// --- A · pools and capacity ----------------------------------------------
-
-test("A · the pools sum to the hard ceiling", () => {
-  assert.equal(POOL.apns_initial, 20_000);
-  assert.equal(POOL.apns_retry, 5_000);
-  assert.equal(APNS_ATTEMPT_CAP, 25_000);
-});
-
-test("A · capacity arithmetic is per ATTEMPT: 20 fixtures x 4 deliveries is eighty", () => {
-  const oneEach = capacity(20, 1);
-  assert.equal(oneEach.attempts_per_user, 20);
-  assert.equal(oneEach.on_initial_pool, 1_000, "first delivery must cover the required scale");
-
-  const allFour = capacity(20, 4);
-  assert.equal(allFour.attempts_per_user, 80, "four deliveries across twenty fixtures is eighty");
-  assert.equal(allFour.on_total_cap, Math.floor(APNS_ATTEMPT_CAP / 80));
-  // Retries never change first-delivery capacity: that is the point of the split.
-  assert.equal(allFour.on_initial_pool, 1_000);
-});
-
-test("A · at 1,000 recipients the INITIAL pool is exactly consumed — no margin", () => {
-  const day = SCENARIOS.worst.day;
-  assert.equal(day.apns_initial, POOL.apns_initial);
-  assert.equal(day.planned, POOL.apns_initial, "first attempts exactly fill the pool");
-  assert.equal(POOL.apns_retry, 5_000);
-});
-
-test("A · a wholesale-retry day is capped, and the unmet retries are visible", () => {
-  const day = SCENARIOS.max_retry.day;
-  assert.equal(day.apns_initial, 20_000, "retries ate into first delivery");
-  assert.equal(day.apns_retry, 5_000);
-  assert.equal(day.apns_attempts, APNS_ATTEMPT_CAP);
-  // 20,000 planned x 3 further deliveries = 60,000 wanted, 5,000 granted.
-  assert.equal(day.unmet_retry, 55_000);
-});
-
-test("C · a working delivery costs THREE Durable Object calls, not two", () => {
+test("C · a working delivery is three DO calls, and the reservation is twelve", () => {
   assert.equal(DESIGN.DO_CALLS_PER_DELIVERY, 3);
-  const day = SCENARIOS.max_retry.day;
-  assert.equal(day.do_calls_actual,
-    day.deliveries * 3 + DESIGN.FIXTURES_PER_WINDOW * 2);
+  assert.equal(PER_MESSAGE_WORST_CASE.do_requests, 12);
+  assert.equal(PER_MESSAGE_WORST_CASE.do_requests,
+    DESIGN.DELIVERIES * DESIGN.DO_CALLS_PER_DELIVERY);
 });
 
-test("C · rows written count work that is claimed then dropped WITHOUT an attempt", () => {
-  const day = SCENARIOS.max_retry.day;
-  assert.ok(day.dropped_no_attempt > 0, "the max-retry day drops nothing without attempting");
-  // The old formula was attempts*2 + deliveries; it ignored these rows entirely.
-  const oldFormula = day.apns_attempts * 2 + day.deliveries;
-  assert.ok(day.do_rows_written > oldFormula,
-    `corrected rows ${day.do_rows_written} should exceed the old ${oldFormula}`);
-  // And every named component is present.
-  const named = day.claimed + day.apns_attempts * 2 + day.dropped_no_attempt
-    + day.deliveries * 2 + DESIGN.DIAGNOSTIC_ROWS_PER_DAY;
-  assert.equal(day.do_rows_written, named);
+test("C · the planner's two passes are in the DO-request model", () => {
+  const day = modelDay({ distribution: "one_league" });
+  assert.equal(day.do_requests_reserved,
+    day.messages * 12 + DESIGN.FIXTURES_PER_WINDOW * DESIGN.PLAN_PASSES);
+  assert.equal(DESIGN.PLAN_PASSES, 2);
 });
 
-// --- caps hold ------------------------------------------------------------
+// --- E · the combined KV picture ------------------------------------------
 
-test("C+A · every max-retry DAY clears its daily cap", () => {
-  const day = SCENARIOS.max_retry.day;
-  for (const metric of METRICS) {
-    assert.ok(day[metric] <= DAILY_CAP[metric],
-      `${metric}: max-retry day ${day[metric]} exceeds daily cap ${DAILY_CAP[metric]}`);
-  }
+test("E · feature plus observed account usage stays inside included KV reads", () => {
+  const worst = worstMonthly("kv_reads");
+  assert.ok(OBSERVED_KV_READS + worst.value < INCLUDED.kv_reads,
+    `combined ${OBSERVED_KV_READS + worst.value} exceeds included ${INCLUDED.kv_reads}`);
+  assert.ok(OBSERVED_KV_READS + MONTHLY_CAP.kv_reads < INCLUDED.kv_reads,
+    "at the feature cap, combined usage exceeds the included allowance");
 });
 
-test("C+A · every max-retry MONTH clears its monthly cap", () => {
-  for (const metric of METRICS) {
-    const used = monthly("max_retry", metric);
-    assert.ok(used <= MONTHLY_CAP[metric],
-      `${metric}: max-retry month ${used} exceeds monthly cap ${MONTHLY_CAP[metric]}`);
-  }
-});
-
-test("C · reads are reserved per delivery, so retry deliveries pay even when they drop", () => {
-  const day = SCENARIOS.max_retry.day;
-  const perDelivery = DESIGN.JOB_TRIPLES * DESIGN.KV_READS_PER_TRIPLE + DESIGN.KV_READS_FIXED;
-  assert.equal(perDelivery, 96);
-  assert.equal(day.kv_reads, day.deliveries * perDelivery,
-    "the model quietly assumed dropped deliveries read nothing");
-});
-
-test("E · the feature plus observed account usage stays inside included KV reads", () => {
-  const OBSERVED = 3_479_700;
-  const worst = OBSERVED + monthly("max_retry", "kv_reads");
-  assert.ok(worst < INCLUDED.kv_reads, `combined ${worst} exceeds included ${INCLUDED.kv_reads}`);
-  const atCap = OBSERVED + MONTHLY_CAP.kv_reads;
-  assert.ok(atCap < INCLUDED.kv_reads, `at the cap, combined ${atCap} exceeds included`);
-});
-
-test("E · Worker CPU is excluded from the Free-quota claim", () => {
-  // Free CPU is a PER-INVOCATION execution limit, not a monthly metered
-  // allowance, so it cannot be "below a Free-tier quota" in the sense the
-  // other metrics are. Only Paid metered dimensions are claimed.
-  const meteredMonthly = METRICS.filter((m) => m !== "apns_attempts" && m !== "worker_cpu_ms");
-  for (const metric of meteredMonthly) {
-    assert.ok(MONTHLY_CAP[metric] <= INCLUDED[metric]);
-  }
-  // CPU is still capped against its PAID included allowance, which is metered.
-  assert.ok(MONTHLY_CAP.worker_cpu_ms <= INCLUDED.worker_cpu_ms);
-});
+// --- the generated tables --------------------------------------------------
 
 test("the tables printed in the report are the tables computed here", () => {
-  console.log(`\n  ${"metric".padEnd(18)}${"normal/mo".padStart(12)}${"worst/mo".padStart(12)}` +
-    `${"maxretry/mo".padStart(13)}${"cap/day".padStart(10)}${"cap/mo".padStart(12)}${"margin".padStart(9)}`);
-  for (const m of METRICS) {
-    const [n, w, x] = ["normal", "worst", "max_retry"].map((s) => monthly(s, m));
-    console.log(`  ${m.padEnd(18)}${n.toLocaleString().padStart(12)}${w.toLocaleString().padStart(12)}` +
-      `${x.toLocaleString().padStart(13)}${DAILY_CAP[m].toLocaleString().padStart(10)}` +
-      `${MONTHLY_CAP[m].toLocaleString().padStart(12)}${(MONTHLY_CAP[m] / x).toFixed(2).padStart(8)}x`);
+  const pad = (v, n) => String(v).padStart(n);
+  console.log(`\n  per-day, by distribution and sequence:`);
+  console.log(`  ${"distribution".padEnd(14)}${"sequence".padEnd(11)}`
+    + `${pad("msgs", 6)}${pad("deliv", 7)}${pad("reads", 9)}${pad("refused", 9)}`
+    + `${pad("initial", 9)}${pad("retry", 7)}`);
+  for (const distribution of Object.keys(DISTRIBUTIONS)) {
+    for (const sequence of SEQUENCES) {
+      const { day } = scenario(distribution, sequence);
+      console.log(`  ${distribution.padEnd(14)}${sequence.padEnd(11)}`
+        + `${pad(day.messages, 6)}${pad(day.deliveries, 7)}`
+        + `${pad(day.kv_reads.toLocaleString(), 9)}${pad(day.refused_deliveries, 9)}`
+        + `${pad(day.apns_initial.toLocaleString(), 9)}${pad(day.apns_retry.toLocaleString(), 7)}`);
+    }
   }
-  const d = SCENARIOS.max_retry.day;
-  console.log(`\n  max-retry day: ${d.planned.toLocaleString()} planned, ${d.messages} messages, ` +
-    `${d.deliveries} deliveries, ${d.apns_initial.toLocaleString()} initial + ` +
-    `${d.apns_retry.toLocaleString()} retry attempts, ${d.unmet_retry.toLocaleString()} retries unmet, ` +
-    `${d.kv_reads.toLocaleString()} KV reads`);
-  const F = DESIGN.FIXTURES_PER_WINDOW;
-  console.log(`  capacity @ ${F} fixtures: INITIAL protects ${capacity(F, 1).on_initial_pool} recipients; ` +
-    `combined cap covers ${capacity(F, 4).on_total_cap} at all four deliveries`);
-  console.log(`  100 recipients = ${100 * F} first attempts; 1,000 = ${1000 * F}; ` +
-    `10,000 = ${(10000 * F).toLocaleString()} (${(10000 * F) / POOL.apns_initial}x the pool, unsupported)\n`);
+  console.log(`\n  worst month per metric, across every distribution:`);
+  console.log(`  ${"metric".padEnd(18)}${pad("worst/mo", 12)}${pad("cap/mo", 12)}`
+    + `${pad("margin", 9)}  driven by`);
+  for (const metric of METRICS) {
+    const worst = worstMonthly(metric);
+    const margin = worst.value ? (MONTHLY_CAP[metric] / worst.value).toFixed(2) : "-";
+    console.log(`  ${metric.padEnd(18)}${pad(worst.value.toLocaleString(), 12)}`
+      + `${pad(MONTHLY_CAP[metric].toLocaleString(), 12)}${pad(`${margin}x`, 9)}`
+      + `  ${worst.distribution}/${worst.sequence}`);
+  }
+  const kv = worstMonthly("kv_reads");
+  console.log(`\n  KV reads combined with the account's observed ${OBSERVED_KV_READS.toLocaleString()}:`);
+  console.log(`    worst feature month ${kv.value.toLocaleString()} -> `
+    + `${(OBSERVED_KV_READS + kv.value).toLocaleString()} `
+    + `(${(100 * (OBSERVED_KV_READS + kv.value) / INCLUDED.kv_reads).toFixed(1)}% of included)\n`);
   assert.ok(true);
 });

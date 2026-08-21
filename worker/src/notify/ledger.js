@@ -16,8 +16,18 @@ export const LEASE_MS = 120_000;
 export const MAX_ATTEMPTS = 5;
 /** Redelivery must land AFTER a crashed consumer's lease has expired. */
 export const RETRY_DELAY_S = 150;
-/** The initial plan, and one sweep for whoever is still unsent. */
+/** The initial plan, and one LATE sweep for whoever is still unsent. */
 export const PLAN_PASSES = 2;
+/**
+ * The sweep only becomes available inside the last stretch before kick-off.
+ *
+ * Granting both passes on the first two ticks spends them at roughly T-60 and
+ * T-45 and then goes quiet — so a host who publishes at T-30, or a league that
+ * becomes eligible after the second tick, gets nothing at all while the fixture
+ * is still comfortably inside its reminder window. The sweep has to be late to
+ * be a sweep.
+ */
+export const SWEEP_WITHIN_MS = 20 * 60 * 1000;
 
 /**
  * Two pools, so a retry can never consume capacity a recipient who has not yet
@@ -147,6 +157,18 @@ INSERT INTO plan_pass (day, fixture, passes) VALUES (?1, ?2, 1)
 ON CONFLICT (day, fixture) DO UPDATE SET passes = plan_pass.passes + 1
   WHERE plan_pass.passes < ?3
 RETURNING passes`;
+
+/**
+ * Hand a pass back when it found nothing to do.
+ *
+ * A fixture whose leagues have not published yet consumes a pass and plans
+ * nobody. Keeping that pass spent would mean a slate published ten minutes
+ * later is never seen. Returning it costs one discovery list on the next tick
+ * and is the difference between the reminder arriving and not.
+ */
+const PLAN_RELEASE = `
+UPDATE plan_pass SET passes = passes - 1
+ WHERE day = ?1 AND fixture = ?2 AND passes > 0`;
 
 const BUDGET_GET = `SELECT used FROM budget WHERE day=?1 AND metric=?2`;
 const BUDGET_SET = `INSERT INTO budget (day, metric, used) VALUES (?1, ?2, ?3)
@@ -344,14 +366,28 @@ export class NotifyLedger {
    * window covers up to twenty fixtures and this must not become a round trip
    * per fixture.
    */
-  claimPlanPasses({ day, fixtureIds }) {
+  claimPlanPasses({ day, fixtures, now, sweepWithinMs = SWEEP_WITHIN_MS }) {
     return this.ctx.storage.transactionSync(() => {
       const granted = {};
-      for (const id of fixtureIds) {
-        const row = this.#rows(PLAN_CLAIM, day, String(id), PLAN_PASSES)[0];
-        if (row) granted[String(id)] = row.passes;
+      for (const f of fixtures) {
+        const id = String(f.id);
+        const used = this.#rows(`SELECT passes FROM plan_pass WHERE day=?1 AND fixture=?2`,
+          day, id)[0]?.passes ?? 0;
+        // The second pass is a LATE sweep, not simply the next tick: it waits
+        // until the fixture is inside the closing stretch of its window.
+        if (used >= 1 && f.kickoffAt - now > sweepWithinMs) continue;
+        const row = this.#rows(PLAN_CLAIM, day, id, PLAN_PASSES)[0];
+        if (row) granted[id] = row.passes;
       }
       return granted;
+    });
+  }
+
+  /** Return a pass that found nothing to plan, so a later tick can try again. */
+  releasePlanPasses({ day, fixtureIds }) {
+    return this.ctx.storage.transactionSync(() => {
+      for (const id of fixtureIds) this.sql.exec(PLAN_RELEASE, day, String(id));
+      return { released: fixtureIds.length };
     });
   }
 
@@ -376,6 +412,7 @@ export class NotifyLedger {
       terminatePlanned: () => this.terminatePlanned(args),
       reserveMessages: () => this.reserveMessages(args),
       claimPlanPasses: () => this.claimPlanPasses(args),
+      releasePlanPasses: () => this.releasePlanPasses(args),
       grantAttempts: () => this.grantAttempts(args),
       recordOutcomes: () => this.recordOutcomes(args),
       sweep: () => this.sweep(args),

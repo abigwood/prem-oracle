@@ -18,12 +18,35 @@ id = "4d6fa971722242a69e1644725ef2b11b"
 preview_id = "b9f71204465f4ea38be82bd2359e70e9"
 
 # The NotifyLedger Durable Object class, declared so its SQLite-backed namespace
-# exists and the migration is applied ONCE, ahead of time.
-#
-# There is deliberately NO [[durable_objects.bindings]] entry and no queue
-# producer or consumer: the class exists, the namespace exists, and the worker
-# still has no way to reach either. Creating the infrastructure and activating
-# it are separate decisions, and only the first has been approved.
+# exists. Applied ONCE in Phase B1, ahead of any binding, and unchanged since:
+# activation adds a name to reach the class by, never a second migration.
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["NotifyLedger"]
+
+# ---------------------------------------------------------------------------
+# B2 ACTIVATION. These three blocks are the whole switch: with them the cron
+# plans into the queue and the consumer delivers; without them the same code
+# runs the legacy notifyKickoffs path. Rolling back is deleting them and
+# redeploying — no code change, no second migration.
+# ---------------------------------------------------------------------------
+
+[[durable_objects.bindings]]
+name = "NOTIFY_LEDGER"
+class_name = "NotifyLedger"
+
+[[queues.producers]]
+binding = "NOTIFY_QUEUE"
+queue = "prem-oracle-notify"
+
+# Frozen in docs/v1.6.6-notification-read-plan.md section 4.1. max_batch_size is
+# 1 so one batch is one job, which is what bounds a consumer invocation to 45
+# APNs requests; retry_delay lives in code (150 s) because it must exceed the
+# 120 s lease. No dead-letter queue: the ledger's dropped_log already records
+# give-ups, and a DLQ nobody reads is cost without a reader.
+[[queues.consumers]]
+queue = "prem-oracle-notify"
+max_batch_size = 1
+max_batch_timeout = 5
+max_retries = 3
+max_concurrency = 10

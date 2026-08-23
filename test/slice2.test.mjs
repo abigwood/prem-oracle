@@ -125,10 +125,12 @@ test("R1 · the result card drops every pre-match element", () => {
 
 test("R1 · all three named surfaces route through the one result-first path", () => {
   // My Picks, expanded Schedule rows, and the Weekly fixture rows.
-  assert.match(sourceOf("pickEntry"), /matchCard\(fixture, \{ resultFirst: true \}\)/);
+  // My Picks also hands the card the section it was drawn in, so its reveal
+  // can answer for that league and week rather than the active one.
+  assert.match(sourceOf("pickEntry"), /matchCard\(fixture, \{ resultFirst: true, reveal \}\)/);
   assert.match(sourceOf("fixtureRow"), /matchCard\(fixture, \{ resultFirst: true \}\)/);
   assert.match(sourceOf("expandFixture"), /matchCard\(fixture, \{ resultFirst: true \}\)/);
-  assert.match(sourceOf("matchCard"), /if \(resultFirst && isSettledCard\(match\)\) return resultCard\(match\);/);
+  assert.match(sourceOf("matchCard"), /if \(resultFirst && isSettledCard\(match\)\) return resultCard\(match, reveal\);/);
 });
 
 test("R1 · D3 has exactly two surfaces, and Weekly is not one of them", () => {
@@ -185,7 +187,18 @@ test("R3 · the mates' reveal stays reachable on a settled card", () => {
   for (const over of [{ result: [1, 0] }, { status: "postponed" }, {}]) {
     assert.match(s.resultCard(fx(over)), /class="fixture-reveal"/);
   }
-  assert.match(sourceOf("resultCard"), /\$\{fixtureRevealSection\(match\)\}/);
+  // Both branches: the Schedule's current-round reveal, and My Picks' own
+  // league-and-week one. A settled card is never left without either.
+  assert.match(sourceOf("resultCard"),
+    /\$\{reveal \? pickRevealSection\(match, reveal\) : fixtureRevealSection\(match\)\}/);
+  const withContext = load(D3, {
+    fixtureRevealSection: () => "<section class=\"fixture-reveal\">CURRENT</section>",
+    pickRevealSection: () => "<section class=\"fixture-reveal pick-reveal\">OWN</section>",
+  });
+  withContext.picks = { m1: { p1: 1, p2: 0 } };
+  const own = withContext.resultCard(fx({ result: [1, 0] }), { code: "AAA", period: "1" });
+  assert.match(own, /pick-reveal/, "a My Picks card did not use its own league's reveal");
+  assert.ok(!own.includes("CURRENT"), "a My Picks card fell back to the active league");
 });
 
 // --- S1 -------------------------------------------------------------------

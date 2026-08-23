@@ -1768,7 +1768,7 @@ class MyPredictionsTests(unittest.TestCase):
 
     def test_sections_are_week_grouped_by_that_leagues_own_shape(self):
         fn = self.app[self.app.index("function pickWeekGroups(list, mixed)"):]
-        fn = fn[:fn.index("function pickEntry(fixture, note)")]
+        fn = fn[:fn.index("function pickEntry(fixture, note, reveal = null)")]
         self.assertIn("mixed", fn)
         self.assertIn("windowKeyFor(fixture.startAt)", fn)
         self.assertIn("`Matchweek ${period}`", fn)
@@ -1788,8 +1788,11 @@ class MyPredictionsTests(unittest.TestCase):
     def test_one_pick_per_fixture_is_still_the_model(self):
         # Sections render the same matchCard, which reads and writes the one
         # picks[matchId] entry — so editing in either section is one edit.
+        # The card now also carries the section it was drawn in, so a settled
+        # card can reveal its OWN league's week rather than the active one's.
         self.assertIn(
-            "return `<div class=\"pick-entry\">${matchCard(fixture, { resultFirst: true })}${note}</div>`;",
+            "return `<div class=\"pick-entry\">"
+            "${matchCard(fixture, { resultFirst: true, reveal })}${note}</div>`;",
             self.app)
         saver = self.app[self.app.index("async function savePick(matchId, p1, p2)"):]
         saver = saver[:saver.index("document.addEventListener(\"submit\"")]

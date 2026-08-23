@@ -248,6 +248,8 @@ let openScheduleDates = new Set();
 const SCHEDULE_WEEKS_SHOWN = 3;
 let scheduleFullSeason = false;
 let expandedFixtureId = null;
+// One settled My Picks card's mates may be open at a time, keyed league:week:fixture.
+let expandedPickReveal = null;
 // Which My Predictions sections the viewer has collapsed. Sections default to
 // open, so only the closed ones are worth remembering — and remembering them
 // means a long list stays the shape they left it in.
@@ -1480,7 +1482,7 @@ function resultPickLine(match, state, pick) {
  * no score picker. The reveal section stays, because seeing what everybody else
  * said is the reason to open a settled card at all (D3, R3).
  */
-function resultCard(match) {
+function resultCard(match, reveal = null) {
   const pick = picks[match.id];
   const state = resultState(match, pick);
   const actual = finalScore(match);
@@ -1501,7 +1503,7 @@ function resultCard(match) {
       <div class="result-team">${teamBadge(match.player2)}<span class="player-name">${escapeHTML(match.player2)}</span></div>
     </div>
     ${resultPickLine(match, state, pick)}
-    ${fixtureRevealSection(match)}
+    ${reveal ? pickRevealSection(match, reveal) : fixtureRevealSection(match)}
   </article>`;
 }
 
@@ -1717,8 +1719,8 @@ function scorePicker(match, open) {
   </div>`;
 }
 
-function matchCard(match, { resultFirst = false } = {}) {
-  if (resultFirst && isSettledCard(match)) return resultCard(match);
+function matchCard(match, { resultFirst = false, reveal = null } = {}) {
+  if (resultFirst && isSettledCard(match)) return resultCard(match, reveal);
   const pick = picks[match.id];
   const open = matchOpen(match);
   const calendar = calendarLink(match);
@@ -1741,7 +1743,7 @@ function matchCard(match, { resultFirst = false } = {}) {
       ${pick ? pickStatus(match, pick, open) : ""}
       ${scorePicker(match, open)}
     </div>
-    ${fixtureRevealSection(match)}
+    ${reveal ? pickRevealSection(match, reveal) : fixtureRevealSection(match)}
   </article>`;
 }
 
@@ -1769,6 +1771,208 @@ function fixtureRevealSection(match) {
     <p class="mates-state">${MATES_STATE_LINE[card.state]}</p>
     ${matesCardBody(card, !!picks[match.id])}
   </section>`;
+}
+
+/* --- My Picks: mates on a SETTLED card, in its own league and week ---------
+ *
+ * The card on My Picks used to borrow fixtureRevealSection(), which answers one
+ * question only: "what is the ACTIVE league showing for its CURRENT round?"
+ * That is right for the Schedule, where there is one league on screen and one
+ * week in view. On My Picks it is wrong twice over.
+ *
+ * A settled card from a finished week is not the current round, so the lookup
+ * returned nothing and the section rendered as the empty string — no row, no
+ * chevron, nothing in the document to tap. The card was not refusing; there was
+ * never a control there. That is the Arsenal v Coventry report exactly, and
+ * why Hull v Manchester United worked: it was the current week.
+ *
+ * And a card drawn under "Bury Legends" while the pill sits on another league
+ * would have shown the OTHER league's members, because the active league — not
+ * the section the card is in — decided the answer. One pick genuinely counts in
+ * two leagues; whose mates it shows must come from the section, never from a
+ * global.
+ *
+ * So the card carries its own context, and everything below is keyed on the
+ * pair (league code, period) the section was drawn for.
+ */
+
+/**
+ * The identity of one disclosure: this league, this week, this fixture.
+ *
+ * Every part is percent-encoded and joined with a separator the encoding itself
+ * escapes, so the mapping is injective — two different triples cannot produce
+ * the same key, whatever a fixture id happens to contain. The alphabet that
+ * comes out is A-Z a-z 0-9 - _ . % | and nothing else: no whitespace, no
+ * quotes, no ampersands, no control characters. That matters because the key
+ * is written into an HTML attribute and read back through `dataset`, and it has
+ * to survive that round trip byte for byte.
+ *
+ * encodeURIComponent leaves !'()*~ alone; ' would become an entity on the way
+ * out and a character again on the way back, which round-trips but obscures the
+ * guarantee, so they are escaped here too.
+ */
+const PICK_REVEAL_UNESCAPED = /[!()*~\x27]/g;      // \x27 is the apostrophe
+const pickRevealPart = (value) => encodeURIComponent(String(value))
+  .replace(PICK_REVEAL_UNESCAPED, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+const pickRevealKey = (code, period, fixtureId) =>
+  [code, period, fixtureId].map(pickRevealPart).join("|");
+/**
+ * The body's id. HTML5 allows any character but whitespace in an id, and the
+ * key has none — so this is the key with a prefix, not a mangling of it. A
+ * mangling would collapse distinct keys onto one id and cross two cards'
+ * aria-controls. Looked up with getElementById, never a CSS selector, so the
+ * characters that would need selector escaping never reach one.
+ */
+const pickRevealDomId = (key) => `pr-${key}`;
+
+/**
+ * A payload that genuinely belongs to THIS league and THIS week.
+ *
+ * The same context rule matesUsable() applies, but bound to the card's own pair
+ * instead of the active league's current round — and `activeLeague` is
+ * deliberately not consulted, because two leagues can contain the very same
+ * fixture and "does this payload have an entry for this fixture?" is not a safe
+ * question to ask of the wrong league's payload.
+ */
+function revealStateFor(code, period) {
+  if (!code || period == null) return null;
+  const usable = (state) => !!state && !state.error
+    && state.code === code && String(state.period) === String(period);
+  return [matesState, roundState, cachedRoundState(code, period)].find(usable) || null;
+}
+
+/**
+ * The view-model for one settled card's disclosure, or null when this device
+ * holds nothing authoritative for that league and week yet.
+ *
+ * A fixture the league did not publish that week has no entry, and
+ * matesFixtureView turns that into "unavailable" rather than into another
+ * league's rows.
+ */
+function pickRevealCard(match, code, period) {
+  const state = revealStateFor(code, period);
+  if (!state) return null;
+  const entry = (state.reveal || []).find((row) => String(row.id) === String(match.id));
+  return { id: String(match.id), ...matesFixtureView(match, entry, state.table, uid()) };
+}
+
+/** How many MATES the row can promise — the viewer is not one of their own. */
+const pickRevealCount = (card) =>
+  (card && card.state !== "locked" && card.state !== "unavailable" ? card.others || 0 : null);
+
+/**
+ * The disclosure row. Always rendered for a card inside a league section, even
+ * when this device holds no data for that week — the control is how the viewer
+ * asks for it, and hiding it is how the tap became silent in the first place.
+ */
+function pickRevealSection(match, reveal) {
+  const code = reveal?.code || null;
+  const period = reveal?.period;
+  // "Your other predictions" is not a league. There are no mates to disclose,
+  // and offering a control that could only ever say so would be noise.
+  if (!code || period == null) return "";
+  const key = pickRevealKey(code, period, match.id);
+  const open = expandedPickReveal === key;
+  const card = pickRevealCard(match, code, period);
+  const count = pickRevealCount(card);
+  const domId = pickRevealDomId(key);
+  return `<section class="fixture-reveal pick-reveal">
+    <button type="button" class="pick-reveal-toggle" data-pick-reveal="${escapeHTML(key)}"
+      data-reveal-code="${escapeHTML(code)}" data-reveal-period="${escapeHTML(String(period))}"
+      data-reveal-fixture="${escapeHTML(String(match.id))}"
+      aria-expanded="${open ? "true" : "false"}" aria-controls="${domId}">
+      <span class="pick-reveal-label">Mates' picks<span data-pick-reveal-count>${
+        count == null ? "" : ` · ${count}`}</span></span>
+      <span class="pick-reveal-chevron" aria-hidden="true">⌄</span>
+    </button>
+    <div class="pick-reveal-body" id="${domId}"${open ? ` data-built="1"` : " hidden"}>${
+      open ? pickRevealBody(match, card) : ""}</div>
+  </section>`;
+}
+
+/**
+ * What is under the row. A card this device cannot speak for says so in words;
+ * it never shows nothing, and it never shows somebody else's week.
+ */
+function pickRevealBody(match, card) {
+  if (!card) return `<p class="mates-empty">${MATES_UNAVAILABLE}</p>`;
+  return `<p class="mates-state">${MATES_STATE_LINE[card.state]}</p>
+    ${matesCardBody(card, !!picks[match.id])}`;
+}
+
+/**
+ * One league-week's round, from cache or from the server, without disturbing
+ * whatever the Weekly tab is currently showing.
+ *
+ * loadRoundState() is the wrong tool here: it writes the module-level
+ * roundState and re-renders, which would move the screen under a viewer who
+ * only tapped a card. This reads, caches and returns.
+ */
+async function ensureRoundState(code, period) {
+  if (!code || period == null) return null;
+  const cached = cachedRoundState(code, period);
+  if (cached) return cached;
+  if (!API) return null;
+  try {
+    const state = await fetchState(roundStatePath(code, period));
+    cacheRoundState(code, period, state);
+    return state?.error ? null : state;
+  } catch {
+    // The caller shows the honest unavailable line rather than an error over
+    // the card, and the row stays tappable so a retry costs one tap.
+    return null;
+  }
+}
+
+/**
+ * Open or close one disclosure, against the live DOM.
+ *
+ * A re-render would rebuild My Picks and lose the viewer's place on a screen
+ * that is mostly scrolling, so this edits the two elements it owns and nothing
+ * else. Bodies are built once and kept: closing hides, it does not discard.
+ */
+async function togglePickReveal(button) {
+  const key = button.dataset.pickReveal;
+  const wanted = expandedPickReveal === key ? null : key;
+
+  // One at a time: everything else closes, including a card in another section.
+  for (const other of document.querySelectorAll("[data-pick-reveal]")) {
+    if (other === button) continue;
+    other.setAttribute("aria-expanded", "false");
+    const body = document.getElementById(other.getAttribute("aria-controls"));
+    if (body) body.hidden = true;
+  }
+
+  expandedPickReveal = wanted;
+  button.setAttribute("aria-expanded", wanted ? "true" : "false");
+  const body = document.getElementById(button.getAttribute("aria-controls"));
+  if (!body) return;
+  if (!wanted) { body.hidden = true; return; }
+  body.hidden = false;
+  if (body.dataset.built === "1") return;
+
+  const code = button.dataset.revealCode;
+  const period = button.dataset.revealPeriod;
+  const match = fixtureById(button.dataset.revealFixture);
+  if (!match) {
+    body.innerHTML = `<p class="mates-empty">${MATES_UNAVAILABLE}</p>`;
+    return;
+  }
+  let card = pickRevealCard(match, code, period);
+  if (!card) {
+    body.innerHTML = `<p class="mates-empty">Loading mates' picks…</p>`;
+    await ensureRoundState(code, period);
+    // The viewer may have closed or moved on while that was in flight.
+    if (expandedPickReveal !== key) return;
+    card = pickRevealCard(match, code, period);
+  }
+  body.innerHTML = pickRevealBody(match, card);
+  // Only a card we actually have is "built". An unavailable one stays
+  // unbuilt so the next tap tries again instead of caching a dead end.
+  if (card) body.dataset.built = "1";
+  const count = pickRevealCount(card);
+  const slot = button.querySelector("[data-pick-reveal-count]");
+  if (slot) slot.textContent = count == null ? "" : ` · ${count}`;
 }
 
 /**
@@ -2330,8 +2534,8 @@ function pickWeekGroups(list, mixed) {
     }));
 }
 
-function pickEntry(fixture, note) {
-  return `<div class="pick-entry">${matchCard(fixture, { resultFirst: true })}${note}</div>`;
+function pickEntry(fixture, note, reveal = null) {
+  return `<div class="pick-entry">${matchCard(fixture, { resultFirst: true, reveal })}${note}</div>`;
 }
 
 /**
@@ -2440,7 +2644,9 @@ function fillPickWeek(details) {
   const period = details.dataset.weekPeriod;
   const contexts = leaguePickContexts();
   body.innerHTML = pickWeekMatches(code, period, contexts)
-    .map((fixture) => pickEntry(fixture, code ? sharedLeagueNote(fixture.id, contexts, code) : ""))
+    .map((fixture) => pickEntry(fixture,
+      code ? sharedLeagueNote(fixture.id, contexts, code) : "",
+      code ? { code, period } : null))
     .join("");
 }
 
@@ -2463,7 +2669,9 @@ function pickSection(title, subtitle, groups, contexts, code) {
         // nobody has asked to see. The current week is the only one built up
         // front, because it is the one being played.
         const body = () => group.matches
-          .map((fixture) => pickEntry(fixture, code ? sharedLeagueNote(fixture.id, contexts, code) : ""))
+          .map((fixture) => pickEntry(fixture,
+            code ? sharedLeagueNote(fixture.id, contexts, code) : "",
+            code ? { code, period: group.period } : null))
           .join("");
         return isCurrentPickWeek(code, group.period)
           ? `<div class="pick-week">
@@ -3292,7 +3500,10 @@ function roundTableHtml(round) {
       const place = awards.get(row.uid);
       const medal = place ? ` <span class="crown" aria-label="Matchweek ${place}">${PLACE_EMOJI[place]}</span>` : "";
       const move = movement.has(row.uid) ? weeklyMovementBadge(movement.get(row.uid)) : "";
-      return `<tr><td>${move}${ranks.get(row.uid) ?? index + 1}. ${escapeHTML(row.nick)}${medal}</td><td>${row.pts}</td><td>${row.exact}</td></tr>`;
+      // The Season table's shape: the arrow FOLLOWS the name, in the slot at
+      // the end of the player cell. Leading it made a left gutter that pushed
+      // every name out of line and read as the row's most important fact.
+      return `<tr><td class="player-cell"><span class="player-name">${ranks.get(row.uid) ?? index + 1}. ${escapeHTML(row.nick)}${medal}</span>${move}</td><td>${row.pts}</td><td>${row.exact}</td></tr>`;
     }).join("")}</tbody></table>`;
 }
 
@@ -5604,6 +5815,14 @@ document.addEventListener("click", async (event) => {
   const expand = event.target.closest("[data-expand-fixture]");
   if (expand) {
     expandFixture(expand.dataset.expandFixture);
+    return;
+  }
+  // A settled My Picks card's mates. NOT awaited: everything the viewer sees
+  // happens before this function's first await, and an await here would sit
+  // above the share branches and end the tap that has to raise the sheet.
+  const pickReveal = event.target.closest("[data-pick-reveal]");
+  if (pickReveal) {
+    togglePickReveal(pickReveal);
     return;
   }
   if (event.target.closest("[data-full-season]")) {

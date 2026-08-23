@@ -20,7 +20,10 @@ export function sourceOf(name) {
   if (at < 0) throw new Error(`app.js has no function ${name}`);
   const end = APP.indexOf("\n}", at);
   if (end < 0) throw new Error(`unterminated function ${name}`);
-  return APP.slice(at, end + 2);
+  // `async` is part of the declaration, not decoration in front of it: lifting
+  // an async function without it is a syntax error the moment the body awaits.
+  const from = APP.startsWith("async ", at - "async ".length) ? at - "async ".length : at;
+  return APP.slice(from, end + 2);
 }
 
 /** One top-level `const NAME = ...;` declaration, single line or arrow body. */
@@ -67,6 +70,7 @@ export function load(names, stubs = {}) {
     countPhrase: (count, word) => `<span class="nowrap">${count} ${word}</span>`,
     teamBadge: () => "<i class=badge></i>",
     fixtureRevealSection: () => "",
+    pickRevealSection: () => "",
     isLeagueHost: () => false,
     slateForPeriod: () => null,
     currentPeriodKey: () => null,

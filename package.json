@@ -30,5 +30,8 @@
     "@capacitor/ios": "8.4.1",
     "@capacitor/push-notifications": "8.1.1",
     "@capacitor/share": "^8.0.1"
+  },
+  "devDependencies": {
+    "jsdom": "^30.0.1"
   }
 }

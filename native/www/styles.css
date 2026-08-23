@@ -1987,11 +1987,32 @@ body.picker-open { overflow: hidden; }
 .pick-week-body { padding: 0 10px 8px; }
 
 /* --- D7: movement on the weekly table -------------------------------------
-   Shape carries the direction, colour only reinforces it (A1). */
+   Shape carries the direction, colour only reinforces it (A1).
+
+   Every circle property is reset here, not merely overridden in part. The base
+   .movement is a 28px filled disc and .movement-up/-down/-flat paint its
+   background; an override that set only display and font left the disc and its
+   colour standing, which is what put big coloured circles in a gutter beside
+   the names. */
+.round-standings .player-cell {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+/* The name takes the room; the arrow keeps its slot at the end of the cell, so
+   it lines up down the column exactly as the Season table's does. */
+.round-standings .player-cell .player-name { flex: 1 1 auto; min-width: 0; }
 .round-standings .movement {
+  flex: 0 0 auto;
   display: inline-block;
+  width: auto;
+  height: auto;
   min-width: 1.1em;
-  margin-right: 4px;
+  margin: 0;
+  padding: 0;
+  border-radius: 0;
+  background: none;
+  text-align: center;
   font-size: .78rem;
   font-weight: 900;
   line-height: 1;
@@ -2002,4 +2023,40 @@ body.picker-open { overflow: hidden; }
 
 @media (prefers-reduced-motion: reduce) {
   .pick-week-summary::after { transition: none; }
+}
+
+/* --- The mates disclosure on a settled My Picks card ----------------------
+   An obvious control, because the defect it replaces was a card that looked
+   tappable and did nothing. Full width, its own row, and a chevron that turns. */
+.pick-reveal { border-top: 1px solid var(--line); margin-top: 10px; }
+.pick-reveal-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  min-height: 44px;
+  padding: 10px 2px;
+  border: 0;
+  background: none;
+  color: var(--purple);
+  font: inherit;
+  font-weight: 900;
+  text-align: left;
+  cursor: pointer;
+}
+.pick-reveal-label { font-size: .84rem; }
+.pick-reveal-chevron {
+  flex: 0 0 auto;
+  font-size: .9rem;
+  line-height: 1;
+  transition: transform .18s ease;
+}
+.pick-reveal-toggle[aria-expanded="true"] .pick-reveal-chevron { transform: rotate(180deg); }
+.pick-reveal-toggle:focus-visible { outline: 2px solid var(--purple); outline-offset: 2px; }
+.pick-reveal-body { padding-bottom: 8px; }
+.pick-reveal-body[hidden] { display: none; }
+
+@media (prefers-reduced-motion: reduce) {
+  .pick-reveal-chevron { transition: none; }
 }

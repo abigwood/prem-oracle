@@ -15,8 +15,9 @@ import { load } from "./harness.mjs";
 
 const NAMES = [
   "matchweekLeagueState", "matchweekLeagueName", "matchweekSlate",
-  "matchweekFixtures", "matchweekHead", "matchweekContext", "matchweekEmpty",
-  "matchweekView",
+  "matchweekSlots", "matchweekHead", "matchweekContext", "matchweekEmpty",
+  "matchweekUnavailable", "matchweekView",
+  "noteMatchweekCountMismatch", "matchweekMismatchLines",
   // The REAL row builder, so the measurement is of work that ships.
   "fixtureRow", "shortKickoff",
 ];
@@ -47,6 +48,7 @@ function box(active, states, { fixtures = SEASON } = {}) {
     leagueCodes: Object.keys(states),
     leagueNames: {},
     expandedFixtureId: null,
+    matchweekCountMismatches: new Map(),
     periodLabel: (p) => `Matchweek ${p}`,
     pulsingStatus: (m) => m,
     onboardingState: () => "",

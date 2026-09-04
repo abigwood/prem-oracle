@@ -2084,3 +2084,18 @@ body.picker-open { overflow: hidden; }
   color: var(--purple);
 }
 .matchweek-list { display: flex; flex-direction: column; gap: 8px; }
+
+/* A published fixture we cannot resolve, holding its host-selected place.
+   Muted and plainly not a card: it must not read as a game you could predict. */
+.fixture-row-unavailable {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 12px 14px;
+  border: 1px dashed var(--line);
+  border-radius: 12px;
+  background: var(--white);
+  color: var(--muted);
+}
+.fixture-row-unavailable strong { font-size: .88rem; font-weight: 800; color: var(--ink); }
+.fixture-row-unavailable span { font-size: .8rem; }

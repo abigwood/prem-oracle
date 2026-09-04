@@ -16,8 +16,9 @@ const HTML = readFileSync(new URL("../index.html", import.meta.url), "utf8");
 
 const NAMES = [
   "matchweekLeagueState", "matchweekLeagueName", "matchweekSlate",
-  "matchweekFixtures", "matchweekHead", "matchweekContext", "matchweekEmpty",
-  "matchweekView",
+  "matchweekSlots", "matchweekHead", "matchweekContext", "matchweekEmpty",
+  "matchweekUnavailable", "matchweekView",
+  "noteMatchweekCountMismatch", "matchweekMismatchLines",
 ];
 
 /** A competition calendar far larger than any slate, so a fallback would show. */
@@ -41,23 +42,31 @@ const leagueState = ({ code, name, period = "7", ids = null, count = null }) => 
  * set independently on purpose: a slow answer for the league you just left is
  * exactly the state this screen has to refuse.
  */
+const BASE_STUBS = {
+  picks: {},
+  leagueNames: {},
+  expandedFixtureId: null,
+  // Fresh per sandbox: the mismatch record is a diagnostic, not shared state.
+  matchweekCountMismatches: new Map(),
+  periodLabel: (p) => `Matchweek ${p}`,
+  pulsingStatus: (m) => `<p class="pulse">${m}</p>`,
+  onboardingState: () => `<div class="onboarding">Create a league</div>`,
+  leagueSwitcher: () => "",
+  fixtureRow: (f) => `<div class="fixture-row" data-fixture-row="${f.id}">${f.player1} v ${f.player2}</div>`,
+};
+
 function world({ active = "AAA", live = null, cached = {}, codes = null, names = {} } = {}) {
   const store = {};
   for (const [code, state] of Object.entries(cached)) store[code] = state;
   return load(NAMES, {
+    ...BASE_STUBS,
+    matchweekCountMismatches: new Map(),
     fixtures: CALENDAR,
-    picks: {},
     activeLeague: active,
     leagueState: live,
     leagueStates: store,
     leagueCodes: codes ?? [...new Set([active, ...Object.keys(store)].filter(Boolean))],
     leagueNames: names,
-    expandedFixtureId: null,
-    periodLabel: (p) => `Matchweek ${p}`,
-    pulsingStatus: (m) => `<p class="pulse">${m}</p>`,
-    onboardingState: () => `<div class="onboarding">Create a league</div>`,
-    leagueSwitcher: () => "",
-    fixtureRow: (f) => `<div class="fixture-row" data-fixture-row="${f.id}">${f.player1} v ${f.player2}</div>`,
   });
 }
 
@@ -114,17 +123,12 @@ test("A2 · the count is the host's, never a hard-coded six", () => {
     "the header hard-codes a fixture count");
   const one = world({ live: leagueState({ code: "AAA", name: "L", ids: ["pl-001"] }) });
   assert.match(one.matchweekView(), /1 selected game</, "singular is not handled");
-  // A slate whose declared count leads its resolvable fixtures still reports
-  // the configured number rather than quietly shrinking.
-  const box = world({ live: leagueState({ code: "AAA", name: "L", ids: ["pl-001", "missing-x"], count: 2 }) });
-  const html = box.matchweekView();
-  assert.match(html, /2 selected games</);
-  assert.deepEqual(cardIds(html), ["pl-001"], "an unresolvable fixture was drawn blank");
 });
 
 test("A2 · a slate listing a fixture twice still renders it once", () => {
   const box = world({ live: leagueState({ code: "AAA", name: "L", ids: ["pl-001", "pl-002", "pl-001"] }) });
   assert.deepEqual(cardIds(box.matchweekView()), ["pl-001", "pl-002"]);
+  assert.match(box.matchweekView(), /2 selected games</);
 });
 
 // --- 3 · the non-negotiable empty state -----------------------------------
@@ -170,7 +174,7 @@ test("A4 · the Matchweek journey never reaches the season browser", () => {
   // It draws from the slate's own ids, never from the fixture list.
   assert.ok(!/\bfixtures\.filter\(|\bfixtures\.map\(/.test(view),
     "matchweekView walks the competition fixture list");
-  assert.match(sourceOf("matchweekFixtures"), /for \(const id of plan\.ids\)/);
+  assert.match(sourceOf("matchweekSlots"), /plan\.ids\.map\(/);
 });
 
 test("A4 · every drawn card came from the slate, at every league size", () => {
@@ -365,4 +369,172 @@ test("A9 · no worker, schema or endpoint change", () => {
     "Matchweek issues a request of its own");
   const view = sourceOf("matchweekView");
   assert.ok(!/fetch\(|\bapi\(/.test(view), "matchweekView fetches");
+});
+
+// --- 10 · the header and the content tell the same truth ------------------
+//
+// The first cut skipped a published fixture this device could not resolve while
+// keeping the host's declared count in the header — five rows under a heading
+// that said six. That is not a smaller lie than showing the wrong fixtures; it
+// is the screen contradicting itself, and it gave the viewer no way to tell a
+// game that was never selected from one that failed to load.
+//
+// The contract now: every published id gets a SLOT in host order, a slot either
+// resolves or admits it cannot, and the number on the header is the number of
+// slots. Nothing is ever substituted from the calendar.
+
+/** Ids the calendar cannot resolve, deliberately absent from CALENDAR. */
+const MISSING = "missing-X";
+
+const slotsOf = (html) =>
+  [...html.matchAll(/data-fixture-row="([^"]+)"|data-matchweek-unavailable="([^"]+)"/g)]
+    .map((m) => (m[1] ? { kind: "row", id: m[1] } : { kind: "unavailable", id: m[2] }));
+
+const headerCount = (html) => {
+  const m = html.match(/(\d+) selected game/);
+  return m ? Number(m[1]) : null;
+};
+
+test("A10 · [known, missing, known] renders three ordered slots", () => {
+  const box = world({ live: leagueState({ code: "AAA", name: "L", ids: ["pl-001", MISSING, "pl-002"] }) });
+  const slots = slotsOf(box.matchweekView());
+  assert.deepEqual(slots, [
+    { kind: "row", id: "pl-001" },
+    { kind: "unavailable", id: MISSING },
+    { kind: "row", id: "pl-002" },
+  ], "the unresolved id lost its host-selected position");
+});
+
+test("A10 · the header reports three, not the stale declared count nor the two resolved", () => {
+  const box = world({
+    live: leagueState({ code: "AAA", name: "L", ids: ["pl-001", MISSING, "pl-002"], count: 6 }),
+  });
+  const html = box.matchweekView();
+  assert.equal(headerCount(html), 3, "the header did not report the published slot count");
+  assert.notEqual(headerCount(html), 6, "a stale declared count reached the screen");
+  assert.notEqual(headerCount(html), 2, "the header counted only what resolved");
+  // The invariant, stated directly: the number equals what is on screen.
+  assert.equal(headerCount(html), slotsOf(html).length);
+});
+
+test("A10 · the count always equals rendered rows plus explicit placeholders", () => {
+  const cases = [
+    ["pl-001"],
+    ["pl-001", MISSING],
+    [MISSING, "missing-Y", "missing-Z"],
+    ["pl-003", "pl-001", MISSING, "pl-002", "missing-Y"],
+    Array.from({ length: 20 }, (_, i) => (i % 4 === 0 ? `gone-${i}` : `pl-${String(i + 1).padStart(3, "0")}`)),
+  ];
+  for (const ids of cases) {
+    const box = world({ live: leagueState({ code: "AAA", name: "L", ids }) });
+    const html = box.matchweekView();
+    assert.equal(headerCount(html), slotsOf(html).length,
+      `header disagreed with the screen for ${JSON.stringify(ids)}`);
+    assert.equal(slotsOf(html).length, ids.length);
+    assert.deepEqual(slotsOf(html).map((s) => s.id), ids, "host order was lost");
+  }
+});
+
+test("A10 · a resolvable id replaces its placeholder in place, moving nothing", () => {
+  const ids = ["pl-001", MISSING, "pl-002"];
+  const before = world({ live: leagueState({ code: "AAA", name: "L", ids }) });
+  assert.deepEqual(slotsOf(before.matchweekView()).map((s) => s.kind),
+    ["row", "unavailable", "row"]);
+
+  // The fixture arrives — the only thing that changed is what the device holds.
+  const after = load(NAMES, {
+    ...BASE_STUBS,
+    fixtures: [...CALENDAR, { id: MISSING, player1: "Late", player2: "Arrival", matchday: 7, startAt: "2026-09-12T14:00:00Z" }],
+    activeLeague: "AAA",
+    leagueState: leagueState({ code: "AAA", name: "L", ids }),
+    leagueStates: {}, leagueCodes: ["AAA"],
+  });
+  const slots = slotsOf(after.matchweekView());
+  assert.deepEqual(slots, [
+    { kind: "row", id: "pl-001" },
+    { kind: "row", id: MISSING },
+    { kind: "row", id: "pl-002" },
+  ], "the arriving fixture reordered the slate");
+  assert.equal(headerCount(after.matchweekView()), 3, "the count moved when the data arrived");
+});
+
+test("A10 · duplicates render once and cannot inflate the count", () => {
+  const box = world({
+    live: leagueState({ code: "AAA", name: "L", ids: ["pl-001", "pl-002", "pl-001", MISSING, MISSING], count: 5 }),
+  });
+  const html = box.matchweekView();
+  assert.deepEqual(slotsOf(html).map((s) => s.id), ["pl-001", "pl-002", MISSING]);
+  assert.equal(headerCount(html), 3, "duplicates inflated the displayed count");
+  assert.equal(headerCount(html), slotsOf(html).length);
+});
+
+test("A10 · an unresolved id never pulls a fixture out of the calendar", () => {
+  for (const ids of [[MISSING], ["pl-001", MISSING], [MISSING, "missing-Y"]]) {
+    const box = world({ live: leagueState({ code: "AAA", name: "L", ids }) });
+    const html = box.matchweekView();
+    const drawn = slotsOf(html).filter((s) => s.kind === "row").map((s) => s.id);
+    assert.ok(drawn.every((id) => ids.includes(id)),
+      `a calendar fixture stood in for an unresolved id: ${drawn}`);
+    assert.equal(slotsOf(html).length, ids.length);
+  }
+  // And the substitution cannot be hiding in the slot builder either.
+  assert.match(sourceOf("matchweekSlots"), /plan\.ids\.map\(\(id\) => \(\{ id, fixture: fixtureById\(id\) \}\)\)/);
+});
+
+test("A10 · a mismatched declared count is recorded, not displayed", () => {
+  const box = world({
+    live: leagueState({ code: "AAA", name: "L", ids: ["pl-001", "pl-002"], count: 6 }),
+  });
+  const plan = box.matchweekSlate();
+  assert.equal(plan.count, 2, "the ids are not the display authority");
+  assert.equal(plan.declared, 6);
+  assert.deepEqual({ ...plan.mismatch }, { code: "AAA", period: "7", declared: 6, normalised: 2 });
+  assert.equal(headerCount(box.matchweekView()), 2);
+  // It reaches the diagnostics the profile dialog already copies, once.
+  box.matchweekSlate(); box.matchweekSlate();
+  // Spread into this realm: an array built inside the vm has the vm's
+  // Array prototype, and deepStrictEqual compares realms as well as contents.
+  assert.deepEqual([...box.matchweekMismatchLines()],
+    ["slate count mismatch AAA period 7: declared 6, published 2"]);
+  assert.match(APP, /\.\.\.matchweekMismatchLines\(\),/);
+});
+
+test("A10 · an agreeing count records nothing", () => {
+  const box = world({ live: leagueState({ code: "AAA", name: "L", ids: ["pl-001", "pl-002"], count: 2 }) });
+  assert.equal(box.matchweekSlate().mismatch, null);
+  assert.deepEqual([...box.matchweekMismatchLines()], []);
+});
+
+test("A10 · the placeholder is readable text and accepts nothing", () => {
+  const box = world({ live: leagueState({ code: "AAA", name: "L", ids: [MISSING] }) });
+  const html = box.matchweekView();
+  const slot = html.slice(html.indexOf("fixture-row-unavailable"));
+  assert.match(slot, /<strong>Fixture temporarily unavailable\.<\/strong>/);
+  assert.match(slot, /<span>Pull to refresh\.<\/span>/);
+  // Nothing interactive, and above all nothing that could take a prediction.
+  for (const control of ["<button", "<input", "<select", "<a ", "data-expand-fixture",
+    "data-count-step", "data-lock-pick", "data-match-card", "contenteditable", "tabindex"]) {
+    assert.ok(!slot.includes(control), `the placeholder exposes ${control}`);
+  }
+  // Text, not an aria-label on an empty box — a reader announces the sentences.
+  assert.ok(!/aria-label=/.test(slot.slice(0, slot.indexOf("</div>"))));
+});
+
+test("A10 · a placeholder, its count and its state cannot cross to another league", () => {
+  const broken = leagueState({ code: "AAA", name: "Sunday Six", ids: ["pl-001", MISSING, "pl-002"] });
+  const whole = leagueState({ code: "BBB", name: "Bury Legends", ids: ["pl-005", "pl-003"] });
+
+  const onA = world({ active: "AAA", live: broken, cached: { AAA: broken, BBB: whole }, codes: ["AAA", "BBB"] });
+  const onB = world({ active: "BBB", live: broken, cached: { AAA: broken, BBB: whole }, codes: ["AAA", "BBB"] });
+
+  const a = onA.matchweekView();
+  const b = onB.matchweekView();
+  assert.equal(slotsOf(a).filter((s) => s.kind === "unavailable").length, 1);
+  assert.equal(headerCount(a), 3);
+
+  assert.ok(!b.includes("fixture-row-unavailable"), "AAA's placeholder appeared under BBB");
+  assert.ok(!b.includes(MISSING), "AAA's unresolved id appeared under BBB");
+  assert.equal(headerCount(b), 2, "AAA's count followed the switch");
+  assert.deepEqual(slotsOf(b).map((s) => s.id), ["pl-005", "pl-003"]);
+  assert.ok(!b.includes("Sunday Six"));
 });

@@ -2494,34 +2494,68 @@ function matchweekSlate(state = matchweekLeagueState()) {
   const slate = state.currentSlate;
   if (period == null || !slate) return null;
   if (String(slate.period ?? slate.matchweek) !== String(period)) return null;
-  const ids = (slate.fixtureIds || []).map(String);
+
+  // NORMALISED: unique ids, in the order the host published them. This list is
+  // the published selection for every purpose on this screen — what is drawn,
+  // and what is counted. A duplicate is a slate defect, not a seventh game, so
+  // it collapses here rather than inflating the number on the header.
+  const ids = [];
+  const seen = new Set();
+  for (const raw of slate.fixtureIds || []) {
+    const id = String(raw);
+    if (seen.has(id)) continue;
+    seen.add(id);
+    ids.push(id);
+  }
   if (!ids.length) return null;
-  // The count the host configured, never a literal: leagues run different
-  // sizes and six is only the common case (M4).
-  const count = Number.isFinite(Number(slate.count)) ? Number(slate.count) : ids.length;
-  return { code: state.code, period, slate, ids, count };
+
+  // The ids ARE the selection. `count` is the worker's own tally of the same
+  // list, so a disagreement means one of them is wrong — and the ids are the
+  // thing we can actually draw, so they win. Advertising the other number
+  // would put a count on screen that no arrangement of rows could satisfy.
+  const declared = Number(slate.count);
+  const mismatch = Number.isFinite(declared) && declared !== ids.length
+    ? { code: state.code, period: String(period), declared, normalised: ids.length }
+    : null;
+  if (mismatch) noteMatchweekCountMismatch(mismatch);
+  return { code: state.code, period, slate, ids, count: ids.length, declared, mismatch };
 }
 
 /**
- * The slate's fixtures IN HOST ORDER — the order the host published, not
- * kick-off order, and not the competition's.
- *
- * De-duplicated defensively so a slate that somehow lists a fixture twice
- * renders it once. A fixture this device cannot resolve is skipped rather than
- * drawn as a blank; the header still reports the configured count, so the
- * screen never claims to be showing more than it is.
+ * A slate whose declared count disagrees with the ids it carries is a data
+ * fault worth seeing, but not worth interrupting anybody over: the screen stays
+ * truthful either way. Recorded once per league and week, and carried out in
+ * the diagnostics the profile dialog already copies.
  */
-function matchweekFixtures(plan) {
-  if (!plan) return [];
-  const seen = new Set();
-  const out = [];
-  for (const id of plan.ids) {
-    if (seen.has(id)) continue;
-    seen.add(id);
-    const fixture = fixtureById(id);
-    if (fixture) out.push(fixture);
+let matchweekCountMismatches = new Map();
+function noteMatchweekCountMismatch(mismatch) {
+  const key = `${mismatch.code}|${mismatch.period}`;
+  if (matchweekCountMismatches.has(key)) return;
+  matchweekCountMismatches.set(key, mismatch);
+  // Bounded: this is a diagnostic, not a log.
+  if (matchweekCountMismatches.size > 20) {
+    matchweekCountMismatches.delete(matchweekCountMismatches.keys().next().value);
   }
-  return out;
+}
+
+const matchweekMismatchLines = () => [...matchweekCountMismatches.values()].map((m) =>
+  `slate count mismatch ${m.code} period ${m.period}: declared ${m.declared}, published ${m.normalised}`);
+
+/**
+ * The published slate as ORDERED SLOTS — one per unique id, in host order.
+ *
+ * Every published id gets a slot whether or not this device can resolve the
+ * fixture behind it. Skipping the unresolvable ones was wrong: it made the
+ * screen show five rows under a heading that said six, and the viewer has no
+ * way to tell a fixture that was never selected from one that failed to load.
+ * A slot that cannot resolve says so, in the position the host put it.
+ *
+ * Nothing is ever substituted from the competition calendar — the slot is the
+ * host's id or it is an admission.
+ */
+function matchweekSlots(plan) {
+  if (!plan) return [];
+  return plan.ids.map((id) => ({ id, fixture: fixtureById(id) }));
 }
 
 const matchweekHead = (name, plan) => {
@@ -2561,6 +2595,21 @@ const matchweekEmpty = () =>
   `<div class="launch-card"><strong>No league fixtures selected yet.</strong>
       <p>Your league fixtures will appear here when this week's line-up is published.</p></div>`;
 
+/**
+ * A published fixture this device cannot resolve, in the position the host gave
+ * it. Deliberately inert: no expander, no score controls, nothing that could
+ * take a prediction for a fixture we cannot even name. It is text, so a screen
+ * reader reads it as text rather than announcing an empty control.
+ *
+ * When the fixture data arrives the next paint puts the real row in this exact
+ * slot — the order comes from the slate, so nothing around it moves.
+ */
+const matchweekUnavailable = (id) =>
+  `<div class="fixture-row fixture-row-unavailable" data-matchweek-unavailable="${escapeHTML(String(id))}">
+      <strong>Fixture temporarily unavailable.</strong>
+      <span>Pull to refresh.</span>
+    </div>`;
+
 function matchweekView() {
   // No league at all: the welcome Next already shows, not a season of fixtures
   // belonging to nobody.
@@ -2582,10 +2631,12 @@ function matchweekView() {
       ${matchweekEmpty()}`;
   }
 
-  const list = matchweekFixtures(plan);
+  const slots = matchweekSlots(plan);
   return `${matchweekHead(state.name, plan)}
     ${matchweekContext(state)}
-    <div class="matchweek-list" data-matchweek-list>${list.map(fixtureRow).join("")}</div>`;
+    <div class="matchweek-list" data-matchweek-list>${
+      slots.map((slot) => (slot.fixture ? fixtureRow(slot.fixture) : matchweekUnavailable(slot.id))).join("")
+    }</div>`;
 }
 
 // --- My Predictions ---------------------------------------------------------
@@ -5767,6 +5818,7 @@ function diagnosticsText() {
     `scale ${report.scale}  viewport ${report.vvWidth}  offsetTop ${report.offsetTop}`,
     `innerWidth ${report.innerWidth}  screenWidth ${report.screenWidth}  dpr ${report.dpr}`,
     `rootFont ${report.rootFontPx}px  native ${report.native}`,
+    ...matchweekMismatchLines(),
   ];
   // Times are milliseconds from the physical pointerdown, which is where a slow
   // tap actually begins — not where a handler eventually hears about it.

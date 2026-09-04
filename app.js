@@ -1151,7 +1151,13 @@ function setActiveLeague(code, refresh = true) {
   // this league" — must not follow you onto the next one, where it reads as
   // that league's name. Only on a real switch, so a flash set for the league
   // you are already on survives.
-  if (next !== activeLeague) clearFlash();
+  if (next !== activeLeague) {
+    clearFlash();
+    // Matchweek expands one card at a time. Two leagues can publish the very
+    // same fixture, so an id left open under the old league would silently
+    // reopen under the new one's name.
+    expandedFixtureId = null;
+  }
   activeLeague = next;
   selectedPeriod = null;
   roundState = null;
@@ -2363,6 +2369,12 @@ function todayView() {
 }
 
 /**
+ * The former Schedule surface. RETAINED, NOT REACHED: no player route renders
+ * any of it since Matchweek replaced the season browser (M8). It is kept whole
+ * so Slice A can be reverted by pointing one entry in `views` back at
+ * scheduleView, and it is deliberately not wired to anything — if the direction
+ * survives the soak, this block is what Slice B deletes.
+ *
  * Schedule: opens on the current week and keeps every future week COLLAPSED but
  * expandable. Nothing is ever hidden — a week the host has not published yet is
  * still a week the league can see coming.
@@ -2433,6 +2445,148 @@ function scheduleView() {
 const scheduleMore = (hidden) => (hidden > 0
   ? `<button class="secondary wide" type="button" data-full-season>Show full season<span class="muted-count"> · ${hidden} more ${hidden === 1 ? "week" : "weeks"}</span></button>`
   : "");
+
+// --- Matchweek (v1.7 Slice A · M1, M2, M4, M8) -----------------------------
+//
+// Schedule was a season browser that could be scoped to your leagues. Matchweek
+// is the opposite: the selected league's CURRENT published slate, and nothing
+// else. There is no widening control and no fallback, because the fallback was
+// the defect — twenty-two competition fixtures standing in for the six a host
+// actually chose, which is what made the screen feel like a calendar instead of
+// this week's game.
+//
+// The route id, the storage keys and the deep links stay `schedule`. A rename
+// the user can see is not a reason to invalidate an installed client's state.
+
+/**
+ * The state for the league the pill is on — and only that league.
+ *
+ * `leagueState` is a global that a slower request can still be holding for a
+ * league the viewer has already left, so it is never trusted on its own: the
+ * code has to match the selection before anything drawn from it reaches the
+ * screen. hydrateCachedLeague() already nulls it on a switch; this is the
+ * second, independent check, because "the wrong league's fixtures" is the one
+ * failure this screen must not have.
+ */
+function matchweekLeagueState() {
+  if (!activeLeague) return null;
+  const live = leagueState && !leagueState.error && leagueState.code === activeLeague
+    ? leagueState : null;
+  const cached = leagueStates[activeLeague];
+  const state = live || (cached && !cached.error ? cached : null);
+  return state && state.code === activeLeague ? state : null;
+}
+
+/** The name to show while a league is still loading, from what we already hold. */
+const matchweekLeagueName = (state = null) =>
+  state?.name || leagueNames[activeLeague] || "";
+
+/**
+ * The selected league's current published slate, keyed by league AND period.
+ *
+ * A slate for a different period is a different question, so it is refused
+ * rather than shown under this week's heading — the worker only reports a
+ * published slate here, never a draft.
+ */
+function matchweekSlate(state = matchweekLeagueState()) {
+  if (!state) return null;
+  const period = state.currentPeriod;
+  const slate = state.currentSlate;
+  if (period == null || !slate) return null;
+  if (String(slate.period ?? slate.matchweek) !== String(period)) return null;
+  const ids = (slate.fixtureIds || []).map(String);
+  if (!ids.length) return null;
+  // The count the host configured, never a literal: leagues run different
+  // sizes and six is only the common case (M4).
+  const count = Number.isFinite(Number(slate.count)) ? Number(slate.count) : ids.length;
+  return { code: state.code, period, slate, ids, count };
+}
+
+/**
+ * The slate's fixtures IN HOST ORDER — the order the host published, not
+ * kick-off order, and not the competition's.
+ *
+ * De-duplicated defensively so a slate that somehow lists a fixture twice
+ * renders it once. A fixture this device cannot resolve is skipped rather than
+ * drawn as a blank; the header still reports the configured count, so the
+ * screen never claims to be showing more than it is.
+ */
+function matchweekFixtures(plan) {
+  if (!plan) return [];
+  const seen = new Set();
+  const out = [];
+  for (const id of plan.ids) {
+    if (seen.has(id)) continue;
+    seen.add(id);
+    const fixture = fixtureById(id);
+    if (fixture) out.push(fixture);
+  }
+  return out;
+}
+
+const matchweekHead = (name, plan) => {
+  const games = plan
+    ? `${plan.count} selected ${plan.count === 1 ? "game" : "games"}`
+    : "";
+  const label = plan ? periodLabel(plan.period) : "";
+  const sub = [escapeHTML(label), escapeHTML(games)].filter(Boolean).join(" · ");
+  return `<div class="section-head"><div>
+      <span class="eyebrow">${escapeHTML(name || "Your league")}</span>
+      <h2>Matchweek</h2>
+      ${sub ? `<p>${sub}</p>` : ""}
+    </div></div>`;
+};
+
+/**
+ * The selected-league context, kept in view while the list scrolls under it.
+ *
+ * The switcher is the context when there is more than one league. With a single
+ * league there are no pills to offer, so the name itself is the context — the
+ * screen must never be ambiguous about whose week it is showing.
+ */
+function matchweekContext(state) {
+  const pills = leagueSwitcher();
+  const inner = pills
+    || `<div class="matchweek-league"><span class="league-filter-name">${
+      escapeHTML(matchweekLeagueName(state))}</span></div>`;
+  return `<div class="matchweek-context" data-matchweek-context>${inner}</div>`;
+}
+
+/**
+ * The non-negotiable empty state. Exactly these two lines, and ZERO fixture
+ * cards: the whole point is that an unpublished slate does not become a
+ * competition calendar.
+ */
+const matchweekEmpty = () =>
+  `<div class="launch-card"><strong>No league fixtures selected yet.</strong>
+      <p>Your league fixtures will appear here when this week's line-up is published.</p></div>`;
+
+function matchweekView() {
+  // No league at all: the welcome Next already shows, not a season of fixtures
+  // belonging to nobody.
+  if (!leagueCodes.length) return onboardingState();
+
+  const state = matchweekLeagueState();
+  // Acknowledged, but nothing valid to draw for THIS league yet. The shell is
+  // the honest answer; the league we came from is not.
+  if (!state) {
+    return `${matchweekHead(matchweekLeagueName(), null)}
+      ${matchweekContext(null)}
+      ${pulsingStatus("Loading matchweek…")}`;
+  }
+
+  const plan = matchweekSlate(state);
+  if (!plan) {
+    return `${matchweekHead(state.name, null)}
+      ${matchweekContext(state)}
+      ${matchweekEmpty()}`;
+  }
+
+  const list = matchweekFixtures(plan);
+  return `${matchweekHead(state.name, plan)}
+    ${matchweekContext(state)}
+    <div class="matchweek-list" data-matchweek-list>${list.map(fixtureRow).join("")}</div>`;
+}
 
 // --- My Predictions ---------------------------------------------------------
 // One section per league, then everything else. A pick is only ever HIDDEN, and
@@ -5295,7 +5449,9 @@ function render(options = {}) {
   // Held, not dropped: the newest request wins and lands when the tap is done.
   if (tapInProgress) { heldRender = options; traceTap("render-held", {}); return; }
   const app = document.getElementById("app");
-  const views = { today: todayView, schedule: scheduleView, picks: picksView, league: leagueView, rules: rulesView };
+  // The `schedule` key is the route id, the storage key and the deep-link
+  // target. Slice A renames what the viewer sees, not what the client stores.
+  const views = { today: todayView, schedule: matchweekView, picks: picksView, league: leagueView, rules: rulesView };
   const html = (views[currentView] || todayView)();
   const changed = html !== renderedHTML;
   if (changed) {
@@ -5352,7 +5508,7 @@ const VIEW_SHELLS = {
   // paint first" was walking the whole fixture list. On Adam's phone the shell
   // itself did not reach the DOM until 2908ms. A shell that has to compute
   // anything is not a shell.
-  schedule: () => `<div class="section-head"><div><span class="eyebrow">Full season</span><h2>Prediction schedule</h2></div></div>${pulsingStatus("Loading schedule…")}`,
+  schedule: () => `<div class="section-head"><div><span class="eyebrow">Your league</span><h2>Matchweek</h2></div></div>${pulsingStatus("Loading matchweek…")}`,
   picks: () => `<div class="section-head"><div><span class="eyebrow">Your profile</span><h2>My predictions</h2></div></div>${pulsingStatus("Loading your predictions…")}`,
   league: () => `<div class="section-head"><div><span class="eyebrow">Private predictor leagues</span><h2>League table</h2></div></div>${pulsingStatus("Loading your leagues…")}`,
   today: () => pulsingStatus("Loading fixtures…"),

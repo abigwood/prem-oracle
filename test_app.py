@@ -187,6 +187,21 @@ PROMOTED_TEAMS = {"Coventry City", "Hull City", "Ipswich Town"}
 class ForecastIntelTests(unittest.TestCase):
     """Validate the forecast intel that build_intel.mjs wires into fixtures.json."""
 
+    # Two different claims, and the difference is the whole point.
+    #
+    # SEED is what ratingFromSeason() can produce: a rating derived from last
+    # season's record, clamped to RATING.MIN..RATING.MAX, with a division
+    # penalty applied to a promoted side so it starts below the establishment.
+    # It describes a rating no current-season result has touched yet.
+    #
+    # LIVE is what a rating may plausibly be AFTER applyCurrentSeasonElo() has
+    # fed real results through updatedElo(), which rounds without re-clamping.
+    # Any seeded ordering — including a promoted side's handicap — is a
+    # starting position, not an invariant: results are allowed to overturn it.
+    SEED_MIN, SEED_MAX = 1320, 1900
+    SEED_PROMOTED_MAX = 1700
+    LIVE_MIN, LIVE_MAX = 1200, 2100
+
     @classmethod
     def setUpClass(cls):
         cls.data = json.loads((ROOT / "data/fixtures.json").read_text())
@@ -233,29 +248,44 @@ class ForecastIntelTests(unittest.TestCase):
         # Asserting the seed band against a live rating is a stale test, not a
         # caught defect — so the band a rating is held to depends on whether
         # the current season has moved it yet.
-        SEED_MIN, SEED_MAX = 1320, 1900       # ratingFromSeason clamp
-        LIVE_MIN, LIVE_MAX = 1200, 2100       # sanity bounds for live Elo
         for name, intel in self.data["teams"].items():
             self.assertIsInstance(intel["rating"], int, name)
             if intel.get("playedCurrent"):
-                self.assertGreaterEqual(intel["rating"], LIVE_MIN, name)
-                self.assertLessEqual(intel["rating"], LIVE_MAX, name)
+                self.assertGreaterEqual(intel["rating"], self.LIVE_MIN, name)
+                self.assertLessEqual(intel["rating"], self.LIVE_MAX, name)
             else:
-                self.assertGreaterEqual(intel["rating"], SEED_MIN, name)
-                self.assertLessEqual(intel["rating"], SEED_MAX, name)
+                self.assertGreaterEqual(intel["rating"], self.SEED_MIN, name)
+                self.assertLessEqual(intel["rating"], self.SEED_MAX, name)
 
     def test_promoted_teams_get_plausible_ratings(self):
         teams = self.data["teams"]
         top_rating = max(t["rating"] for t in teams.values())
         for name in PROMOTED_TEAMS:
+            # True of a promoted side whatever the season has done to it: it is
+            # in the league, its rating is a whole number, and the intel still
+            # records where the rating came from.
             self.assertIn(name, teams)
-            rating = teams[name]["rating"]
-            # Promoted sides seeded from the Championship with a handicap: a
-            # plausible newcomer Elo band, and never the strongest team in the league.
-            self.assertGreaterEqual(rating, 1320, name)
-            self.assertLessEqual(rating, 1700, name)
-            self.assertLess(rating, top_rating, name)
-            self.assertIn("Championship", teams[name]["basis"], name)
+            intel = teams[name]
+            rating = intel["rating"]
+            self.assertIsInstance(rating, int, name)
+            self.assertIn("Championship", intel["basis"], name)
+
+            if intel.get("playedCurrent"):
+                # Real results have already moved this rating. The seed handicap
+                # was a starting position, not a promise: a promoted side that
+                # starts well may legitimately pass 1700, and may legitimately
+                # be the strongest rating in the league. Only live-Elo sanity
+                # applies now — asserting the handicap here would be asserting
+                # that promoted teams are not allowed to do well.
+                self.assertGreaterEqual(rating, self.LIVE_MIN, name)
+                self.assertLessEqual(rating, self.LIVE_MAX, name)
+            else:
+                # Seeded from the Championship and not yet played: a plausible
+                # newcomer band, and below the establishment by construction —
+                # ratingFromSeason() applies RATING.DIVISION_PENALTY.
+                self.assertGreaterEqual(rating, self.SEED_MIN, name)
+                self.assertLessEqual(rating, self.SEED_PROMOTED_MAX, name)
+                self.assertLess(rating, top_rating, name)
 
 
 class NativeShareAndCalendarTests(unittest.TestCase):

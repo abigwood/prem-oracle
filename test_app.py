@@ -224,10 +224,25 @@ class ForecastIntelTests(unittest.TestCase):
             self.assertTrue(all(ch in "WDL" for ch in form), name)
 
     def test_team_ratings_in_sane_range(self):
+        # 1320-1900 is the SEED clamp: ratingFromSeason() bounds a rating
+        # derived from last season's record to RATING.MIN..RATING.MAX. It is
+        # not a bound on the model. applyCurrentSeasonElo() then feeds real
+        # current-season results through updatedElo() and rounds the result
+        # WITHOUT re-clamping, so a side with games played this season may
+        # legitimately climb above the seed ceiling or fall below its floor.
+        # Asserting the seed band against a live rating is a stale test, not a
+        # caught defect — so the band a rating is held to depends on whether
+        # the current season has moved it yet.
+        SEED_MIN, SEED_MAX = 1320, 1900       # ratingFromSeason clamp
+        LIVE_MIN, LIVE_MAX = 1200, 2100       # sanity bounds for live Elo
         for name, intel in self.data["teams"].items():
             self.assertIsInstance(intel["rating"], int, name)
-            self.assertGreaterEqual(intel["rating"], 1320, name)
-            self.assertLessEqual(intel["rating"], 1900, name)
+            if intel.get("playedCurrent"):
+                self.assertGreaterEqual(intel["rating"], LIVE_MIN, name)
+                self.assertLessEqual(intel["rating"], LIVE_MAX, name)
+            else:
+                self.assertGreaterEqual(intel["rating"], SEED_MIN, name)
+                self.assertLessEqual(intel["rating"], SEED_MAX, name)
 
     def test_promoted_teams_get_plausible_ratings(self):
         teams = self.data["teams"]

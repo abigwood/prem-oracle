@@ -1048,7 +1048,8 @@ test("every tab has a shell it can show before doing any work", () => {
   // The Schedule shell is the header and filters — no fixture cards.
   // Literal markup only: the shell that called scheduleFilters() -> weekStrip()
   // -> periodsInOrder() took 2908ms to reach the DOM on a real phone.
-  assert.match(shells, /pulsingStatus\("Loading schedule…"\)/);
+  // v1.7 Slice A renamed the surface; the shell stays literal and cheap.
+  assert.match(shells, /pulsingStatus\("Loading matchweek…"\)/);
   for (const computed of ["scheduleFilters(", "weekStrip(", "periodsInOrder(", "groupedPeriods(", "fixtureRow("]) {
     assert.ok(!shells.replace(/\/\/[^\n]*/g, "").includes(computed), `shell must not call ${computed}`);
   }

@@ -236,6 +236,8 @@ function switching({ seasonDelay = 0, roundDelay = 0, cachedRounds = {}, cachedL
   const build = new Function("seasonDelay", "roundDelay", "calls", "paints", "cachedRounds", "cachedLeagues", "tab", `
     "use strict";
     let activeLeague = "AAA";
+    // v1.7: a real switch closes the open Matchweek card.
+    let expandedFixtureId = null;
     let leagueTab = tab;
     let selectedPeriod = null, roundState = null;
     let leagueStates = { ...cachedLeagues };

@@ -203,6 +203,14 @@ test("R3 · the mates' reveal stays reachable on a settled card", () => {
 
 // --- S1 -------------------------------------------------------------------
 
+// --- S1 · the v1.6.6 season browser --------------------------------------
+//
+// v1.7 Slice A replaced this surface with Matchweek, and no player route
+// renders scheduleView any more. These are retained deliberately: they are what
+// makes the revert safe, because Slice A reverts by pointing one entry in
+// `views` back at scheduleView. They describe the REVERT PATH, not a journey a
+// user can currently reach — test/matchweek.test.mjs owns the live contract.
+
 test("S1 · the schedule union deduplicates a fixture two leagues both picked", () => {
   const s = load(["leagueSlateFixtureIds"]);
   const ids = s.leagueSlateFixtureIds([

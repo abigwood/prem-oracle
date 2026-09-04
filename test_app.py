@@ -1340,7 +1340,7 @@ class WeeklyLoopTests(unittest.TestCase):
 
     def test_next_is_never_empty(self):
         today = self.app[self.app.index("function todayView()"):]
-        today = today[:today.index("/**\n * Schedule: opens on the current week")]
+        today = today[:today.index("const scheduleHead = ()")]
         # Every path out of the Next tab returns content.
         self.assertIn('if (branch === "onboarding") return', today)
         self.assertIn('if (branch === "preseason") return', today)
@@ -1910,7 +1910,11 @@ class LeagueSwitchAndShareTests(unittest.TestCase):
         fn = self.app[self.app.index("function setActiveLeague(code, refresh = true)"):]
         fn = fn[:fn.index("\n}")]
         self.assertIn("const next = code || \"\";", fn)
-        self.assertIn("if (next !== activeLeague) clearFlash();", fn)
+        # Still only on a real switch — the branch now also closes the open
+        # Matchweek card, because two leagues can publish the same fixture.
+        self.assertIn("if (next !== activeLeague) {", fn)
+        self.assertIn("clearFlash();", fn)
+        self.assertIn("expandedFixtureId = null;", fn)
         # The banner names no league, so it can only be read as the one on screen.
         self.assertIn("setFlash(`Now showing as ${result.nick} in this league`);", self.app)
 
@@ -2061,8 +2065,10 @@ class ScheduleTabTests(unittest.TestCase):
             "leagueState", "fixtures.", "fixtures[",
         ):
             self.assertNotIn(computed, shells, computed)
-        self.assertIn("Prediction schedule", shells)
-        self.assertIn('pulsingStatus("Loading schedule…")', shells)
+        # v1.7 Slice A: the same literal shell, renamed (M1).
+        self.assertIn("<h2>Matchweek</h2>", shells)
+        self.assertIn('pulsingStatus("Loading matchweek…")', shells)
+        self.assertNotIn("Prediction schedule", shells)
         self.assertIn(".view-loading", self.css)
 
     def test_the_acknowledgement_pulses_and_respects_reduced_motion(self):

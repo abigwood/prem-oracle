@@ -23,7 +23,7 @@ const NAMES = [
   // ...and the row-state contract Slice B put behind it.
   "matchweekRowState", "matchweekRowMark", "MATCHWEEK_ROW_LINE",
   "isPostponed", "isVoidFixture", "VOID_STATUSES", "finalScore", "matchOpen",
-  "closedStatus",
+  "closedStatus", "clientLockMs",
 ];
 
 /** A full mixed-competition season — the board the old surface had to walk. */

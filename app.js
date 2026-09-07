@@ -1454,12 +1454,19 @@ const RESULT_FIRST_STATES = ["completed", "completed-no-pick", "started-unsettle
 const isSettledCard = (match, pick = picks[match?.id]) =>
   RESULT_FIRST_STATES.includes(resultState(match, pick));
 
-/** The status badge: the one piece of chrome that survives full time. */
-function resultBadge(state) {
+/**
+ * The status badge: the one piece of chrome that survives full time.
+ *
+ * `match` is optional and used only to tell a POSTPONED fixture from a voided
+ * one. They share a result state — neither scores — but they are not the same
+ * news, and the Matchweek row already says which is which.
+ */
+function resultBadge(state, match = null) {
   if (state === "completed" || state === "completed-no-pick")
     return `<span class="result-badge" role="status">FINAL</span>`;
   if (state === "void")
-    return `<span class="result-badge result-badge-void" role="status">VOID</span>`;
+    return `<span class="result-badge result-badge-void" role="status">${
+      isPostponed(match) ? "POSTPONED" : "VOID"}</span>`;
   return `<span class="result-badge result-badge-pending" role="status">IN PLAY</span>`;
 }
 
@@ -1470,10 +1477,12 @@ function resultBadge(state) {
 function resultPickLine(match, state, pick) {
   if (state === "completed-no-pick")
     return `<p class="result-pick result-pick-empty">No pick made · 0 points</p>`;
-  if (state === "void")
+  if (state === "void") {
+    const word = isPostponed(match) ? "Postponed" : "Void";
     return `<p class="result-pick">${pick
-      ? `Your pick ${pick.p1}-${pick.p2} · Void — no points`
-      : "Void — no points"}</p>`;
+      ? `Your pick ${pick.p1}-${pick.p2} · ${word} — no points`
+      : `${word} — no points`}</p>`;
+  }
   if (state === "started-unsettled")
     return `<p class="result-pick">${pick
       ? `Your pick ${pick.p1}-${pick.p2} · Awaiting final score`
@@ -1507,7 +1516,7 @@ function resultCard(match, reveal = null, { social = true } = {}) {
   return `<article class="match-card result-card" data-match-card="${match.id}" data-result-state="${state}">
     <div class="result-head">
       <span class="tour-badge">Matchweek ${match.matchday}</span>
-      ${resultBadge(state)}
+      ${resultBadge(state, match)}
     </div>
     <div class="result-score" role="group" aria-label="${escapeHTML(label)}">
       <div class="result-team">${teamBadge(match.player1)}<span class="player-name">${escapeHTML(match.player1)}</span></div>
@@ -2079,7 +2088,13 @@ function matchweekRowState(fixture) {
   if (isPostponed(fixture)) return "postponed";
   if (isVoidFixture(fixture)) return "void";
   if (finalScore(fixture)) return "settled";
-  if (fixture.startAt && Date.now() >= Date.parse(fixture.startAt)) return "in-progress";
+  const kickoff = Date.parse(fixture?.startAt || "");
+  if (Number.isFinite(kickoff) && Date.now() >= kickoff) return "in-progress";
+  // LOCKED is the window between the lock boundary and kick-off. It uses the
+  // same boundary the reveal gate uses (lockAt, falling back to kick-off), so
+  // a row cannot call itself open while mates are already being revealed.
+  const lock = clientLockMs(fixture);
+  if (Number.isFinite(lock) && Date.now() >= lock) return "locked";
   return matchOpen(fixture) ? "open" : "locked";
 }
 
@@ -2974,13 +2989,21 @@ function pickDeadlineLine(slots) {
  * controls are gone entirely rather than disabled, because a disabled stepper
  * still reads as something you might be able to press.
  */
+/**
+ * Editable means the SAME thing on both surfaces: the row Matchweek calls open.
+ * Deciding it separately here let a fixture past its lock boundary still offer
+ * score controls on My Picks while Matchweek already called it locked — two
+ * screens disagreeing about whether you may still change your mind.
+ */
+const pickEditable = (match) => matchweekRowState(match) === "open";
+
 function pickRow(slot, { expanded }) {
   if (!slot.fixture) return matchweekUnavailable(slot.id);
   const match = slot.fixture;
   const id = String(match.id);
   const pick = picks[id];
   const state = resultState(match, pick);
-  const open = matchOpen(match);
+  const open = pickEditable(match);
   const settled = state === "completed" || state === "completed-no-pick";
 
   // A settled row is a result first: the score is the hero and the prediction
@@ -3022,7 +3045,7 @@ function expandPick(id) {
     if (!head || !body) continue;
     if (rowId === wanted) {
       const fixture = fixtureById(rowId);
-      body.innerHTML = fixture && matchOpen(fixture) ? scorePicker(fixture, true) : "";
+      body.innerHTML = fixture && pickEditable(fixture) ? scorePicker(fixture, true) : "";
       row.classList.add("is-open");
       head.setAttribute("aria-expanded", "true");
     } else if (body.innerHTML) {

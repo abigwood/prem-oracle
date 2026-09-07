@@ -1,0 +1,357 @@
+// v1.7 · Sol item E — pixel evidence from a REAL browser canvas.
+//
+// The Node tests draw through a recording stub: they prove which calls the card
+// makes, not what a person receives. This renders the same functions in
+// headless Chrome — already on this machine, so nothing new is installed and
+// nothing new ships — reads the rasterised pixels back with getImageData, and
+// writes the PNGs the browser itself encoded.
+//
+//   node evidence_pixels.mjs
+//
+// Writes evidence-pixels/*.png and prints a pass/fail line per check.
+import { readFileSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { join } from "node:path";
+import { APP, sourceOf, constOf } from "./test/harness.mjs";
+
+const OUT = join(process.cwd(), "evidence-pixels");
+const CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+
+const FUNCTIONS = ["roundedRect", "fitText", "ellipsise", "drawFitted", "cardCanvas",
+  "drawCardHeader", "drawCardHero", "drawCardPodium", "drawCardTableHead", "drawCardRowPlate",
+  "drawCardHonours", "drawCardFooter", "cardRowMetrics", "seasonCardModel", "weeklyCardModel",
+  "weeklyShareStatus", "weeklyTerminalCount", "weeklySharePublished", "podiumCounts",
+  "sharedRankByUid", "winnerNames", "seasonShareFreshness", "drawSeasonTableCard",
+  "drawWeeklyResultCard", "finalScore", "weeklyCardCaption", "noteWeeklyFinalMismatch"];
+const CONSTS = ["CARD_W", "CARD_SIDE", "CARD_PAD", "CARD", "CARD_BLOCK", "CARD_PODIUM", "CARD_COL",
+  "CARD_HEAD_H", "CARD_HERO_H", "CARD_TABLE_HEAD_H", "CARD_ROW_H", "CARD_SEASON_ROW_H",
+  "CARD_FOOT_H", "CARD_GAP", "CARD_PODIUM_H", "CARD_PODIUM_STACK", "cardFont", "cardDate",
+  "sentenceCase", "weeklyRanks", "podiumHeight", "podiumStackDepth", "VOID_STATUSES",
+  "isVoidFixture", "isPostponed",
+  "PLACE_NUMBER", "PLACE_EMOJI"];
+
+const lifted = [
+  ...CONSTS.map((n) => [APP.indexOf(`const ${n} =`), constOf(n)]),
+  ...FUNCTIONS.map((n) => [APP.indexOf(`function ${n}(`), sourceOf(n)]),
+].sort((a, b) => a[0] - b[0]).map(([, src]) => src).join("\n\n");
+
+// The handful of app globals a card reaches for, and nothing else. Anything the
+// cards actually compute is lifted above, not reimplemented here.
+const STUBS = `
+const fixtures = [];
+const fixtureById = (id) => fixtures.find((f) => String(f.id) === String(id)) || null;
+const weeklyFinalMismatches = new Map();
+const periodLabel = (p) => "Matchweek " + p;
+const inviteLinkFor = (code) => "https://premoracle.app/j/" + code;
+const leagueCompetitionNames = () => "Premier League";
+const seasonRounds = () => 38;
+`;
+
+const SCENES = `
+const slate = (n, ids) => ({ period: String(n), status: "published", fixtureIds: ids, count: ids.length });
+const six = (settled, voided) => Array.from({ length: 6 }, (_, i) => ({
+  id: "w-" + i,
+  ...(i < settled ? { settled: true } : i < settled + (voided || 0) ? { voided: true } : {}),
+}));
+const league = { code: "CGALPR", name: "Sunday Six", owner: "u1" };
+const week = (n, entries, over) => ({
+  code: "CGALPR", matchday: n, period: String(n), complete: false,
+  slate: slate(n, entries.map((e) => e.id)), reveal: entries, podium: [],
+  table: [], ...over,
+});
+const players = (n) => Array.from({ length: n }, (_, i) => ({
+  uid: "u" + i, rank: i + 1, nick: ["Adam","Bex","Cal","Dev","Eli","Fay","Gus","Hal","Ivy","Jo",
+    "Kit","Lou","Mac","Nia","Oz","Pip","Quin","Rae","Sol","Tam","Uma","Vic","Wes","Xan","Yaz",
+    "Zed","Ash","Bo","Cleo","Dax"][i] || ("Player " + (i + 1)),
+  pts: 92 - i * 3, exact: (i * 2) % 5,
+  podiums: { gold: i % 3, silver: (i + 1) % 3, bronze: (i + 2) % 3 },
+}));
+const seasonState = (n) => ({ ...league, table: players(n), currentMatchday: 8, currentMatchdayHasResults: true });
+
+const SCENE = {
+  "weekly-not-started": () => drawWeeklyResultCard(league,
+    week(3, six(0), { table: players(6).map((p) => ({ ...p, pts: 0, exact: 0 })) })),
+  "weekly-in-progress-with-void": () => drawWeeklyResultCard(league,
+    week(3, six(2, 1), { table: players(6) })),
+  "weekly-final": () => drawWeeklyResultCard(league,
+    week(3, six(5, 1), { complete: true, table: players(6),
+      podium: [{ uid: "u0", place: "gold", nick: "Adam", pts: 92 },
+               { uid: "u1", place: "silver", nick: "Bex", pts: 89 },
+               { uid: "u2", place: "bronze", nick: "Cal", pts: 86 }] })),
+  "season-common": () => drawSeasonTableCard(seasonState(8)),
+  "season-maximum": () => drawSeasonTableCard(seasonState(30)),
+};
+`;
+
+// --- what the pixels have to say --------------------------------------------
+const CHECKS = `
+const hsv = (r, g, b) => {
+  const max = Math.max(r, g, b), min = Math.min(r, g, b), d = max - min;
+  let h = 0;
+  if (d) {
+    if (max === r) h = 60 * (((g - b) / d) % 6);
+    else if (max === g) h = 60 * ((b - r) / d + 2);
+    else h = 60 * ((r - g) / d + 4);
+  }
+  return { h: (h + 360) % 360, s: max ? d / max : 0, v: max / 255 };
+};
+
+/** Everything drawn, as a bounding box, against the flat card background. */
+function inkBox(data, w, h, bg) {
+  let minX = w, minY = h, maxX = -1, maxY = -1;
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const i = (y * w + x) * 4;
+    if (Math.abs(data[i] - bg[0]) + Math.abs(data[i + 1] - bg[1]) + Math.abs(data[i + 2] - bg[2]) < 8) continue;
+    if (x < minX) minX = x; if (x > maxX) maxX = x;
+    if (y < minY) minY = y; if (y > maxY) maxY = y;
+  }
+  return { minX, minY, maxX, maxY };
+}
+
+/**
+ * The bounding box of TYPE — the near-white and lavender pixels the card sets
+ * its words in. Bands and rules are brand purple or green and full-bleed by
+ * design; a letter touching an edge is the thing worth failing over.
+ */
+function typeBox(data, w, h) {
+  let minX = w, minY = h, maxX = -1, maxY = -1;
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const i = (y * w + x) * 4;
+    const r = data[i], g = data[i + 1], b = data[i + 2];
+    const max = Math.max(r, g, b), min = Math.min(r, g, b);
+    const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    // White, silver and the lavender used for muted labels: bright and unsaturated.
+    if (!(lum > 130 && (max ? (max - min) / max : 0) < 0.35)) continue;
+    if (x < minX) minX = x; if (x > maxX) maxX = x;
+    if (y < minY) minY = y; if (y > maxY) maxY = y;
+  }
+  return { minX, minY, maxX, maxY };
+}
+
+/** Every pixel line in a band that carries ink over the grounds it is drawn on. */
+function inkLines(ctx, x, y, w, h, grounds) {
+  const d = ctx.getImageData(x, y, w, h).data;
+  const isGround = (i) => grounds.some((c) =>
+    Math.abs(d[i] - c[0]) <= 10 && Math.abs(d[i + 1] - c[1]) <= 10 && Math.abs(d[i + 2] - c[2]) <= 10);
+  let first = null, last = null;
+  for (let row = 0; row < h; row++) {
+    const base = row * w * 4;
+    for (let col = 0; col < w; col++) {
+      if (isGround(base + col * 4)) continue;
+      if (first === null) first = row;
+      last = row;
+      break;
+    }
+  }
+  return { first, last };
+}
+
+/** The colour a single pixel is, as a triple. */
+const pixelAt = (ctx, x, y) => Array.from(ctx.getImageData(x, y, 1, 1).data).slice(0, 3);
+
+/** Is this rectangle a single flat colour — i.e. was nothing drawn in it? */
+function flat(ctx, x, y, w, h) {
+  const d = ctx.getImageData(x, y, Math.max(1, w), Math.max(1, h)).data;
+  for (let i = 4; i < d.length; i += 4) {
+    if (Math.abs(d[i] - d[0]) > 6 || Math.abs(d[i + 1] - d[1]) > 6 || Math.abs(d[i + 2] - d[2]) > 6) return false;
+  }
+  return true;
+}
+
+/** Warm gold pixels — the trophy emoji and the champion's frame, nothing else. */
+function goldPixels(ctx, x, y, w, h) {
+  const d = ctx.getImageData(x, y, w, h).data;
+  let n = 0;
+  for (let i = 0; i < d.length; i += 4) {
+    const c = hsv(d[i], d[i + 1], d[i + 2]);
+    if (c.h >= 15 && c.h <= 70 && c.s > 0.35 && c.v > 0.35) n++;
+  }
+  return n;
+}
+
+/** The strongest ink-to-ground contrast in a band — is anything readable here. */
+function contrast(ctx, x, y, w, h) {
+  const d = ctx.getImageData(x, y, w, h).data;
+  const lum = (i) => 0.2126 * d[i] + 0.7152 * d[i + 1] + 0.0722 * d[i + 2];
+  let lo = 255, hi = 0;
+  for (let i = 0; i < d.length; i += 4) { const l = lum(i); if (l < lo) lo = l; if (l > hi) hi = l; }
+  const L = (v) => { const s = v / 255; return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4); };
+  return (L(hi) + 0.05) / (L(lo) + 0.05);
+}
+`;
+
+const PAGE = `<!doctype html><meta charset="utf-8"><title>card pixels</title>
+<body style="margin:0;background:#111">
+<script>
+${STUBS}
+${lifted}
+${SCENES}
+${CHECKS}
+
+const report = { cards: [], errors: [] };
+const bg = [0x18, 0x00, 0x20];
+
+// Where the drawing sits inside the square, in device pixels.
+const place = (contentHeight) => {
+  const k = Math.min(1, CARD_SIDE / Math.max(contentHeight, 1));
+  return { k, tx: (CARD_SIDE - CARD_W * k) / 2, ty: (CARD_SIDE - contentHeight * k) / 2 };
+};
+
+function seasonGeometry(n) {
+  const chrome = CARD_HEAD_H + CARD_GAP + CARD_TABLE_HEAD_H + CARD_GAP + CARD_FOOT_H;
+  const m = cardRowMetrics(n, { chrome, base: CARD_SEASON_ROW_H });
+  return { m, top: CARD_HEAD_H + CARD_GAP + CARD_TABLE_HEAD_H, ...place(m.contentHeight) };
+}
+
+function checkCard(name, canvas, expect) {
+  const ctx = canvas.getContext("2d");
+  const checks = [];
+  const ok = (label, pass, detail) => checks.push({ label, pass: !!pass, detail: detail || "" });
+  const note = (label, detail) => checks.push({ label, note: true, detail });
+
+  ok("canvas is square 1080x1080", canvas.width === 1080 && canvas.height === 1080,
+    canvas.width + "x" + canvas.height);
+
+  const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+  const box = inkBox(data, canvas.width, canvas.height, bg);
+  // A full-bleed brand band legitimately touches the edge; a cut letter does
+  // not. So the test is whether an edge line SWINGS, not whether it is empty.
+  const type = typeBox(data, canvas.width, canvas.height);
+  ok("no type is cut by any edge of the square",
+    type.minX >= 8 && type.minY >= 8 && type.maxX <= canvas.width - 9 && type.maxY <= canvas.height - 9,
+    "type box " + JSON.stringify(type) + "; all ink " + JSON.stringify(box));
+  ok("the drawing actually fills the card", (box.maxX - box.minX) > canvas.width * 0.7,
+    "ink width " + (box.maxX - box.minX));
+  ok("text is legible against the ground (contrast >= 4.5:1)",
+    contrast(ctx, 0, box.minY, canvas.width, Math.max(1, box.maxY - box.minY)) >= 4.5,
+    contrast(ctx, 0, box.minY, canvas.width, Math.max(1, box.maxY - box.minY)).toFixed(1) + ":1");
+
+  if (expect.hero) {
+    const p = place(expect.contentHeight);
+    const y = Math.round(p.ty + p.k * (CARD_HEAD_H + CARD_GAP));
+    const h = Math.round(p.k * CARD_HERO_H);
+    const gold = goldPixels(ctx, 0, y, canvas.width, h);
+    if (expect.hero === "trophy") ok("the hero carries its trophy", gold > 200, gold + " warm pixels");
+    else ok("no trophy floats over a hero that names nobody", gold === 0, gold + " warm pixels");
+  }
+
+  if (expect.rows) {
+    const g = seasonGeometry(expect.rows);
+    let withHonours = 0, overlaps = 0;
+    const gaps = [];
+    for (let i = 0; i < expect.rows; i++) {
+      const top = g.top + i * g.m.rowH;
+      const mid = top + (g.m.rowH - 10) / 2;
+      const nameWidth = g.m.honoursLine ? 500 : 300;
+      const hx = g.m.honoursLine ? CARD_COL.name : CARD_COL.name + nameWidth + 16;
+      const hy = g.m.honoursLine ? mid + 30 : mid + g.m.name / 3;
+      const size = g.m.honoursSize;
+      const X = Math.round(g.tx + g.k * hx);
+      const Y = Math.round(g.ty + g.k * (hy - size));
+      const W = Math.round(g.k * size * 9);
+      const H = Math.round(g.k * (size + 4));
+      if (!flat(ctx, X, Y, W, H)) withHonours++;
+      // Overlap is about ink meeting ink. An emoji tail may hang below its own
+      // plate — that is a shape, not a collision. What must never happen is one
+      // row's marks touching the next row's, so measure the clear pixel lines
+      // between the last ink of this row and the first ink of the one below.
+      if (i + 1 < expect.rows) {
+        const band = (rowTop) => {
+          const y0 = Math.round(g.ty + g.k * rowTop) + 1;
+          const y1 = Math.round(g.ty + g.k * (rowTop + g.m.rowH));
+          const x0 = Math.round(g.tx + g.k * (CARD_PAD + 4));
+          const w = Math.max(1, Math.round(g.k * (CARD_W - CARD_PAD * 2 - 8)));
+          const grounds = [bg, pixelAt(ctx, x0, y0 + 1)];
+          const found = inkLines(ctx, x0, y0, w, Math.max(1, y1 - y0), grounds);
+          return { y0, first: found.first, last: found.last };
+        };
+        const here = band(top), next = band(top + g.m.rowH);
+        const clear = here.last == null || next.first == null
+          ? 99
+          : (next.y0 + next.first) - (here.y0 + here.last) - 1;
+        if (clear < 1) overlaps++;
+        gaps.push(clear);
+      }
+    }
+    ok("honours are painted on EVERY row", withHonours === expect.rows,
+      withHonours + " of " + expect.rows + " rows carry a tally");
+    ok("no row's ink runs into the next row", overlaps === 0,
+      overlaps + " collisions; narrowest clear space between rows " + Math.min(...gaps) + "px");
+    ok("the whole table is exported", expect.rows === expect.members,
+      expect.rows + " of " + expect.members + " members");
+  }
+  // Measured, not asserted: how small the smallest word on the card ends up
+  // once the square fit has scaled the design down.
+  if (expect.metrics) {
+    const { m, k } = expect.metrics;
+    const smallest = Math.min(m.name, m.number, m.points, m.honoursSize || 99) * k;
+    note("smallest table type in the exported image",
+      smallest.toFixed(1) + "px of 1080 (row " + (m.rowH * k).toFixed(0) + "px, square fit " + k.toFixed(3) + ")");
+  }
+  report.cards.push({ name, checks, png: canvas.toDataURL("image/png") });
+}
+
+try {
+  for (const [name, draw] of Object.entries(SCENE)) {
+    const canvas = draw();
+    let expect = {};
+    if (name.startsWith("weekly")) {
+      const rounds = { "weekly-not-started": [3, six(0), 0], "weekly-in-progress-with-void": [3, six(2, 1), 6],
+        "weekly-final": [3, six(5, 1), 6] };
+      const podiumH = name === "weekly-final" ? podiumHeight([
+        { place: "gold", entries: [1] }, { place: "silver", entries: [1] }, { place: "bronze", entries: [1] }]) + CARD_GAP : 0;
+      const chrome = CARD_HEAD_H + CARD_GAP + CARD_HERO_H + CARD_GAP + podiumH
+        + CARD_TABLE_HEAD_H + CARD_GAP + CARD_FOOT_H;
+      const m = cardRowMetrics(6, { chrome, base: CARD_ROW_H });
+      expect = { hero: name === "weekly-not-started" ? "bare" : "trophy", contentHeight: m.contentHeight,
+        metrics: { m, k: place(m.contentHeight).k } };
+    } else {
+      const members = name === "season-common" ? 8 : 30;
+      const g = seasonGeometry(members);
+      expect = { rows: members, members, metrics: { m: g.m, k: g.k } };
+    }
+    checkCard(name, canvas, expect);
+  }
+} catch (error) {
+  report.errors.push(String(error && error.stack || error));
+}
+document.title = "done";
+const out = document.createElement("pre");
+out.id = "out";
+out.textContent = JSON.stringify(report);
+document.body.appendChild(out);
+<\/script>
+</body>`;
+
+rmSync(OUT, { recursive: true, force: true });
+mkdirSync(OUT, { recursive: true });
+const pagePath = join(OUT, "cards.html");
+writeFileSync(pagePath, PAGE);
+
+const dom = execFileSync(CHROME, ["--headless", "--disable-gpu", "--no-sandbox",
+  "--force-color-profile=srgb", "--hide-scrollbars", "--virtual-time-budget=8000",
+  "--dump-dom", `file://${pagePath}`], { maxBuffer: 256 * 1024 * 1024, encoding: "utf8" });
+
+const at = dom.indexOf('<pre id="out">');
+if (at < 0) { console.error("the page produced no report:\n" + dom.slice(0, 2000)); process.exit(1); }
+const json = dom.slice(dom.indexOf(">", at) + 1, dom.indexOf("</pre>", at))
+  .replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"');
+const report = JSON.parse(json);
+
+if (report.errors.length) { console.error(report.errors.join("\n")); process.exit(1); }
+
+let failed = 0;
+console.log(`\n  Rendered in ${execFileSync(CHROME, ["--version"], { encoding: "utf8" }).trim()}\n`);
+for (const card of report.cards) {
+  const png = Buffer.from(card.png.split(",")[1], "base64");
+  const file = join(OUT, `${card.name}.png`);
+  writeFileSync(file, png);
+  console.log(`  ${card.name}  (${(png.length / 1024).toFixed(0)} KB)  ${file}`);
+  for (const check of card.checks) {
+    if (check.note) { console.log(`      NOTE  ${check.label}  — ${check.detail}`); continue; }
+    if (!check.pass) failed++;
+    console.log(`      ${check.pass ? "PASS" : "FAIL"}  ${check.label}${check.detail ? `  — ${check.detail}` : ""}`);
+  }
+}
+console.log(failed ? `\n  ${failed} pixel checks FAILED\n` : "\n  every pixel check passed\n");
+process.exit(failed ? 1 : 0);

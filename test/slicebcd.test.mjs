@@ -262,7 +262,7 @@ test("D5 · a switch closes both open rows", () => {
 // --- D6 · the exports -------------------------------------------------------
 
 const SHARE_NAMES = ["weeklyTerminalCount", "weeklyShareStatus", "seasonShareFreshness",
-  "shareIconButton", "shareCardState", "seasonCardModel", "podiumCounts",
+  "shareIconButton", "shareCardState", "weeklySharePublished", "seasonCardModel", "podiumCounts",
   "finalScore", "isVoidFixture", "isPostponed", "VOID_STATUSES",
   "noteWeeklyFinalMismatch", "weeklyFinalMismatchLines"];
 
@@ -287,7 +287,7 @@ function shareBox(overrides = {}) {
 }
 
 const round = (n, entries, { complete = false } = {}) => ({
-  matchday: n, period: String(n), complete,
+  code: "AAA", matchday: n, period: String(n), complete,
   slate: { period: String(n), fixtureIds: entries.map((e) => e.id), count: entries.length },
   reveal: entries,
   table: [{ uid: "u1", rank: 1, nick: "Adam", pts: 12, exact: 1 }],
@@ -322,7 +322,7 @@ test("D6 · a void is terminal but scores nothing", () => {
 
 test("D6 · weekly sharing is offered from publication, not settlement", () => {
   const running = round(3, [{ id: "a", settled: true }, { id: "b" }]);
-  const s = shareBox({ roundState: running });
+  const s = shareBox({ roundState: running, selectedPeriod: "3" });
   const state = s.shareCardState();
   assert.equal(state.ready, true, "an unsettled week refused to share");
   assert.match(state.label, /^Share Matchweek 3 standings$/);
@@ -352,7 +352,7 @@ test("D6 · the season card exports the WHOLE table, never a top five", () => {
 });
 
 test("D6 · the share control is an icon with a precise name and a 44pt target", () => {
-  const s = shareBox({ roundState: round(3, [{ id: "a", settled: true }]) });
+  const s = shareBox({ roundState: round(3, [{ id: "a", settled: true }]), selectedPeriod: "3" });
   const html = s.shareIconButton({ code: "AAA" });
   assert.match(html, /class="share-icon"/);
   assert.match(html, /<svg/);
@@ -389,7 +389,7 @@ test("D6 · the cards carry names and settled points, never predictions", () => 
 test("D7 · sharing is a real 44x44 button that opens the sheet and keeps state", () => {
   const dom = new JSDOM(`<!doctype html><body><div id="app"></div></body>`);
   const { document } = dom.window;
-  const s = shareBox({ roundState: round(3, [{ id: "a", settled: true }]) });
+  const s = shareBox({ roundState: round(3, [{ id: "a", settled: true }]), selectedPeriod: "3" });
   document.getElementById("app").innerHTML = s.shareIconButton({ code: "AAA" });
   const button = document.querySelector("[data-export-league-table]");
   assert.ok(button, "the parser produced no control");
@@ -453,7 +453,7 @@ const CARD_NAMES = ["CARD_SIDE", "CARD_W", "CARD_HEAD_H", "CARD_HERO_H", "CARD_T
   "CARD_ROW_H", "CARD_SEASON_ROW_H", "CARD_FOOT_H", "CARD_GAP", "CARD_PODIUM_H",
   "CARD_PODIUM_STACK", "cardRowMetrics", "cardCanvas", "podiumHeight", "podiumStackDepth",
   "seasonCardModel", "weeklyCardModel", "weeklyShareStatus", "weeklyTerminalCount",
-  "weeklyFinalMismatchLines", "noteWeeklyFinalMismatch", "seasonShareFreshness",
+  "weeklyFinalMismatchLines", "noteWeeklyFinalMismatch", "seasonShareFreshness", "weeklySharePublished", "shareCardState",
   "weeklyCardCaption", "podiumCounts", "weeklyRanks", "sharedRankByUid", "winnerNames",
   "finalScore", "isVoidFixture", "isPostponed", "VOID_STATUSES",
   "CARD", "CARD_PAD", "CARD_BLOCK", "CARD_PODIUM", "cardFont", "cardDate", "sentenceCase",
@@ -544,8 +544,12 @@ test("C-A · typography adapts with the row, and honours drop when they cannot f
   assert.ok(large.rowH < small.rowH, "a bigger table did not compress");
   assert.ok(large.name <= small.name, "type did not adapt with the row");
   assert.ok(large.name >= 15, "type fell below a readable floor");
-  assert.equal(small.honours, true, "a roomy row lost its honours line");
-  assert.equal(large.honours, false, "a compressed row still tried to draw honours");
+  // Honours are NEVER dropped: a roomy row gets a second line, a compressed one
+  // gets a compact tally, and both carry all three counts.
+  assert.equal(small.honoursLine, true, "a roomy row lost its honours line");
+  assert.equal(large.honoursLine, false, "a compressed row still drew a second line");
+  assert.ok(large.honoursSize >= 13, "the compact tally has no readable size");
+  assert.ok(large.honoursSize <= small.honoursSize);
 });
 
 test("C-A · neither model truncates, at any size", () => {
@@ -611,7 +615,8 @@ test("C-B · the caption says nothing-settled ONLY at 0 of M", () => {
 
   const some = s.weeklyCardCaption(league, wround(3, slots(2)));
   assert.ok(!/nothing settled yet/.test(some), "a part-settled week claimed nothing was settled");
-  assert.match(some, /2 of 6 settled/);
+  assert.match(some, /after 2 of 6 fixtures/);
+  assert.ok(!/settled/.test(some.replace("nothing settled yet", "")), "a void was described as settled");
   assert.match(some, /Player 1 leading on/);
 
   const done = s.weeklyCardCaption(league, wround(3, slots(6), true));

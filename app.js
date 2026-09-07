@@ -4337,8 +4337,11 @@ function cardRowMetrics(rows, { chrome, base, min = 26 }) {
     name: Math.max(15, Math.round(34 * Math.max(scale, 0.45))),
     number: Math.max(14, Math.round(30 * Math.max(scale, 0.45))),
     points: Math.max(15, Math.round(34 * Math.max(scale, 0.45))),
-    // The honours line needs a second baseline inside the row.
-    honours: rowH >= 62,
+    // Honours are never dropped. A roomy row carries them on a second baseline
+    // under the name; a compressed one carries a compact tally on the same
+    // baseline, to the right of the name. The counts are present either way.
+    honoursLine: rowH >= 62,
+    honoursSize: rowH >= 62 ? 24 : Math.max(13, Math.round(rowH * 0.42)),
   };
 }
 
@@ -4376,23 +4379,31 @@ function drawCardHeader(ctx, league, line) {
 // room before they read anything else.
 function drawCardHero(ctx, y, model) {
   const centre = CARD_W / 2;
+  const claimed = !!model.heroName;
   roundedRect(ctx, CARD_PAD, y, CARD_W - CARD_PAD * 2, CARD_HERO_H, 26);
-  ctx.fillStyle = CARD.goldWash;
+  ctx.fillStyle = claimed ? CARD.goldWash : CARD.row;
   ctx.fill();
-  ctx.strokeStyle = CARD.goldEdge;
+  ctx.strokeStyle = claimed ? CARD.goldEdge : CARD.line;
   ctx.lineWidth = 3;
   ctx.stroke();
   ctx.textAlign = "center";
   ctx.fillStyle = CARD.muted;
   ctx.font = cardFont(800, 26);
   ctx.fillText(model.heroEyebrow, centre, y + 56);
-  ctx.textAlign = "left";
-  drawFitted(ctx, `🏆 ${model.heroName}`, centre, y + 134, CARD_W - CARD_PAD * 2 - 72,
-    { max: 72, min: 32, colour: CARD.gold, align: "center" });
+  // A not-started week names nobody, so it draws nobody — and no trophy either.
+  // A floating cup above an empty name is a winner claim made in a picture
+  // instead of in words, which is the harder one to argue with.
+  if (model.heroName) {
+    ctx.textAlign = "left";
+    drawFitted(ctx, `🏆 ${model.heroName}`, centre, y + 134, CARD_W - CARD_PAD * 2 - 72,
+      { max: 72, min: 32, colour: CARD.gold, align: "center" });
+  }
   ctx.textAlign = "center";
   ctx.fillStyle = CARD.ink;
-  ctx.font = cardFont(800, 30);
-  ctx.fillText(model.heroLine, centre, y + 184);
+  ctx.font = cardFont(800, model.heroName ? 30 : 40);
+  // With no name the state line is the whole hero, so it sits where the name
+  // would have been rather than under a gap.
+  ctx.fillText(model.heroLine, centre, y + (model.heroName ? 184 : 140));
   ctx.textAlign = "left";
 }
 
@@ -4464,9 +4475,18 @@ function drawCardRowPlate(ctx, y, height, index, place) {
 }
 
 /** The three medals under a season name, zeros softly muted rather than hidden. */
-function drawCardHonours(ctx, x, y, counts) {
+/**
+ * Every member's gold, silver and bronze, always.
+ *
+ * They used to be dropped when a big table compressed the rows, which quietly
+ * made the export of a thirty-person league a different document from the
+ * export of a six-person one. M9 asks for the complete table, and honours are
+ * part of the table. A short row gets a COMPACT tally on the same baseline
+ * instead of a second line — smaller, never absent.
+ */
+function drawCardHonours(ctx, x, y, counts, { size = 24 } = {}) {
   const parts = [["🏆", counts.gold], ["🥈", counts.silver], ["🥉", counts.bronze]];
-  ctx.font = cardFont(800, 24);
+  ctx.font = cardFont(800, size);
   let cursor = x;
   parts.forEach(([emoji, count], index) => {
     const text = `${emoji} ${count}`;
@@ -4640,18 +4660,26 @@ function drawSeasonTableCard(state) {
     ctx.textAlign = "center";
     ctx.fillStyle = CARD.muted;
     ctx.font = cardFont(900, m.number);
-    ctx.fillText(String(row.rank), CARD_COL.rank, mid + (m.honours ? 4 : m.number / 3));
+    ctx.fillText(String(row.rank), CARD_COL.rank, mid + (m.honoursLine ? 4 : m.number / 3));
     ctx.textAlign = "left";
-    drawFitted(ctx, row.nick, CARD_COL.name, mid + (m.honours ? -4 : m.name / 3), 500,
+    const nameWidth = m.honoursLine ? 500 : 300;
+    drawFitted(ctx, row.nick, CARD_COL.name, mid + (m.honoursLine ? -4 : m.name / 3), nameWidth,
       { max: m.name, min: Math.min(24, m.name) });
-    if (m.honours) drawCardHonours(ctx, CARD_COL.name, mid + 30, row.honours);
+    // Present at every size: a second line when the row is tall enough, an
+    // inline tally beside the name when it is not.
+    if (m.honoursLine) {
+      drawCardHonours(ctx, CARD_COL.name, mid + 30, row.honours, { size: m.honoursSize });
+    } else {
+      drawCardHonours(ctx, CARD_COL.name + nameWidth + 16, mid + m.name / 3, row.honours,
+        { size: m.honoursSize });
+    }
     ctx.textAlign = "right";
     ctx.fillStyle = CARD.muted;
     ctx.font = cardFont(800, m.number);
-    ctx.fillText(String(row.exact), CARD_COL.exact, mid + (m.honours ? 4 : m.number / 3));
+    ctx.fillText(String(row.exact), CARD_COL.exact, mid + (m.honoursLine ? 4 : m.number / 3));
     ctx.fillStyle = CARD.ink;
     ctx.font = cardFont(900, m.points);
-    ctx.fillText(String(row.pts), CARD_COL.pts, mid + (m.honours ? 5 : m.points / 3));
+    ctx.fillText(String(row.pts), CARD_COL.pts, mid + (m.honoursLine ? 5 : m.points / 3));
     ctx.textAlign = "left";
   });
   y += model.rows.length * m.rowH + CARD_GAP;
@@ -4673,7 +4701,9 @@ function weeklyCardCaption(state, round) {
     ? `won by ${winnerNames(round) || "nobody"}`
     : status.terminal === 0
       ? `published — nothing settled yet`
-      : `${status.terminal} of ${status.total} settled${leader ? `, ${leader.nick} leading on ${leader.pts}` : ""}`;
+      // TERMINAL, not settled: a void is finished and scored nothing, so calling
+      // it settled would credit a game nobody got points for.
+      : `after ${status.terminal} of ${status.total} fixtures${leader ? `, ${leader.nick} leading on ${leader.pts}` : ""}`;
   return `🏆 ${competition} ${week}: ${lead}. Think you can call it? Join ${state.name} with code ${state.code}: ${inviteLinkFor(state.code)}`;
 }
 
@@ -4889,16 +4919,44 @@ function shareIconButton(state) {
   </button>`;
 }
 
+/**
+ * The published slate a weekly export is allowed to speak for: this league's,
+ * this period's, and only when the worker has actually published it.
+ */
+function weeklySharePublished(round, period) {
+  if (!round || round.error || period == null) return null;
+  if (round.code && activeLeague && round.code !== activeLeague) return null;
+  // The ROUND must be the one on screen. Asking the round which period it is
+  // and then checking it against itself is not a check: a late response for
+  // last week answers that question just as confidently as this week's.
+  const roundPeriod = round.period ?? round.matchday;
+  if (roundPeriod == null || String(roundPeriod) !== String(period)) return null;
+  const slate = round.slate;
+  if (!slate || !slate.fixtureIds?.length) return null;
+  if (String(slate.period ?? slate.matchweek) !== String(period)) return null;
+  if (slate.status && slate.status !== "published") return null;
+  return slate;
+}
+
 function shareCardState() {
   // Mates' Picks has no card of its own — offering to share the season table
   // from under a matrix would be a control that does something other than what
   // the screen is about.
   if (leagueTab === "mates") return { ready: false, hidden: true, label: "" };
   if (leagueTab === "matchday" && leagueSupportsRounds(leagueState)) {
-    // M9: available from publication onward. A week in progress is exactly when
-    // people want to send the table; withholding it until settlement was a rule
-    // about tidiness, not about honesty, and the card can be honest instead.
-    const ready = !!(roundState && !roundState.error && roundState.table?.length);
+    // M9: available from publication onward — and no earlier. A table alone is
+    // not publication: a league with members has a table before its host has
+    // chosen a single fixture, and offering to share that would export standings
+    // for a week that does not exist yet.
+    //
+    // The slate, the round and the pill must all name the same league and the
+    // same period. Two of the three agreeing is how another league's week, or
+    // last week's, reaches a graphic somebody then sends to their mates.
+    // The period comes from the SCREEN, not from the response, so a round that
+    // arrived for another week fails the check instead of vouching for itself.
+    const period = selectedPeriod ?? currentPeriodKey();
+    const slate = weeklySharePublished(roundState, period);
+    const ready = !!(slate && roundState && !roundState.error && roundState.table?.length);
     const status = ready ? weeklyShareStatus(roundState) : null;
     void status;
     if (roundState?.matchday != null) {

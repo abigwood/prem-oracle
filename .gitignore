@@ -4,8 +4,9 @@ __pycache__/
 icons/icon-base.png
 .wrangler/
 worker/.wrangler/
-node_modules/
+node_modules
 ios/App/build/
 ios/Pods/
 worker/.migration-secret
 .migration-snapshots/
+evidence-pixels/

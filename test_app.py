@@ -2068,7 +2068,14 @@ class LeagueSwitchAndShareTests(unittest.TestCase):
         state = self.app[self.app.index("function shareCardState()"):]
         state = state[:state.index("\n}")]
         self.assertNotIn("shares once it's settled", state)
-        self.assertIn("const ready = !!(roundState && !roundState.error && roundState.table?.length);", state)
+        # ...but no earlier than publication: a table alone is not a slate.
+        self.assertIn("const slate = weeklySharePublished(roundState, period);", state)
+        self.assertIn("const ready = !!(slate && roundState && !roundState.error && roundState.table?.length);", state)
+        gate = self.app[self.app.index("function weeklySharePublished(round, period)"):]
+        gate = gate[:gate.index("\n}")]
+        self.assertIn("round.code !== activeLeague", gate)
+        self.assertIn('String(slate.period ?? slate.matchweek) !== String(period)', gate)
+        self.assertIn('slate.status !== "published"', gate)
         # The honest state is the card's, in exactly the three permitted shapes.
         status = self.app[self.app.index("function weeklyShareStatus(round)"):]
         status = status[:status.index("\n}")]

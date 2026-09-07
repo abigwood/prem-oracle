@@ -33,6 +33,7 @@ const NAMES = ["matchweekLeagueState", "matchweekLeagueName", "matchweekSlate", 
   "resultCard", "resultState", "resultPickLine", "resultBadge", "isSettledCard",
   "scorePickLocal", "RESULT_FIRST_STATES",
   "weeklyTerminalCount", "weeklyShareStatus", "seasonShareFreshness", "shareIconButton",
+  "weeklySharePublished",
   "shareCardState", "seasonCardModel", "weeklyCardModel", "weeklyCardCaption", "podiumCounts",
   "CARD_SIDE", "CARD_W", "CARD_HEAD_H", "CARD_HERO_H", "CARD_TABLE_HEAD_H", "CARD_ROW_H",
   "CARD_SEASON_ROW_H", "CARD_FOOT_H", "CARD_GAP", "CARD_PODIUM_H", "CARD_PODIUM_STACK",
@@ -109,7 +110,8 @@ show("MY PICKS - no published slate", empty.picksView());
 // --- the two square cards, as their models --------------------------------
 const round = (n, entries, complete) => ({
   matchday: n, period: String(n), complete,
-  slate: { period: String(n), fixtureIds: entries.map((e) => e.id), count: entries.length },
+  code: "AAA",
+  slate: { period: String(n), status: "published", fixtureIds: entries.map((e) => e.id), count: entries.length },
   reveal: entries,
   table: [
     { uid: "u1", rank: 1, nick: "Adam", pts: 23, exact: 3 },
@@ -131,7 +133,7 @@ for (const [label, r] of [
   ["two settled + one void", round(3, six(2, 1), false)],
   ["every slot terminal", round(3, six(6), true)],
 ]) {
-  const box = world({ roundState: r });
+  const box = world({ roundState: r, selectedPeriod: String(r.period) });
   const status = box.weeklyShareStatus(r);
   console.log("     " + label.padEnd(26) + " card header : " + status.label);
   console.log("     " + " ".repeat(26) + " control name: " + box.shareCardState().label);
@@ -163,7 +165,7 @@ console.log("     fields per row: " + Object.keys({ ...model.rows[0] }).sort().j
 console.log("\n" + "=".repeat(74));
 console.log("  SHARE CONTROL MARKUP");
 console.log("=".repeat(74));
-console.log(world({ roundState: round(3, six(6), true) }).shareIconButton({ code: "AAA" }).trim());
+console.log(world({ roundState: round(3, six(6), true), selectedPeriod: "3" }).shareIconButton({ code: "AAA" }).trim());
 
 
 // --- the SQUARE cards, as geometry ------------------------------------------
@@ -172,13 +174,14 @@ console.log("  SQUARE EXPORT GEOMETRY - every size, both cards");
 console.log("=".repeat(74));
 const g = world();
 const seasonChrome = g.CARD_HEAD_H + g.CARD_GAP + g.CARD_TABLE_HEAD_H + g.CARD_GAP + g.CARD_FOOT_H;
-console.log("     members  rowH  name  honours   content   canvas      scale  fits");
+console.log("     members  rowH  name  honours    tally   content   canvas      scale  fits");
 for (const n of [1, 3, 6, 8, 12, 16, 20, 25, 30]) {
   const m = g.cardRowMetrics(n, { chrome: seasonChrome, base: g.CARD_SEASON_ROW_H });
   const { canvas, scale } = g.cardCanvas(m.contentHeight);
   const drawn = m.contentHeight * scale;
   console.log("     " + String(n).padStart(7) + "  " + String(Math.round(m.rowH)).padStart(4)
-    + "  " + String(m.name).padStart(4) + "  " + String(m.honours).padStart(7)
+    + "  " + String(m.name).padStart(4) + "  " + String(m.honoursLine ? "line" : "inline").padStart(7)
+    + "  " + String(m.honoursSize).padStart(5)
     + "   " + String(Math.round(m.contentHeight)).padStart(7)
     + "   " + (canvas.width + "x" + canvas.height).padStart(9)
     + "  " + scale.toFixed(3).padStart(5)

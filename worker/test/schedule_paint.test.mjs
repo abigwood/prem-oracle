@@ -351,7 +351,9 @@ function island({ buildMs = 0 } = {}) {
       const wait = roundDelayMs;
       await new Promise((r) => setTimeoutOrig(r, wait));
       roundState = { code: activeLeague, period: want, matchday: want, fresh: true,
-        complete: true, table: [{ uid: "u1", rank: 1, nick: "Adam", pts: 12, exact: 1 }] };
+        complete: true,
+        slate: { period: want, status: "published", fixtureIds: ["pl-w" + want + "-0"], count: 1 },
+        table: [{ uid: "u1", rank: 1, nick: "Adam", pts: 12, exact: 1 }] };
     };
     const currentPeriodKey = () => 1;
     const weekStrip = () => { apiCalls += 0; return "<weeks/>"; };
@@ -376,7 +378,9 @@ function island({ buildMs = 0 } = {}) {
     let activeLeague = "AAA", leagueTab = "matchday", selectedPeriod = 1, currentView = "league";
     let leagueState = { code: "AAA", name: "AAA League", owner: "someone", rounds: true, currentMatchday: 1, table: [{ uid: "u1", rank: 1, nick: "Adam", pts: 12, exact: 1 }] };
     let roundState = { code: "AAA", period: 1, matchday: 1,
-      complete: true, table: [{ uid: "u1", rank: 1, nick: "Adam", pts: 12, exact: 1 }] };
+      complete: true,
+      slate: { period: 1, status: "published", fixtureIds: ["pl-w1-0"], count: 1 },
+      table: [{ uid: "u1", rank: 1, nick: "Adam", pts: 12, exact: 1 }] };
     const leagueNames = { AAA: "AAA League", BBB: "BBB League" };
     const leagueStates = {};
     const uid = () => "u1";
@@ -423,6 +427,7 @@ function island({ buildMs = 0 } = {}) {
     const fixtureById = () => null;
     const weeklyFinalMismatches = new Map();
     const noteWeeklyFinalMismatch = () => {};
+    ${lift("function weeklySharePublished(round, period)")}
     // v1.7 Slice C: the card models and the control now state how far through
     // the week they are, so the harness lifts that contract too.
     ${lift("function weeklyTerminalCount(round)")}
@@ -466,7 +471,9 @@ function island({ buildMs = 0 } = {}) {
       roundCalls: () => roundCalls.slice(),
       setRoundDelay: (ms) => { roundDelayMs = ms; },
       seedRound: (code, period) => { cachedRounds[code + ":" + period] = { code, period, matchday: period, cached: true,
-        complete: true, table: [{ uid: "u1", rank: 1, nick: "Adam", pts: 12, exact: 1 }] }; },
+        complete: true,
+        slate: { period, status: "published", fixtureIds: ["pl-w" + period + "-0"], count: 1 },
+        table: [{ uid: "u1", rank: 1, nick: "Adam", pts: 12, exact: 1 }] }; },
       roundNow: () => roundState,
       pickerNode: () => pickerEl.firstElementChild,
       pickerOpen: () => matchdayPickerOpen,

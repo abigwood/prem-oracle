@@ -124,7 +124,7 @@ function cards({ native = false } = {}) {
     ${lift("function drawCardPodium(ctx, y, groups)")}
     ${lift("function drawCardTableHead(ctx, y)")}
     ${lift("function drawCardRowPlate(ctx, y, height, index, place)")}
-    ${lift("function drawCardHonours(ctx, x, y, counts)")}
+    ${lift("function drawCardHonours(ctx, x, y, counts, { size = 24 } = {})")}
     ${lift("function drawCardFooter(ctx, y, model)")}
     ${lift("function sharedRankByUid(table)")}
     ${liftConst("weeklyRanks")}
@@ -132,6 +132,7 @@ function cards({ native = false } = {}) {
     const fixtureById = () => null;
     const weeklyFinalMismatches = new Map();
     const noteWeeklyFinalMismatch = () => {};
+    ${lift("function weeklySharePublished(round, period)")}
     // v1.7 Slice C: the card models and the control now state how far through
     // the week they are, so the harness lifts that contract too.
     ${lift("function weeklyTerminalCount(round)")}

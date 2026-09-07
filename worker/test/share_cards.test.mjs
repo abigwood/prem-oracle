@@ -122,6 +122,13 @@ function cards({ native = false } = {}) {
     ${lift("function drawCardFooter(ctx, y, model)")}
     ${lift("function sharedRankByUid(table)")}
     ${liftConst("weeklyRanks")}
+    // The harness already stubs seasonRounds/periodLabel above.
+    const fixtureById = () => null;
+    // v1.7 Slice C: the card models and the control now state how far through
+    // the week they are, so the harness lifts that contract too.
+    ${lift("function weeklyTerminalCount(round)")}
+    ${lift("function weeklyShareStatus(round)")}
+    ${lift("function seasonShareFreshness(state)")}
     ${lift("function weeklyCardModel(state, round)")}
     ${lift("function drawWeeklyResultCard(state, round)")}
     ${lift("function seasonCardModel(state)")}
@@ -167,6 +174,21 @@ const LEAGUE = {
   ],
 };
 
+/** The same week still running: published, part-terminal, not complete. */
+const RUNNING_WEEK = () => ({
+  ...SETTLED_WEEK,
+  complete: false,
+  status: "in-progress",
+  winners: [],
+  podium: [],
+  slate: { period: "3", fixtureIds: ["m1", "m2", "m3", "m4", "m5", "m6"], count: 6 },
+  reveal: [
+    { id: "m1", settled: true }, { id: "m2", settled: true },
+    { id: "m3", voided: true },
+    { id: "m4" }, { id: "m5" }, { id: "m6" },
+  ],
+});
+
 const SETTLED_WEEK = {
   period: "3",
   matchday: 3,
@@ -192,19 +214,19 @@ const texts = (calls) => calls.text.map((entry) => entry.text);
 
 // --- gating ----------------------------------------------------------------
 
-test("an unsettled week offers no share", () => {
-  const midweek = { ...SETTLED_WEEK, complete: false, status: "in progress", winners: [], podium: [] };
-  const app = build(LEAGUE, midweek, "matchday");
-  assert.equal(app.ready(), false);
+test("an unsettled week SHARES, and says how far through it is", () => {
+  // v1.7 Slice C / M9: available from publication onward. The card carries the
+  // honest state instead of the control withholding itself.
+  const app = build(LEAGUE, RUNNING_WEEK(), "matchday");
   const state = app.shareState();
-  assert.equal(state.ready, false);
-  assert.match(state.label, /shares once it's settled/);
-  assert.doesNotMatch(state.label, /^Share /);
+  assert.equal(state.ready, true, "an in-progress week refused to share");
+  assert.match(state.label, /Share Matchweek \d+ standings/);
+  assert.ok(!/shares once/.test(state.label));
 });
 
 test("a settled week offers its result by name", () => {
   const app = build(LEAGUE, SETTLED_WEEK, "matchday");
-  assert.deepEqual(app.shareState(), { ready: true, label: "Share Matchweek 3 result" });
+  assert.deepEqual(app.shareState(), { ready: true, label: "Share Matchweek 3 standings" });
 });
 
 test("a week whose table has not arrived yet is not shareable", () => {
@@ -221,7 +243,9 @@ test("a settled week with an errored payload is not shareable", () => {
 
 test("the season table shares whenever it has rows", () => {
   const app = build(LEAGUE, SETTLED_WEEK, "season");
-  assert.deepEqual(app.shareState(), { ready: true, label: "Share season table" });
+  assert.equal(app.shareState().ready, true);
+  // The season control now names its own freshness (M9).
+  assert.match(app.shareState().label, /^Share season table, Updated /);
   const empty = build({ ...LEAGUE, table: [] }, SETTLED_WEEK, "season");
   assert.equal(empty.shareState().ready, false);
 });
@@ -240,7 +264,8 @@ test("the weekly card carries the panel's rows, points and exacts", () => {
     assert.ok(drawn.includes(String(row.pts)), `${row.pts} pts is missing from the card`);
   }
   assert.ok(drawn.includes("Sunday Six"), "the league is named");
-  assert.ok(drawn.some((text) => text.includes("Matchweek 3 · Final result")), "the header dates the result");
+  // M9 fixes the card's state wording: Week N · Final for a finished week.
+  assert.ok(drawn.some((text) => text.includes("Week 3 · Final")), "the header states the week");
 });
 
 test("the weekly card leads with the winner and the rostrum", () => {
@@ -322,21 +347,23 @@ test("the season card carries the cabinet under every name", () => {
     { gold: 1, silver: 0, bronze: 2 },
     { gold: 0, silver: 2, bronze: 1 },
   ]);
-  assert.equal(model.headline, "Season league · After Matchweek 3 of 38");
+  assert.equal(model.headline, "Season table · Updated through Matchweek 3");
   app.drawSeason();
   const drawn = texts(app.recorded()[0]);
   assert.ok(drawn.includes("🏆 2") && drawn.includes("🥈 1") && drawn.includes("🥉 0"),
     "the first player's cabinet is drawn in full, zeros included");
 });
 
-test("the season card's header is the panel's own progress line", () => {
-  const midweek = { ...LEAGUE, currentMatchdayHasResults: true };
-  assert.equal(build(midweek, null, "season").seasonModel().headline,
-    "Season league · Matchweek 4 in progress");
-  const opening = { ...LEAGUE, currentMatchday: 1, currentMatchdayHasResults: false };
-  assert.equal(build(opening, null, "season").seasonModel().headline,
-    "Season league · Starts Matchweek 1");
-});
+test("the season card's header states its freshness (M9)", () => {
+    // "Updated through Matchweek N" — what the reader of a shared graphic needs
+    // in order to know whether it is current, which a progress line never said.
+    const midweek = { ...LEAGUE, currentMatchdayHasResults: true };
+    assert.equal(build(midweek, null, "season").seasonModel().headline,
+      "Season table · Updated through Matchweek 4");
+    const opening = { ...LEAGUE, currentMatchday: 1, currentMatchdayHasResults: false };
+    assert.equal(build(opening, null, "season").seasonModel().headline,
+      "Season table · Updated before Matchweek 1");
+  });
 
 // --- old worker, no podiums ------------------------------------------------
 

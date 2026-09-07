@@ -2060,22 +2060,23 @@ class LeagueSwitchAndShareTests(unittest.TestCase):
         self.assertIn('directory: "CACHE"', native)
         self.assertIn("files: [uri]", native)
 
-    def test_the_weekly_card_is_gated_on_a_settled_week(self):
-        fn = self.app[self.app.index("function weeklyCardReady()"):]
-        fn = fn[:fn.index("\n}")]
-        self.assertIn("roundState.complete", fn)
-        self.assertIn("roundState.table?.length", fn)
+    def test_the_weekly_card_is_available_from_publication(self):
+        # v1.7 Slice C / M9 reverses the settlement gate deliberately: a week in
+        # progress is exactly when people want to send the table, so the card
+        # ships from publication onward and states honestly how far through it
+        # is. Withholding it was a rule about tidiness, not about honesty.
         state = self.app[self.app.index("function shareCardState()"):]
         state = state[:state.index("\n}")]
-        self.assertIn("shares once it's settled", state)
-        # The button says so, and cannot be pressed anyway.
-        self.assertIn("button.disabled = !ready;", self.app)
-        self.assertIn("${share.ready ? \"\" : \" disabled\"}", self.app)
-        self.assertIn(".whatsapp-share:disabled", self.css)
-        # And the share itself checks again, in case the label is out of date.
-        share = self.app[self.app.index("function shareCardNow()"):]
-        share = share[:share.index("\n}")]
-        self.assertIn("!shareCardState().ready", share)
+        self.assertNotIn("shares once it's settled", state)
+        self.assertIn("const ready = !!(roundState && !roundState.error && roundState.table?.length);", state)
+        # The honest state is the card's, in exactly the three permitted shapes.
+        status = self.app[self.app.index("function weeklyShareStatus(round)"):]
+        status = status[:status.index("\n}")]
+        self.assertIn("${week} · not started · 0 of ${total} fixtures", status)
+        self.assertIn("${week} · in progress · after ${terminal} of ${total}", status)
+        self.assertIn("${week} · Final", status)
+        # Final only when EVERY published slot is terminal.
+        self.assertIn("if (terminal < total)", status)
 
     def test_a_share_card_reads_only_what_the_panel_already_holds(self):
         # The KV-read lesson: a card must never cost a request.

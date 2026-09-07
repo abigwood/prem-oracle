@@ -525,7 +525,10 @@ test("A(parity)3 · a tie-break reorder alone cannot create or hide an arrow", (
 });
 
 test("A(parity)4 · endpoint, rendered table and share card print the same rank", () => {
-  const s = load([...RANKED, "weeklyCardModel"], {
+  // v1.7 Slice C: the weekly card headline and hero now state how far through
+  // the week it is, so the model needs the status contract behind it.
+  const s = load([...RANKED, "weeklyCardModel", "weeklyShareStatus", "weeklyTerminalCount",
+    "finalScore", "periodLabel"], {
     PLACE_EMOJI: {}, cardDate: () => "1 Jan", periodLabel: (p) => `Matchweek ${p}`,
     winnerNames: () => "Ann", inviteLinkFor: () => "https://example.test",
     fixtureById: (id) => ({ id, status: "finished" }),

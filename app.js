@@ -4451,12 +4451,18 @@ function weeklyCardModel(state, round) {
   const ranks = weeklyRanks(round.table);
   const names = winnerNames(round) || champions.map((entry) => entry.nick).join(" & ");
   const pts = champions[0]?.pts ?? (round.table || [])[0]?.pts ?? 0;
+  const status = weeklyShareStatus(round);
+  const final = status.final;
+  const leader = (round.table || [])[0] || null;
   return {
     league: state.name,
-    headline: `${week} · Final result · ${cardDate()}`,
-    heroEyebrow: champions.length > 1 ? "JOINT MATCHWEEK CHAMPIONS" : "MATCHWEEK CHAMPION",
-    heroName: names || "Nobody",
-    heroLine: `${week} champion · ${pts} pts`,
+    // The honest state, not a claim of finality (M9).
+    headline: `${weeklyShareStatus(round).label} · ${cardDate()}`,
+    heroEyebrow: final
+      ? (champions.length > 1 ? "JOINT MATCHWEEK CHAMPIONS" : "MATCHWEEK CHAMPION")
+      : "LEADING SO FAR",
+    heroName: (final ? names : leader?.nick) || "Nobody",
+    heroLine: final ? `${week} champion · ${pts} pts` : `${status.label} · ${leader?.pts ?? 0} pts`,
     podium: groups,
     rows: (round.table || []).map((row, index) => ({
       // The same weekly rank the table draws — a shared card that disagreed
@@ -4526,7 +4532,7 @@ function drawWeeklyResultCard(state, round) {
 function seasonCardModel(state) {
   return {
     league: state.name,
-    headline: `Season league · ${sentenceCase(seasonProgressLine(state))}`,
+    headline: `Season table · ${seasonShareFreshness(state)}`,
     rows: (state.table || []).map((row, index) => ({
       rank: row.rank || index + 1,
       nick: row.nick,
@@ -4578,7 +4584,15 @@ function drawSeasonTableCard(state) {
 function weeklyCardCaption(state, round) {
   const competition = leagueCompetitionNames(state);
   const week = round.matchday != null ? `Matchweek ${round.matchday}` : periodLabel(round.period);
-  return `🏆 ${competition} ${week}: won by ${winnerNames(round) || "nobody"}. Think you can call it? Join ${state.name} with code ${state.code}: ${inviteLinkFor(state.code)}`;
+  const status = weeklyShareStatus(round);
+  // A week that is still running has no winner to name, and saying otherwise
+  // in the shared text would be the one place the card told a story the table
+  // underneath it does not support.
+  const lead = status.final
+    ? `won by ${winnerNames(round) || "nobody"}`
+    : `${status.label.toLowerCase()} — nothing settled yet`;
+  const leading = status.final ? "" : ` Leading: ${(round.table || [])[0]?.nick || "nobody"}.`;
+  return `🏆 ${competition} ${week}: ${lead}.${leading} Think you can call it? Join ${state.name} with code ${state.code}: ${inviteLinkFor(state.code)}`;
 }
 
 function leagueTableShareText(state) {
@@ -4670,25 +4684,123 @@ function weeklyCardReady() {
 }
 
 /** What the share button says, and whether it does anything when pressed. */
+// --- v1.7 Slice C: anytime table exports (M9) -------------------------------
+//
+// The share control used to be a wide green button that said what it would do,
+// and the weekly card only existed once the week had settled. Both were wrong
+// for the same reason: sharing your league is a thing you want to do WHILE the
+// week is happening, and a text button the width of the screen is the loudest
+// thing on it.
+//
+// So the control is the platform square-with-arrow, 44x44, with a precise
+// accessible name; and the weekly card exists from publication onward and says
+// honestly how far through the week it is.
+
+/**
+ * How far through a published week we are, counted in TERMINAL fixtures only.
+ *
+ * Terminal means the result will not change again: settled, or void. A void
+ * advances the count and contributes no points — it is finished, it just
+ * finished with nothing. An in-progress fixture is not terminal however late it
+ * is, because its score is still the server's to confirm.
+ */
+function weeklyTerminalCount(round) {
+  const ids = round?.slate?.fixtureIds?.length
+    ? round.slate.fixtureIds.map(String)
+    : [...new Set((round?.reveal || []).map((entry) => String(entry.id)))];
+  const entries = new Map((round?.reveal || []).map((entry) => [String(entry.id), entry]));
+  let terminal = 0;
+  for (const id of ids) {
+    const entry = entries.get(id);
+    const fixture = fixtureById(id);
+    const settled = entry?.settled === true || (!!fixture && !!finalScore(fixture));
+    const voided = entry?.voided === true || (!!fixture && (isVoidFixture(fixture) || isPostponed(fixture)));
+    if (settled || voided) terminal += 1;
+  }
+  return { terminal, total: ids.length };
+}
+
+/**
+ * The one honest line a weekly card is allowed to carry. `Final` is reserved
+ * for a week where every published slot is terminal — not "the last one we
+ * happened to see", and never a week still holding a fixture that could score.
+ */
+function weeklyShareStatus(round) {
+  const week = round?.matchday != null ? `Week ${round.matchday}` : periodLabel(round?.period ?? "");
+  const counted = weeklyTerminalCount(round);
+  // `complete` is the SERVER saying the round is done, and it is the authority.
+  // Re-deriving finality from what the client happens to hold would make the
+  // card disagree with the table above it the moment a fixture is missing from
+  // this device — which is exactly when a card gets shared.
+  if (round?.complete === true) {
+    const total = counted.total || counted.terminal;
+    return { label: `${week} · Final`, terminal: total, total, final: true };
+  }
+  const { terminal, total } = counted;
+  if (!total) return { label: `${week} · not started · 0 of 0 fixtures`, terminal, total, final: false };
+  if (terminal === 0) return { label: `${week} · not started · 0 of ${total} fixtures`, terminal, total, final: false };
+  if (terminal < total) return { label: `${week} · in progress · after ${terminal} of ${total}`, terminal, total, final: false };
+  return { label: `${week} · Final`, terminal, total, final: true };
+}
+
+/** "Updated through Matchweek N" — the freshness M9 asks a season card to carry. */
+function seasonShareFreshness(state) {
+  if (state?.mixed || seasonRounds() == null) {
+    const period = state?.currentPeriod;
+    return period == null ? "Updated through the completed season" : `Updated through ${periodLabel(period)}`;
+  }
+  const played = state?.currentMatchday == null
+    ? seasonRounds()
+    : Math.max(0, Number(state.currentMatchday) - (state.currentMatchdayHasResults ? 0 : 1));
+  return played <= 0 ? "Updated before Matchweek 1" : `Updated through Matchweek ${played}`;
+}
+
+/**
+ * The share control. An icon, not a sentence — and never a bare glyph: the
+ * accessible name says exactly which table is about to leave the app, because
+ * "Share" on a screen with two tables is not a name, it is a shrug.
+ */
+function shareIconButton(state) {
+  const share = shareCardState();
+  if (share.hidden || !share.ready) return "";
+  return `<button class="share-icon" type="button" data-export-league-table="${escapeHTML(state.code)}"
+    aria-label="${escapeHTML(share.label)}" title="${escapeHTML(share.label)}">
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" width="22" height="22">
+      <path d="M12 3.5 8.5 7l1.4 1.4L11 7.3V15h2V7.3l1.1 1.1L15.5 7 12 3.5Z" fill="currentColor"/>
+      <path d="M5 11v8a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-8h-2v8H7v-8H5Z" fill="currentColor"/>
+    </svg>
+  </button>`;
+}
+
 function shareCardState() {
-  // Mates' Picks has no card of its own — the matchweek export is Phase 2 — and
-  // offering to share the season table from under a matrix would be a button
-  // that does something other than what the screen is about.
+  // Mates' Picks has no card of its own — offering to share the season table
+  // from under a matrix would be a control that does something other than what
+  // the screen is about.
   if (leagueTab === "mates") return { ready: false, hidden: true, label: "" };
   if (leagueTab === "matchday" && leagueSupportsRounds(leagueState)) {
+    // M9: available from publication onward. A week in progress is exactly when
+    // people want to send the table; withholding it until settlement was a rule
+    // about tidiness, not about honesty, and the card can be honest instead.
+    const ready = !!(roundState && !roundState.error && roundState.table?.length);
+    const status = ready ? weeklyShareStatus(roundState) : null;
+    void status;
     if (roundState?.matchday != null) {
-      return weeklyCardReady()
-        ? { ready: true, label: `Share Matchweek ${roundState.matchday} result` }
-        : { ready: false, label: `Matchweek ${roundState.matchday} shares once it's settled` };
+      return ready
+        ? { ready: true, label: `Share Matchweek ${roundState.matchday} standings` }
+        : { ready: false, label: `Matchweek ${roundState.matchday} standings are still loading` };
     }
-    // The same fallback the week segment uses, so a panel still loading is
-    // still named rather than offering to share "Matchweek null".
+    // A mixed league has no matchweek number, so it is named in its own terms.
     const week = periodLabel(roundState?.period ?? selectedPeriod ?? leagueState.currentPeriod ?? currentPeriodKey());
-    return weeklyCardReady()
-      ? { ready: true, label: `Share ${week} result` }
-      : { ready: false, label: `${week} shares once it's settled` };
+    return ready
+      ? { ready: true, label: `Share ${week} standings` }
+      : { ready: false, label: `${week} standings are still loading` };
   }
-  return { ready: !!leagueState?.table?.length, label: "Share season table" };
+  return {
+    ready: !!leagueState?.table?.length,
+    label: `Share season table, ${seasonShareFreshness(leagueState)}`,
+  };
+  // (the season control names its own freshness; the weekly one is named by
+  // its Matchweek, and the week's honest state rides on the card itself)
 }
 
 /**
@@ -5298,7 +5410,6 @@ function leagueView() {
   const state = leagueState;
   const isOwner = state && !state.error && state.owner === uid();
   const supportsRounds = leagueSupportsRounds(state);
-  const share = shareCardState();
   // A PLACEHOLDER, never a built panel. Any global render while Season is
   // selected used to rebuild the whole heavy Season panel synchronously — which
   // is what made a pill switch cost four seconds even after the pill itself was
@@ -5315,7 +5426,7 @@ function leagueView() {
           ${supportsRounds ? `${roundToggle()}<div class="picker-island" data-picker-island></div>` : ""}
           <div class="slate-slot">${hostSlateControl(state)}</div>
           ${inner}
-          <button class="whatsapp-share wide" type="button" data-export-league-table="${state.code}"${share.ready ? "" : " disabled"}${share.hidden ? " hidden" : ""}>${escapeHTML(share.label)}</button>
+          ${shareIconButton(state)}
           ${leagueSettings(state, isOwner)}
         </section>`;
   return `<div class="section-head"><div><span class="eyebrow">Private predictor leagues</span><h2>League table</h2></div></div>${flash()}${leagueSwitcher()}${content}${controls}${restore}`;

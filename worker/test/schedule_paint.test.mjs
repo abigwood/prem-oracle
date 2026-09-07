@@ -417,6 +417,15 @@ function island({ buildMs = 0 } = {}) {
     ${lift("async function showResultsPanel({ status } = {})")}
     ${lift("const pulsingNode = (message) => {")}
     ${lift("function weeklyCardReady()")}
+    // Stubs for what the freshness line reaches that these harnesses do not
+    // model: the season length, the period label and the fixture lookup.
+    const seasonRounds = () => 38;
+    const fixtureById = () => null;
+    // v1.7 Slice C: the card models and the control now state how far through
+    // the week they are, so the harness lifts that contract too.
+    ${lift("function weeklyTerminalCount(round)")}
+    ${lift("function weeklyShareStatus(round)")}
+    ${lift("function seasonShareFreshness(state)")}
     ${lift("function shareCardState()")}
     ${lift("function syncShareLabel()")}
     ${lift("function mountResults()")}
@@ -861,7 +870,7 @@ test("a stale week response cannot change the share label", async () => {
   app.setRoundDelay(1);
   const three = app.selectWeeklyPeriod(3);
   await Promise.all([two, three]);
-  assert.match(app.shareLabel(), /Share Matchweek 3 result/, `got ${app.shareLabel()}`);
+  assert.match(app.shareLabel(), /Share Matchweek 3 standings/, `got ${app.shareLabel()}`);
 });
 
 test("selecting a week closes the picker and voids its pending build", async () => {
@@ -1013,10 +1022,10 @@ test("the share label follows the visible tab through a swap", async () => {
   const app = island();
   app.setTab("matchday");
   await app.showResultsPanel();
-  assert.match(app.shareLabel(), /Share Matchweek 1 result/);
+  assert.match(app.shareLabel(), /Share Matchweek 1 standings/);
   app.setTab("season");
   await app.showResultsPanel();
-  assert.equal(app.shareLabel(), "Share season table");
+  assert.match(app.shareLabel(), /^Share season table, Updated /);
 });
 
 // (E10)

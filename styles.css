@@ -2141,3 +2141,21 @@ body.picker-open { overflow: hidden; }
 .fixture-row-postponed .fixture-row-state { color: var(--danger); }
 .fixture-row-final { font-size: 1.05rem; font-weight: 900; color: var(--ink); }
 .fixture-row-final .result-sep { padding: 0 3px; color: var(--muted); }
+
+/* --- v1.7 Slice C: the platform share control ------------------------------
+   An icon, sized to the 44x44 minimum target whatever the glyph inside it
+   measures. The name lives in aria-label, not in the pixels. */
+.share-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--white);
+  color: var(--purple);
+  cursor: pointer;
+}
+.share-icon:active { background: var(--purple-soft); }
+.share-icon:focus-visible { outline: 2px solid var(--purple); outline-offset: 2px; }

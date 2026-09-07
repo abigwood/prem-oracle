@@ -27,10 +27,12 @@ const F = [
 
 const NAMES = ["matchweekLeagueState", "matchweekLeagueName", "matchweekSlate", "matchweekSlots",
   "matchweekContext", "matchweekEmpty", "matchweekUnavailable", "picksView",
-  "matchweekRowState", "matchweekRowMark", "MATCHWEEK_ROW_LINE", "shortKickoff",
+  "matchweekRowState", "MATCHWEEK_ROW_LINE", "shortKickoff",
   "closedStatus", "matchOpen", "finalScore", "clientLockMs", "VOID_STATUSES", "isVoidFixture",
   "isPostponed", "picksView", "pickRow", "pickEditable", "pickProgress", "pickDeadlineLine",
   "resultCard", "resultState", "resultPickLine", "resultBadge", "isSettledCard",
+  "pickRowBody", "pickRowLabel", "pickJustSaved", "pickListState", "pickShareRow",
+  "shareSurface", "shareRound", "sharePeriod", "normaliseView", "LEGACY_VIEWS",
   "scorePickLocal", "RESULT_FIRST_STATES",
   "weeklyTerminalCount", "weeklyShareStatus", "seasonShareFreshness", "shareIconButton",
   "weeklySharePublished",
@@ -38,7 +40,8 @@ const NAMES = ["matchweekLeagueState", "matchweekLeagueName", "matchweekSlate", 
   "CARD_SIDE", "CARD_W", "CARD_HEAD_H", "CARD_HERO_H", "CARD_TABLE_HEAD_H", "CARD_ROW_H",
   "CARD_SEASON_ROW_H", "CARD_FOOT_H", "CARD_GAP",
   "cardRowMetrics", "cardCanvas", "winnerNames", "CARD", "CARD_PAD", "CARD_COL",
-  "CARD_TYPE_FLOOR", "CARD_SECOND_FLOOR", "CARD_MIN_ROW",
+  "CARD_TYPE_FLOOR", "CARD_SECOND_FLOOR", "CARD_MIN_ROW", "CARD_MIN_NAME",
+  "cardPageRows", "cardPageLabel", "cardHonoursFit", "cardHonoursWidth",
   "weeklyRanks", "sharedRankByUid", "cardDate", "noteWeeklyFinalMismatch", "weeklyFinalMismatchLines"];
 
 const leagueState = (ids) => ({
@@ -48,7 +51,9 @@ const leagueState = (ids) => ({
 });
 
 const BASE = {
-  leagueNames: {}, expandedFixtureId: null, expandedPickId: null,
+  leagueNames: {}, expandedPickId: null,
+  currentView: "picks", currentRoundReveal: () => null, matesState: null,
+  leagueSupportsRounds: () => true,
   matchweekCountMismatches: new Map(),
   periodLabel: (p) => "Matchweek " + p,
   pulsingStatus: (m) => '<p class="pulse">' + m + "</p>",
@@ -89,24 +94,58 @@ function show(title, html) {
 
 const ids = F.map((f) => f.id);
 const picks = { f1: { p1: 2, p2: 0 }, f2: { p1: 1, p2: 1 }, f4: { p1: 2, p2: 1 } };
-const world = (over = {}) => load(NAMES, {
-  ...BASE, fixtures: F, picks, activeLeague: "AAA",
+const world = ({ active = "AAA", ...over } = {}) => load(NAMES, {
+  ...BASE, fixtures: F, picks, activeLeague: active,
   leagueState: leagueState(ids), leagueStates: {}, leagueCodes: ["AAA"], ...over,
 });
 
+import { readFileSync } from "node:fs";
+const INDEX = readFileSync(new URL("./index.html", import.meta.url), "utf8");
+console.log("\n" + "=".repeat(74));
+console.log("  BOTTOM NAVIGATION - four items, evenly divided");
+console.log("=".repeat(74));
+const NAV = INDEX.slice(INDEX.indexOf("<nav class=\"bottom-nav\""), INDEX.indexOf("</nav>"));
+for (const button of NAV.split("<button").slice(1)) {
+  const view = /data-view="([^"]+)"/.exec(button)?.[1];
+  const label = (/<\/span>([^<]*)</.exec(button)?.[1] || "").trim();
+  const icon = (/<span>([^<]*)<\/span>/.exec(button)?.[1] || "").trim();
+  console.log(`     ${String(view).padEnd(8)} ${icon}  ${label}`);
+}
+console.log("     " + /grid-template-columns: repeat\((\d)/.exec(
+  readFileSync(new URL("./styles.css", import.meta.url), "utf8")
+    .slice(readFileSync(new URL("./styles.css", import.meta.url), "utf8").indexOf(".bottom-nav {")))?.[0]);
+
 const s = world();
-show("MATCHWEEK - six-fixture slate, every card state", s.picksView());
-s.evalIn('expandedFixtureId = "f4";');
-show("MATCHWEEK - one card expanded (settled: mates on expansion)", s.picksView());
+show("MY PICKS - six-fixture slate, every row state", s.picksView());
+s.evalIn('expandedPickId = "f4";');
+show("MY PICKS - a settled row expanded (mates behind the disclosure)", s.picksView());
 
 const p = world();
-show("MY PICKS - 3 of 6 complete, compact rows", p.picksView());
+show("MY PICKS - partly locked, 3 of 6 saved", p.picksView());
 p.evalIn('expandedPickId = "f1";');
 show("MY PICKS - one editable row open, controls only there", p.picksView());
 
+// Two leagues, one shared fixture id: each must show only its own.
+const shared = world({
+  leagueState: leagueState(["f1", "f2"]),
+  leagueCodes: ["AAA", "BBB"],
+  leagueNames: { AAA: "Sunday Six", BBB: "Bury Boys" },
+  leagueSwitcher: () => '<div class="league-switcher"><button data-league="AAA">Sunday Six</button><button data-league="BBB">Bury Boys</button></div>',
+});
+show("MY PICKS - two leagues, showing AAA's two-fixture slate", shared.picksView());
+const other = world({
+  active: "BBB",
+  leagueState: { code: "BBB", name: "Bury Boys", currentPeriod: "7",
+    currentSlate: { period: "7", matchweek: 7, status: "published", fixtureIds: ["f2", "f5"], count: 2 },
+    table: [], owner: "u-me" },
+  leagueCodes: ["AAA", "BBB"],
+  leagueNames: { AAA: "Sunday Six", BBB: "Bury Boys" },
+  leagueSwitcher: () => '<div class="league-switcher"><button data-league="AAA">Sunday Six</button><button data-league="BBB">Bury Boys</button></div>',
+});
+show("MY PICKS - switched to BBB: its own slate, its own name, no bleed", other.picksView());
+
 const empty = world({ leagueState: leagueState(null), picks: {} });
-show("MATCHWEEK - no published slate", empty.picksView());
-show("MY PICKS - no published slate", empty.picksView());
+show("MY PICKS - no published slate (the honest empty state)", empty.picksView());
 
 // --- the two square cards, as their models --------------------------------
 const round = (n, entries, complete) => ({
@@ -166,7 +205,22 @@ console.log("     fields per row: " + Object.keys({ ...model.rows[0] }).sort().j
 console.log("\n" + "=".repeat(74));
 console.log("  SHARE CONTROL MARKUP");
 console.log("=".repeat(74));
-console.log(world({ roundState: round(3, six(6), true), selectedPeriod: "3" }).shareIconButton({ code: "AAA" }).trim());
+// One component, three surfaces. The season control is what the League page
+// shows under its standings; the weekly one is what My Picks shows under its
+// list, and it appears only when this device already holds the week's table.
+const seasonControl = world({
+  leagueTab: "season", currentView: "league",
+  leagueState: { ...leagueState(ids), table: [{ uid: "u1", nick: "Adam", pts: 12 }],
+    currentMatchday: 8, currentMatchdayHasResults: true },
+});
+console.log("  SEASON (League page, under the standings):");
+console.log(seasonControl.shareIconButton({ code: "AAA" }, "season").trim());
+const weekControl = world({
+  currentView: "picks", selectedPeriod: "7",
+  currentRoundReveal: () => round(7, six(6), true),
+});
+console.log("\n  WEEKLY (My Picks, under the list):");
+console.log(weekControl.shareIconButton({ code: "AAA" }, "weekly").trim() || "  (hidden: this device holds no table for the week)");
 
 
 // --- the SQUARE cards, as geometry ------------------------------------------
@@ -175,14 +229,14 @@ console.log("  SQUARE EXPORT GEOMETRY - every size, both cards");
 console.log("=".repeat(74));
 const g = world();
 const seasonChrome = g.CARD_HEAD_H + g.CARD_GAP + g.CARD_TABLE_HEAD_H + g.CARD_GAP + g.CARD_FOOT_H;
-console.log("     members  cols  perCol  rowH  name  rank  pts  2nd  honours  tally  content  scale  floors");
+console.log("     members  pages  perPage  rowH  name  rank  pts  2nd  honours  tally  content  scale  floors");
 for (const n of [1, 3, 6, 8, 12, 16, 20, 25, 30, 36, 40]) {
   const m = g.cardRowMetrics(n, { chrome: seasonChrome, base: g.CARD_SEASON_ROW_H });
   const { canvas, scale } = g.cardCanvas(m.contentHeight);
   const primary = Math.min(m.name, m.number, m.points) * scale;
   const secondary = Math.min(m.second, m.honoursSize) * scale;
-  console.log("     " + String(n).padStart(7) + "  " + String(m.columns).padStart(4)
-    + "  " + String(m.perColumn).padStart(6) + "  " + String(Math.round(m.rowH)).padStart(4)
+  console.log("     " + String(n).padStart(7) + "  " + String(m.pages).padStart(5)
+    + "  " + String(m.rowsPerPage).padStart(7) + "  " + String(Math.round(m.rowH)).padStart(4)
     + "  " + String(m.name).padStart(4) + "  " + String(m.number).padStart(4)
     + "  " + String(m.points).padStart(3) + "  " + String(m.second).padStart(3)
     + "  " + String(m.honoursLine ? "line" : "inline").padStart(7)
@@ -194,3 +248,27 @@ for (const n of [1, 3, 6, 8, 12, 16, 20, 25, 30, 36, 40]) {
 }
 console.log("\n     Every canvas is square, every member is drawn, and no figure is drawn");
 console.log("     below 18px (names, ranks, points) or 15px (secondary figures, honours).");
+
+// --- the Season page's two folded sections ---------------------------------
+console.log("\n" + "=".repeat(74));
+console.log("  SEASON SECTIONS - collapsed by default, opened on request");
+console.log("=".repeat(74));
+const REVEALS = { reveals: [{ player1: "Arsenal", player2: "Coventry", settled: true, result: { p1: 2, p2: 0 },
+  picks: [{ nick: "Adam", p1: 2, p2: 0, pts: 5, settled: true }, { nick: "Bex", p1: 1, p2: 0, pts: 2, settled: true }] }] };
+const CABINET = { cabinet: { nick: "Adam", gold: 2, silver: 1, bronze: 0, podiums: 3,
+  weeks: [{ period: "6", place: "gold", pts: 21 }, { period: "5", place: "silver", pts: 18 }] } };
+const folds = load(["seasonSection", "seasonSectionOpen", "seasonSectionKey", "seasonOpenSections",
+  "SEASON_SECTIONS", "leagueRevealsHtml", "revealsListHtml", "cabinetWeeksHtml", "trophyCabinet",
+  "PLACE_EMOJI"], {
+  activeLeague: "AAA", leagueState: { ...REVEALS, ...CABINET }, fixtures: F,
+  revealCard: (r) => `<div class="reveal-card">${r.player1} v ${r.player2}: ${
+    r.picks.map((p) => `${p.nick} ${p.p1}-${p.p2} (+${p.pts})`).join(", ")}</div>`,
+  cabinetWeek: (w) => `<li>Week ${w.period}: ${w.place}, ${w.pts} pts</li>`,
+  periodLabel: (p) => `Matchweek ${p}`,
+});
+show("SEASON - both sections closed (nothing built behind them)", 
+  folds.trophyCabinet(CABINET) + folds.leagueRevealsHtml(REVEALS));
+folds.evalIn(`seasonOpenSections.add(seasonSectionKey("reveals"));`);
+folds.evalIn(`seasonOpenSections.add(seasonSectionKey("weeks"));`);
+show("SEASON - both open (the same nodes, filled in place)",
+  folds.trophyCabinet(CABINET) + folds.leagueRevealsHtml(REVEALS));

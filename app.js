@@ -4262,21 +4262,22 @@ const CARD = {
   silver: "#D8DCE6",
   bronze: "#D79A66",
 };
-const CARD_BLOCK = { gold: CARD.gold, silver: CARD.silver, bronze: CARD.bronze };
-// Block heights in the drawn rostrum, in the same order the CSS one steps.
-const CARD_PODIUM = {
-  gold: { x: 390, w: 300, h: 200 },
-  silver: { x: 108, w: 268, h: 150 },
-  bronze: { x: 704, w: 268, h: 118 },
-};
 const CARD_HEAD_H = 190;
 const CARD_HERO_H = 220;
-// Headroom for one name on the tallest step. A shared place stacks its names
-// on the one step, so the region grows to keep them clear of the points line.
-const CARD_PODIUM_H = 350;
-const CARD_PODIUM_STACK = 34;
 const CARD_TABLE_HEAD_H = 56;
 const CARD_ROW_H = 74;
+// The floors Sol set for an exported table, in post-transform pixels: names,
+// ranks and points at 18, the secondary figures and honours at 15. They are
+// floors, not suggestions — nothing below this is legible in the preview a
+// group chat renders, which is where these cards are actually read.
+const CARD_TYPE_FLOOR = 18;
+const CARD_SECOND_FLOOR = 15;
+// The shortest row that can hold an 18px line with air above and below it.
+const CARD_MIN_ROW = 32;
+// A name column narrower than this is not a name, it is an initial.
+const CARD_MIN_NAME = 104;
+const CARD_MAX_COLUMNS = 4;
+const CARD_COL_GAP = 28;
 // The season row carries an honours line under the name, so it is taller.
 const CARD_SEASON_ROW_H = 92;
 const CARD_FOOT_H = 200;
@@ -4326,23 +4327,76 @@ const CARD_SIDE = 1080;
  * is ever dropped from the table itself — a truncated league table is not a
  * smaller version of the card, it is a different and dishonest one.
  */
-function cardRowMetrics(rows, { chrome, base, min = 26 }) {
+/**
+ * How a table fits inside the square: how many columns it needs, how tall its
+ * rows are, and how big its type is.
+ *
+ * Shrinking the whole card until it fits is not a layout — it is a smaller
+ * picture of an unreadable table, which is exactly what the 30-member export
+ * was. So the LAYOUT solves the fit: when one column cannot hold a readable
+ * row, the ranking continues into a second column, and a third if it must.
+ * Scale is then 1 and the floors hold by construction.
+ */
+function cardRowMetrics(rows, { chrome, base, min = CARD_MIN_ROW, maxColumns = CARD_MAX_COLUMNS }) {
   const available = Math.max(0, CARD_SIDE - chrome);
-  const fitted = rows > 0 ? available / rows : base;
+  let columns = 1;
+  while (columns < maxColumns && rows > 0 && available / Math.ceil(rows / columns) < min) columns += 1;
+  const perColumn = rows > 0 ? Math.ceil(rows / columns) : 0;
+  const fitted = perColumn > 0 ? available / perColumn : base;
   const rowH = Math.max(min, Math.min(base, fitted));
   const scale = Math.min(1, rowH / base);
+  // A roomy row still carries honours on their own baseline; a compressed one
+  // carries a compact tally beside a narrowed name. Neither ever drops them.
+  // Two columns buy the height back, so the second baseline survives further.
+  // An inline tally needs a name beside it AND clear air before the exact
+  // column. Where the column cannot hold all three, honours take their own
+  // baseline instead of being pushed through the figures next to them.
+  const box = cardColumnBox(0, columns);
+  const inlineRoom = cardColumnCols(box, columns).exact - cardColumnCols(box, columns).name;
+  const honoursLine = rowH >= (columns > 1 ? 46 : 62)
+    || inlineRoom < CARD_MIN_NAME + 12 + CARD_SECOND_FLOOR * 9 + CARD_SECOND_FLOOR * 2;
   return {
+    columns,
+    perColumn,
     rowH,
-    contentHeight: chrome + rows * rowH,
-    name: Math.max(15, Math.round(34 * Math.max(scale, 0.45))),
-    number: Math.max(14, Math.round(30 * Math.max(scale, 0.45))),
-    points: Math.max(15, Math.round(34 * Math.max(scale, 0.45))),
-    // Honours are never dropped. A roomy row carries them on a second baseline
-    // under the name; a compressed one carries a compact tally on the same
-    // baseline, to the right of the name. The counts are present either way.
-    honoursLine: rowH >= 62,
-    honoursSize: rowH >= 62 ? 24 : Math.max(13, Math.round(rowH * 0.42)),
+    contentHeight: chrome + perColumn * rowH,
+    name: Math.max(CARD_TYPE_FLOOR, Math.round(34 * scale)),
+    number: Math.max(CARD_TYPE_FLOOR, Math.round(30 * scale)),
+    points: Math.max(CARD_TYPE_FLOOR, Math.round(34 * scale)),
+    second: Math.max(CARD_SECOND_FLOOR, Math.round(30 * scale)),
+    honoursLine,
+    honoursSize: honoursLine
+      ? Math.max(CARD_SECOND_FLOOR, Math.min(24, Math.round(rowH * 0.333)))
+      : Math.max(CARD_SECOND_FLOOR, Math.round(rowH * 0.42)),
+    // Where the two baselines sit inside a row that carries both.
+    nameDy: honoursLine ? -Math.round(rowH * 0.055) : 0,
+    honoursDy: Math.round(rowH * 0.42),
   };
+}
+
+/** One column's slot in the 1080 design, gaps included. */
+function cardColumnBox(index, columns) {
+  const usable = CARD_W - CARD_PAD * 2 - CARD_COL_GAP * (columns - 1);
+  const width = usable / columns;
+  return { x: CARD_PAD + index * (width + CARD_COL_GAP), width };
+}
+
+/**
+ * Where a row's figures sit inside its column. One column keeps the accepted
+ * full-width positions exactly; more than one packs them against the column's
+ * own edges so every figure keeps its place relative to its own heading.
+ */
+function cardColumnCols(box, columns) {
+  if (columns === 1) return CARD_COL;
+  const right = box.x + box.width;
+  return { rank: box.x + 26, name: box.x + 58, exact: right - 104, pts: right - 46, medal: right - 16 };
+}
+
+/** Which column and which row of it the nth member belongs in. */
+function cardSlot(index, m) {
+  const column = m.perColumn > 0 ? Math.floor(index / m.perColumn) : 0;
+  const box = cardColumnBox(column, m.columns);
+  return { column, row: index - column * m.perColumn, box, cols: cardColumnCols(box, m.columns) };
 }
 
 function cardCanvas(contentHeight) {
@@ -4407,65 +4461,26 @@ function drawCardHero(ctx, y, model) {
   ctx.textAlign = "left";
 }
 
-const podiumStackDepth = (groups) => Math.max(1, ...groups.map((group) => group.entries.length));
-const podiumHeight = (groups) => CARD_PODIUM_H + (podiumStackDepth(groups) - 1) * CARD_PODIUM_STACK;
-
-// The rostrum: second, first, third — first tallest and in gold. A place nobody
-// reached has no block, so a two-player league draws two.
-function drawCardPodium(ctx, y, groups) {
-  const base = y + podiumHeight(groups) - 30;
-  ctx.fillStyle = CARD.line;
-  ctx.fillRect(CARD_PAD, base, CARD_W - CARD_PAD * 2, 3);
-  for (const group of groups) {
-    const { x, w, h } = CARD_PODIUM[group.place];
-    const top = base - h;
-    const centre = x + w / 2;
-    roundedRect(ctx, x, top, w, h, 14);
-    ctx.fillStyle = CARD_BLOCK[group.place];
-    ctx.fill();
-    ctx.textAlign = "center";
-    ctx.fillStyle = CARD.brand;
-    ctx.font = cardFont(900, 62);
-    ctx.fillText(PLACE_NUMBER[group.place], centre, top + h / 2 + 22);
-    // A shared place stacks its names on the one block, because the podium
-    // rules never award the place below a tie to anybody. The stack is built
-    // upwards from the points line so the second name lands above the first
-    // rather than on top of the points.
-    const size = group.entries.length > 1 ? 26 : 34;
-    const lowest = top - 44;
-    group.entries.forEach((entry, index) => {
-      // Held to the width of its own block: a long name that spread wider than
-      // that reached across and sat on the step next to it.
-      drawFitted(ctx, entry.nick, centre, lowest - (group.entries.length - 1 - index) * (size + 8), w,
-        { max: size, min: 20, colour: CARD.ink, align: "center" });
-    });
-    ctx.textAlign = "center";
-    ctx.font = cardFont(900, 40);
-    ctx.fillStyle = CARD.ink;
-    ctx.fillText(PLACE_EMOJI[group.place], centre, lowest - (group.entries.length - 1) * (size + 8) - 36);
-    ctx.fillStyle = CARD.muted;
-    ctx.font = cardFont(800, 26);
-    ctx.fillText(`${group.entries[0].pts} pts`, centre, top - 12);
-    ctx.textAlign = "left";
-  }
-}
 
 const CARD_COL = { rank: 112, name: 168, exact: 730, pts: 880, medal: 962 };
 
-function drawCardTableHead(ctx, y) {
+function drawCardTableHead(ctx, y, cols = CARD_COL, box = { x: CARD_PAD, width: CARD_W - CARD_PAD * 2 }) {
+  const tight = box.width < 400;
   ctx.fillStyle = CARD.muted;
-  ctx.font = cardFont(800, 22);
-  ctx.fillText("PLAYER", CARD_COL.name, y + 36);
+  ctx.font = cardFont(800, box.width < 500 ? 19 : 22);
+  ctx.fillText("PLAYER", cols.name, y + 36);
   ctx.textAlign = "right";
-  ctx.fillText("EXACT", CARD_COL.exact, y + 36);
-  ctx.fillText("PTS", CARD_COL.pts, y + 36);
+  // A narrow column takes the short form rather than letting two headings meet
+  // in the middle and read as one word.
+  ctx.fillText(tight ? "EX" : "EXACT", cols.exact, y + 36);
+  ctx.fillText("PTS", cols.pts, y + 36);
   ctx.textAlign = "left";
   ctx.fillStyle = CARD.line;
-  ctx.fillRect(CARD_PAD, y + CARD_TABLE_HEAD_H - 10, CARD_W - CARD_PAD * 2, 2);
+  ctx.fillRect(box.x, y + CARD_TABLE_HEAD_H - 10, box.width, 2);
 }
 
-function drawCardRowPlate(ctx, y, height, index, place) {
-  roundedRect(ctx, CARD_PAD, y, CARD_W - CARD_PAD * 2, height - 10, 16);
+function drawCardRowPlate(ctx, y, height, index, place, box = { x: CARD_PAD, width: CARD_W - CARD_PAD * 2 }) {
+  roundedRect(ctx, box.x, y, box.width, height - 10, 16);
   ctx.fillStyle = place ? CARD.goldWash : index % 2 ? CARD.rowAlt : CARD.row;
   ctx.fill();
   if (!place) return;
@@ -4484,6 +4499,17 @@ function drawCardRowPlate(ctx, y, height, index, place) {
  * part of the table. A short row gets a COMPACT tally on the same baseline
  * instead of a second line — smaller, never absent.
  */
+/** How wide a tally will be, so it can be placed instead of hoped for. */
+function cardHonoursWidth(ctx, counts, size) {
+  const previous = ctx.font;
+  ctx.font = cardFont(800, size);
+  const width = [["🏆", counts.gold], ["🥈", counts.silver], ["🥉", counts.bronze]]
+    .reduce((sum, [emoji, count]) => sum + ctx.measureText(`${emoji} ${count}`).width, 0)
+    + ctx.measureText(" · ").width * 2;
+  ctx.font = previous;
+  return width;
+}
+
 function drawCardHonours(ctx, x, y, counts, { size = 24 } = {}) {
   const parts = [["🏆", counts.gold], ["🥈", counts.silver], ["🥉", counts.bronze]];
   ctx.font = cardFont(800, size);
@@ -4498,6 +4524,22 @@ function drawCardHonours(ctx, x, y, counts, { size = 24 } = {}) {
     ctx.fillText(" · ", cursor, y);
     cursor += ctx.measureText(" · ").width;
   });
+}
+
+/**
+ * A heading over every column, and a hairline between them. A table that
+ * continues into a second column has to say so: the reader needs to know the
+ * right-hand list is ranks 11 to 20, not a different table.
+ */
+function drawCardTableColumns(ctx, y, m, rows) {
+  for (let column = 0; column < m.columns; column += 1) {
+    if (column * m.perColumn >= rows) break;
+    const box = cardColumnBox(column, m.columns);
+    drawCardTableHead(ctx, y, cardColumnCols(box, m.columns), box);
+    if (!column) continue;
+    ctx.fillStyle = CARD.line;
+    ctx.fillRect(box.x - CARD_COL_GAP / 2 - 1, y + 8, 2, CARD_TABLE_HEAD_H - 18 + m.perColumn * m.rowH);
+  }
 }
 
 function drawCardFooter(ctx, y, model) {
@@ -4576,51 +4618,50 @@ function weeklyCardModel(state, round) {
 
 function drawWeeklyResultCard(state, round) {
   const model = weeklyCardModel(state, round);
-  const podiumH = model.podium.length ? podiumHeight(model.podium) + CARD_GAP : 0;
-  const chrome = CARD_HEAD_H + CARD_GAP + CARD_HERO_H + CARD_GAP + podiumH
+  // The export carries no rostrum. On a square card the podium repeated the
+  // hero's claim in a second, larger form and left the standings it was meant
+  // to introduce at eleven pixels. The screen keeps its podium; the picture
+  // keeps the table, and the medals still mark the three that matter.
+  const chrome = CARD_HEAD_H + CARD_GAP + CARD_HERO_H + CARD_GAP
     + CARD_TABLE_HEAD_H + CARD_GAP + CARD_FOOT_H;
   const m = cardRowMetrics(model.rows.length, { chrome, base: CARD_ROW_H });
   const { canvas, ctx } = cardCanvas(m.contentHeight);
   drawCardHeader(ctx, model.league, model.headline);
-  let y = CARD_HEAD_H + CARD_GAP;
-  drawCardHero(ctx, y, model);
-  y += CARD_HERO_H + CARD_GAP;
-  if (model.podium.length) {
-    drawCardPodium(ctx, y, model.podium);
-    y += podiumHeight(model.podium) + CARD_GAP;
-  }
-  drawCardTableHead(ctx, y);
-  y += CARD_TABLE_HEAD_H;
+  const y = CARD_HEAD_H + CARD_GAP + CARD_HERO_H + CARD_GAP;
+  const top = y + CARD_TABLE_HEAD_H;
+  drawCardHero(ctx, CARD_HEAD_H + CARD_GAP, model);
+  drawCardTableColumns(ctx, y, m, model.rows.length);
   model.rows.forEach((row, index) => {
-    const top = y + index * m.rowH;
-    const mid = top + (m.rowH - 10) / 2;
+    const slot = cardSlot(index, m);
+    const rowTop = top + slot.row * m.rowH;
+    const mid = rowTop + (m.rowH - 10) / 2;
     const baseline = mid + m.points / 3;
-    drawCardRowPlate(ctx, top, m.rowH, index, row.place);
+    drawCardRowPlate(ctx, rowTop, m.rowH, slot.row, row.place, slot.box);
     ctx.textAlign = "center";
     ctx.fillStyle = row.place ? CARD.gold : CARD.muted;
     ctx.font = cardFont(900, m.number);
-    ctx.fillText(String(row.rank), CARD_COL.rank, baseline);
+    ctx.fillText(String(row.rank), slot.cols.rank, baseline);
     ctx.textAlign = "left";
-    drawFitted(ctx, row.nick, CARD_COL.name, baseline, 500,
-      { max: m.name, min: Math.min(24, m.name) });
+    const room = slot.cols.exact - slot.cols.name - (row.place ? 20 : 16);
+    drawFitted(ctx, row.nick, slot.cols.name, baseline, room,
+      { max: m.name, min: Math.min(CARD_TYPE_FLOOR, m.name) });
     ctx.textAlign = "right";
     ctx.fillStyle = CARD.muted;
-    ctx.font = cardFont(800, m.number);
-    ctx.fillText(String(row.exact), CARD_COL.exact, baseline);
+    ctx.font = cardFont(800, m.second);
+    ctx.fillText(String(row.exact), slot.cols.exact, baseline);
     ctx.fillStyle = CARD.ink;
     ctx.font = cardFont(900, m.points);
-    ctx.fillText(String(row.pts), CARD_COL.pts, baseline);
+    ctx.fillText(String(row.pts), slot.cols.pts, baseline);
     ctx.textAlign = "center";
-    // The medal sits at the right edge, so the three that matter are findable
-    // down one side without reading a single name.
+    // The medal sits at the right edge of its own column, so the three that
+    // matter are findable down one side without reading a single name.
     if (row.place) {
-      ctx.font = cardFont(900, m.points);
-      ctx.fillText(PLACE_EMOJI[row.place], CARD_COL.medal, baseline);
+      ctx.font = cardFont(900, m.second);
+      ctx.fillText(PLACE_EMOJI[row.place], slot.cols.medal, baseline);
     }
     ctx.textAlign = "left";
   });
-  y += model.rows.length * m.rowH + CARD_GAP;
-  drawCardFooter(ctx, y, model);
+  drawCardFooter(ctx, top + m.perColumn * m.rowH + CARD_GAP, model);
   return canvas;
 }
 
@@ -4644,46 +4685,70 @@ function seasonCardModel(state) {
   };
 }
 
+/**
+ * Where an inline tally goes, and how big it is: as far right as it can sit
+ * while leaving the exact column its own space, shrinking to the floor before
+ * it crowds the name.
+ *
+ * A season's honours reach two digits, and three two-digit counts in a narrow
+ * column will not fit beside a full-width name at any size. Honours are never
+ * dropped, so in that case the NAME gives way — a name can be cut and still be
+ * recognised; a tally cut in half is a wrong number.
+ */
+function cardHonoursFit(ctx, cols, counts, m) {
+  const right = cols.exact - Math.round(m.second * 2);
+  const room = right - (cols.name + CARD_MIN_NAME + 12);
+  let size = m.honoursSize;
+  let width = cardHonoursWidth(ctx, counts, size);
+  while (size > CARD_SECOND_FLOOR && width > room) {
+    size -= 1;
+    width = cardHonoursWidth(ctx, counts, size);
+  }
+  return { size, width, x: Math.max(cols.name + 24, right - width) };
+}
+
 function drawSeasonTableCard(state) {
   const model = seasonCardModel(state);
   const chrome = CARD_HEAD_H + CARD_GAP + CARD_TABLE_HEAD_H + CARD_GAP + CARD_FOOT_H;
   const m = cardRowMetrics(model.rows.length, { chrome, base: CARD_SEASON_ROW_H });
   const { canvas, ctx } = cardCanvas(m.contentHeight);
   drawCardHeader(ctx, model.league, model.headline);
-  let y = CARD_HEAD_H + CARD_GAP;
-  drawCardTableHead(ctx, y);
-  y += CARD_TABLE_HEAD_H;
+  const y = CARD_HEAD_H + CARD_GAP;
+  const top = y + CARD_TABLE_HEAD_H;
+  drawCardTableColumns(ctx, y, m, model.rows.length);
   model.rows.forEach((row, index) => {
-    const top = y + index * m.rowH;
-    const mid = top + (m.rowH - 10) / 2;
-    drawCardRowPlate(ctx, top, m.rowH, index, null);
+    const slot = cardSlot(index, m);
+    const rowTop = top + slot.row * m.rowH;
+    const mid = rowTop + (m.rowH - 10) / 2;
+    drawCardRowPlate(ctx, rowTop, m.rowH, slot.row, null, slot.box);
     ctx.textAlign = "center";
     ctx.fillStyle = CARD.muted;
     ctx.font = cardFont(900, m.number);
-    ctx.fillText(String(row.rank), CARD_COL.rank, mid + (m.honoursLine ? 4 : m.number / 3));
+    ctx.fillText(String(row.rank), slot.cols.rank, mid + (m.honoursLine ? 4 : m.number / 3));
     ctx.textAlign = "left";
-    const nameWidth = m.honoursLine ? 500 : 300;
-    drawFitted(ctx, row.nick, CARD_COL.name, mid + (m.honoursLine ? -4 : m.name / 3), nameWidth,
-      { max: m.name, min: Math.min(24, m.name) });
     // Present at every size: a second line when the row is tall enough, an
-    // inline tally beside the name when it is not.
-    if (m.honoursLine) {
-      drawCardHonours(ctx, CARD_COL.name, mid + 30, row.honours, { size: m.honoursSize });
+    // inline tally beside the name when it is not. Sharing a baseline means
+    // the tally is MEASURED and placed clear of the exact column — running a
+    // bronze count into an exact count reads as a single wrong number.
+    const fit = m.honoursLine ? null : cardHonoursFit(ctx, slot.cols, row.honours, m);
+    const nameWidth = fit ? fit.x - slot.cols.name - 12 : slot.cols.exact - slot.cols.name - 16;
+    drawFitted(ctx, row.nick, slot.cols.name, mid + (m.honoursLine ? m.nameDy : m.name / 3), nameWidth,
+      { max: m.name, min: Math.min(CARD_TYPE_FLOOR, m.name) });
+    if (fit) {
+      drawCardHonours(ctx, fit.x, mid + m.name / 3, row.honours, { size: fit.size });
     } else {
-      drawCardHonours(ctx, CARD_COL.name + nameWidth + 16, mid + m.name / 3, row.honours,
-        { size: m.honoursSize });
+      drawCardHonours(ctx, slot.cols.name, mid + m.honoursDy, row.honours, { size: m.honoursSize });
     }
     ctx.textAlign = "right";
     ctx.fillStyle = CARD.muted;
-    ctx.font = cardFont(800, m.number);
-    ctx.fillText(String(row.exact), CARD_COL.exact, mid + (m.honoursLine ? 4 : m.number / 3));
+    ctx.font = cardFont(800, m.second);
+    ctx.fillText(String(row.exact), slot.cols.exact, mid + (m.honoursLine ? 4 : m.second / 3));
     ctx.fillStyle = CARD.ink;
     ctx.font = cardFont(900, m.points);
-    ctx.fillText(String(row.pts), CARD_COL.pts, mid + (m.honoursLine ? 5 : m.points / 3));
+    ctx.fillText(String(row.pts), slot.cols.pts, mid + (m.honoursLine ? 5 : m.points / 3));
     ctx.textAlign = "left";
   });
-  y += model.rows.length * m.rowH + CARD_GAP;
-  drawCardFooter(ctx, y, model);
+  drawCardFooter(ctx, top + m.perColumn * m.rowH + CARD_GAP, model);
   return canvas;
 }
 

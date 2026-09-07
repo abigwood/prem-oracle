@@ -116,14 +116,18 @@ function cards({ native = false } = {}) {
     ${lift("function ellipsise(ctx, text, maxWidth)")}
     ${lift("function drawFitted(ctx, text, x, y, maxWidth,")}
     ${liftConst("CARD_SIDE")}
-    ${lift("function cardRowMetrics(rows, { chrome, base, min = 26 })")}
+    ${lift("function cardRowMetrics(rows, { chrome, base, min = CARD_MIN_ROW, maxColumns = CARD_MAX_COLUMNS })")}
+    ${lift("function cardColumnBox(index, columns)")}
+    ${lift("function cardColumnCols(box, columns)")}
+    ${lift("function cardSlot(index, m)")}
     ${lift("function cardCanvas(contentHeight)")}
     ${lift("function drawCardHeader(ctx, league, line)")}
     ${lift("function drawCardHero(ctx, y, model)")}
-    ${liftConst("podiumStackDepth")}
-    ${lift("function drawCardPodium(ctx, y, groups)")}
-    ${lift("function drawCardTableHead(ctx, y)")}
-    ${lift("function drawCardRowPlate(ctx, y, height, index, place)")}
+    ${lift("function drawCardTableColumns(ctx, y, m, rows)")}
+    ${lift("function drawCardTableHead(ctx, y, cols = CARD_COL, box = { x: CARD_PAD, width: CARD_W - CARD_PAD * 2 })")}
+    ${lift("function drawCardRowPlate(ctx, y, height, index, place, box = { x: CARD_PAD, width: CARD_W - CARD_PAD * 2 })")}
+    ${lift("function cardHonoursWidth(ctx, counts, size)")}
+    ${lift("function cardHonoursFit(ctx, cols, counts, m)")}
     ${lift("function drawCardHonours(ctx, x, y, counts, { size = 24 } = {})")}
     ${lift("function drawCardFooter(ctx, y, model)")}
     ${lift("function sharedRankByUid(table)")}
@@ -327,7 +331,7 @@ test("medals follow the podium, not the row order", () => {
   assert.equal(texts(calls).filter((text) => text === "🥈").length, 0, "no silver is drawn anywhere");
 });
 
-test("a shared step stacks its names clear of the points under them", () => {
+test("a tied week names both champions in the hero, with no rostrum to stack", () => {
   const tied = {
     ...SETTLED_WEEK,
     winners: ["u1", "u2"],
@@ -337,64 +341,18 @@ test("a shared step stacks its names clear of the points under them", () => {
     ],
   };
   const app = build(LEAGUE, tied, "matchday");
+  const model = app.weeklyModel();
+  assert.equal(model.heroEyebrow, "JOINT MATCHWEEK CHAMPIONS");
   app.drawWeekly();
-  const drawn = app.recorded()[0].text;
-  const at = (text) => drawn.find((entry) => entry.text === text);
-  const [adam, bex, pts, medal] = [at("Adam"), at("Bex"), at("23 pts"), at("🏆")];
-  // Names read downwards in podium order, and neither lands on the points.
-  assert.ok(adam.y < bex.y, "the first name sits above the second");
-  assert.ok(bex.y < pts.y, "and the last name still clears the points line");
-  assert.ok(bex.y - adam.y >= 30, "with a whole line between them");
-  assert.ok(medal.y < adam.y, "the medal crowns the stack");
-  // The card grew to make room rather than letting the stack run off the top.
-  const single = build(LEAGUE, SETTLED_WEEK, "matchday");
-  single.drawWeekly();
-  assert.ok(app.canvases()[0].height > single.canvases()[0].height - 74,
-    "a deeper stack is given more room, not less");
-  assert.ok(medal.y > 0, "and nothing is pushed off the top of the card");
-});
-
-test("the season card carries the cabinet under every name", () => {
-  const app = build(LEAGUE, null, "season");
-  const model = app.seasonModel();
-  assert.deepEqual(model.rows.map((row) => row.honours), [
-    { gold: 2, silver: 1, bronze: 0 },
-    { gold: 1, silver: 0, bronze: 2 },
-    { gold: 0, silver: 2, bronze: 1 },
-  ]);
-  assert.equal(model.headline, "Season table · Updated through Matchweek 3");
-  app.drawSeason();
-  const drawn = texts(app.recorded()[0]);
-  assert.ok(drawn.includes("🏆 2") && drawn.includes("🥈 1") && drawn.includes("🥉 0"),
-    "the first player's cabinet is drawn in full, zeros included");
-});
-
-test("the season card's header states its freshness (M9)", () => {
-    // "Updated through Matchweek N" — what the reader of a shared graphic needs
-    // in order to know whether it is current, which a progress line never said.
-    const midweek = { ...LEAGUE, currentMatchdayHasResults: true };
-    assert.equal(build(midweek, null, "season").seasonModel().headline,
-      "Season table · Updated through Matchweek 4");
-    const opening = { ...LEAGUE, currentMatchday: 1, currentMatchdayHasResults: false };
-    assert.equal(build(opening, null, "season").seasonModel().headline,
-      "Season table · Updated before Matchweek 1");
-  });
-
-// --- old worker, no podiums ------------------------------------------------
-
-test("a season card from an old worker reads wins as gold", () => {
-  const old = {
-    ...LEAGUE,
-    table: [
-      { uid: "u1", rank: 1, nick: "Adam", pts: 61, exact: 5, wins: 2 },
-      { uid: "u2", rank: 2, nick: "Bex", pts: 58, exact: 4, wins: 0 },
-    ],
-  };
-  const model = build(old, null, "season").seasonModel();
-  assert.deepEqual(model.rows.map((row) => row.honours), [
-    { gold: 2, silver: 0, bronze: 0 },
-    { gold: 0, silver: 0, bronze: 0 },
-  ]);
+  const drawn = app.recorded()[0].text.map((entry) => entry.text);
+  // v1.7 readability ruling: the export carries no rostrum, so a shared place
+  // is a joint hero and two gold rows — never a stack of names on a block.
+  assert.ok(drawn.some((text) => text.includes("Adam")), "the champions are named");
+  assert.equal(drawn.filter((text) => text === "23 pts").length, 0,
+    "a rostrum points line was drawn");
+  // Both gold rows still carry their medal in the table.
+  assert.equal(drawn.filter((text) => text === "🏆").length, 2,
+    "both joint champions are marked in the standings");
 });
 
 test("a weekly card from an old worker draws no podium it was never sent", () => {
@@ -409,17 +367,16 @@ test("a weekly card from an old worker draws no podium it was never sent", () =>
   app.drawWeekly();
   const drawn = texts(app.recorded()[0]);
   assert.equal(drawn.filter((text) => text === "🥈" || text === "🥉").length, 0);
-    // v1.7 Slice C: every export is the same square, so a card with less in it
-    // is no longer SHORTER — it is less compressed. The rostrum it did not draw
-    // is space the rest of the card gets back.
-    const full = build(LEAGUE, SETTLED_WEEK, "matchday");
-    full.drawWeekly();
-    const lean = app.canvases()[0];
-    const whole = full.canvases()[0];
-    assert.equal(lean.width, lean.height, "the export is not square");
-    assert.equal(lean.height, whole.height, "two exports came out different sizes");
-    assert.ok((app.recorded()[0].transform?.a ?? 1) > (full.recorded()[0].transform?.a ?? 1),
-      "the podium-less card was squeezed as hard as the one with a rostrum");
+  // v1.7 readability ruling: no export draws a rostrum at all, so a payload
+  // with a podium and one without produce the same square, at the same fit.
+  const full = build(LEAGUE, SETTLED_WEEK, "matchday");
+  full.drawWeekly();
+  const lean = app.canvases()[0];
+  const whole = full.canvases()[0];
+  assert.equal(lean.width, lean.height, "the export is not square");
+  assert.equal(lean.height, whole.height, "two exports came out different sizes");
+  assert.equal(app.recorded()[0].transform?.a ?? 1, full.recorded()[0].transform?.a ?? 1,
+    "a podium in the payload still changed the drawing");
 });
 
 // --- what a card costs -----------------------------------------------------

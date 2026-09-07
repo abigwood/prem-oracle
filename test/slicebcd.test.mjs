@@ -450,13 +450,15 @@ test("D8 · a 30-member season card is built without truncation", () => {
 // --- Sol's Slice C corrections, executed ------------------------------------
 
 const CARD_NAMES = ["CARD_SIDE", "CARD_W", "CARD_HEAD_H", "CARD_HERO_H", "CARD_TABLE_HEAD_H",
-  "CARD_ROW_H", "CARD_SEASON_ROW_H", "CARD_FOOT_H", "CARD_GAP", "CARD_PODIUM_H",
-  "CARD_PODIUM_STACK", "cardRowMetrics", "cardCanvas", "podiumHeight", "podiumStackDepth",
+  "CARD_ROW_H", "CARD_SEASON_ROW_H", "CARD_FOOT_H", "CARD_GAP", "cardRowMetrics", "cardCanvas",
   "seasonCardModel", "weeklyCardModel", "weeklyShareStatus", "weeklyTerminalCount",
   "weeklyFinalMismatchLines", "noteWeeklyFinalMismatch", "seasonShareFreshness", "weeklySharePublished", "shareCardState",
   "weeklyCardCaption", "podiumCounts", "weeklyRanks", "sharedRankByUid", "winnerNames",
   "finalScore", "isVoidFixture", "isPostponed", "VOID_STATUSES",
-  "CARD", "CARD_PAD", "CARD_BLOCK", "CARD_PODIUM", "cardFont", "cardDate", "sentenceCase",
+  "CARD", "CARD_PAD", "cardFont", "cardDate", "sentenceCase",
+  "CARD_TYPE_FLOOR", "CARD_SECOND_FLOOR", "CARD_MIN_ROW", "CARD_MIN_NAME",
+  "CARD_MAX_COLUMNS", "CARD_COL_GAP", "cardColumnBox", "cardColumnCols", "cardSlot",
+  "drawCardTableColumns", "cardHonoursWidth", "cardHonoursFit", 
   "CARD_COL", "drawSeasonTableCard", "drawWeeklyResultCard"];
 
 /** A canvas that records only what a geometry check needs. */
@@ -492,7 +494,7 @@ function cardBox(overrides = {}) {
     PLACE_EMOJI: { gold: "1", silver: "2", bronze: "3" },
     fitText: (ctx, text, max, font) => { ctx.font = font(30); },
     roundedRect: () => {},
-    drawCardHeader: () => {}, drawCardHero: () => {}, drawCardPodium: () => {},
+    drawCardHeader: () => {}, drawCardHero: () => {},
     drawCardTableHead: () => {}, drawCardRowPlate: () => {}, drawCardHonours: () => {},
     drawCardFooter: () => {}, drawFitted: (ctx, t) => { made.push(String(t)); },
     ellipsise: (ctx, t) => t,

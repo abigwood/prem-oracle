@@ -18,16 +18,19 @@ const OUT = join(process.cwd(), "evidence-pixels");
 const CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 
 const FUNCTIONS = ["roundedRect", "fitText", "ellipsise", "drawFitted", "cardCanvas",
-  "drawCardHeader", "drawCardHero", "drawCardPodium", "drawCardTableHead", "drawCardRowPlate",
-  "drawCardHonours", "drawCardFooter", "cardRowMetrics", "seasonCardModel", "weeklyCardModel",
+  "drawCardHeader", "drawCardHero", "drawCardTableHead", "drawCardRowPlate",
+  "drawCardHonours", "cardHonoursWidth", "cardHonoursFit", "drawCardFooter",
+  "cardRowMetrics", "seasonCardModel", "weeklyCardModel",
   "weeklyShareStatus", "weeklyTerminalCount", "weeklySharePublished", "podiumCounts",
   "sharedRankByUid", "winnerNames", "seasonShareFreshness", "drawSeasonTableCard",
+  "drawCardTableColumns", "cardColumnBox", "cardColumnCols", "cardSlot",
   "drawWeeklyResultCard", "finalScore", "weeklyCardCaption", "noteWeeklyFinalMismatch"];
-const CONSTS = ["CARD_W", "CARD_SIDE", "CARD_PAD", "CARD", "CARD_BLOCK", "CARD_PODIUM", "CARD_COL",
+const CONSTS = ["CARD_W", "CARD_SIDE", "CARD_PAD", "CARD", "CARD_COL",
   "CARD_HEAD_H", "CARD_HERO_H", "CARD_TABLE_HEAD_H", "CARD_ROW_H", "CARD_SEASON_ROW_H",
-  "CARD_FOOT_H", "CARD_GAP", "CARD_PODIUM_H", "CARD_PODIUM_STACK", "cardFont", "cardDate",
-  "sentenceCase", "weeklyRanks", "podiumHeight", "podiumStackDepth", "VOID_STATUSES",
-  "isVoidFixture", "isPostponed",
+  "CARD_FOOT_H", "CARD_GAP", "cardFont", "cardDate",
+  "sentenceCase", "weeklyRanks", "VOID_STATUSES", "isVoidFixture", "isPostponed",
+  "CARD_TYPE_FLOOR", "CARD_SECOND_FLOOR", "CARD_MIN_ROW", "CARD_MIN_NAME",
+  "CARD_MAX_COLUMNS", "CARD_COL_GAP",
   "PLACE_NUMBER", "PLACE_EMOJI"];
 
 const lifted = [
@@ -53,6 +56,7 @@ const six = (settled, voided) => Array.from({ length: 6 }, (_, i) => ({
   id: "w-" + i,
   ...(i < settled ? { settled: true } : i < settled + (voided || 0) ? { voided: true } : {}),
 }));
+let HEAVY = false;
 const league = { code: "CGALPR", name: "Sunday Six", owner: "u1" };
 const week = (n, entries, over) => ({
   code: "CGALPR", matchday: n, period: String(n), complete: false,
@@ -62,25 +66,43 @@ const week = (n, entries, over) => ({
 const players = (n) => Array.from({ length: n }, (_, i) => ({
   uid: "u" + i, rank: i + 1, nick: ["Adam","Bex","Cal","Dev","Eli","Fay","Gus","Hal","Ivy","Jo",
     "Kit","Lou","Mac","Nia","Oz","Pip","Quin","Rae","Sol","Tam","Uma","Vic","Wes","Xan","Yaz",
-    "Zed","Ash","Bo","Cleo","Dax"][i] || ("Player " + (i + 1)),
+    "Zed","Ash","Bo","Cleo","Dax","Eve","Finn","Gil","Hux","Iris","Jax","Kaya","Loz","Moss",
+    "Nell"][i] || ("Player " + (i + 1)),
   pts: 92 - i * 3, exact: (i * 2) % 5,
-  podiums: { gold: i % 3, silver: (i + 1) % 3, bronze: (i + 2) % 3 },
+  podiums: HEAVY
+    ? { gold: 12 - (i % 3), silver: 10 + (i % 4), bronze: 11 + (i % 2) }
+    : { gold: i % 3, silver: (i + 1) % 3, bronze: (i + 2) % 3 },
 }));
 const seasonState = (n) => ({ ...league, table: players(n), currentMatchday: 8, currentMatchdayHasResults: true });
+const FINAL = (n) => ({ complete: true, table: players(n),
+  podium: [{ uid: "u0", place: "gold", nick: "Adam", pts: 92 },
+           { uid: "u1", place: "silver", nick: "Bex", pts: 89 },
+           { uid: "u2", place: "bronze", nick: "Cal", pts: 86 }] });
 
 const SCENE = {
   "weekly-not-started": () => drawWeeklyResultCard(league,
     week(3, six(0), { table: players(6).map((p) => ({ ...p, pts: 0, exact: 0 })) })),
   "weekly-in-progress-with-void": () => drawWeeklyResultCard(league,
     week(3, six(2, 1), { table: players(6) })),
-  "weekly-final": () => drawWeeklyResultCard(league,
-    week(3, six(5, 1), { complete: true, table: players(6),
-      podium: [{ uid: "u0", place: "gold", nick: "Adam", pts: 92 },
-               { uid: "u1", place: "silver", nick: "Bex", pts: 89 },
-               { uid: "u2", place: "bronze", nick: "Cal", pts: 86 }] })),
-  "season-common": () => drawSeasonTableCard(seasonState(8)),
-  "season-maximum": () => drawSeasonTableCard(seasonState(30)),
+  "weekly-final-6": () => drawWeeklyResultCard(league, week(3, six(5, 1), FINAL(6))),
+  "weekly-final-20": () => drawWeeklyResultCard(league, week(3, six(5, 1), FINAL(20))),
+  "season-common-8": () => drawSeasonTableCard(seasonState(8)),
+  "season-20": () => drawSeasonTableCard(seasonState(20)),
+  "season-30": () => drawSeasonTableCard(seasonState(30)),
+  "season-40-three-columns": () => drawSeasonTableCard(seasonState(40)),
+  "season-30-two-digit-honours": () => {
+    HEAVY = true;
+    const canvas = drawSeasonTableCard(seasonState(30));
+    HEAVY = false;
+    return canvas;
+  },
 };
+const FINAL_MEMBERS = { "weekly-final-6": 6, "weekly-final-20": 20 };
+const WEEKLY_MEMBERS = { "weekly-not-started": 6, "weekly-in-progress-with-void": 6,
+  "weekly-final-6": 6, "weekly-final-20": 20 };
+const SEASON_MEMBERS = { "season-common-8": 8, "season-20": 20, "season-30": 30,
+  "season-40-three-columns": 40, "season-30-two-digit-honours": 30 };
+const HEAVY_SCENES = new Set(["season-30-two-digit-honours"]);
 `;
 
 // --- what the pixels have to say --------------------------------------------
@@ -197,10 +219,12 @@ const place = (contentHeight) => {
   return { k, tx: (CARD_SIDE - CARD_W * k) / 2, ty: (CARD_SIDE - contentHeight * k) / 2 };
 };
 
-function seasonGeometry(n) {
-  const chrome = CARD_HEAD_H + CARD_GAP + CARD_TABLE_HEAD_H + CARD_GAP + CARD_FOOT_H;
-  const m = cardRowMetrics(n, { chrome, base: CARD_SEASON_ROW_H });
-  return { m, top: CARD_HEAD_H + CARD_GAP + CARD_TABLE_HEAD_H, ...place(m.contentHeight) };
+function tableGeometry(expect) {
+  const m = cardRowMetrics(expect.rows, { chrome: expect.chrome, base: expect.base });
+  const head = expect.weekly
+    ? CARD_HEAD_H + CARD_GAP + CARD_HERO_H + CARD_GAP
+    : CARD_HEAD_H + CARD_GAP;
+  return { m, head, top: head + CARD_TABLE_HEAD_H, ...place(m.contentHeight) };
 }
 
 function checkCard(name, canvas, expect) {
@@ -236,36 +260,47 @@ function checkCard(name, canvas, expect) {
   }
 
   if (expect.rows) {
-    const g = seasonGeometry(expect.rows);
-    let withHonours = 0, overlaps = 0;
+    const g = tableGeometry(expect);
+    let withHonours = 0, overlaps = 0, headed = 0, tallyClash = 0;
     const gaps = [];
     for (let i = 0; i < expect.rows; i++) {
-      const top = g.top + i * g.m.rowH;
-      const mid = top + (g.m.rowH - 10) / 2;
-      const nameWidth = g.m.honoursLine ? 500 : 300;
-      const hx = g.m.honoursLine ? CARD_COL.name : CARD_COL.name + nameWidth + 16;
-      const hy = g.m.honoursLine ? mid + 30 : mid + g.m.name / 3;
-      const size = g.m.honoursSize;
-      const X = Math.round(g.tx + g.k * hx);
-      const Y = Math.round(g.ty + g.k * (hy - size));
-      const W = Math.round(g.k * size * 9);
-      const H = Math.round(g.k * (size + 4));
-      if (!flat(ctx, X, Y, W, H)) withHonours++;
+      const slot = cardSlot(i, g.m);
+      const rowTop = g.top + slot.row * g.m.rowH;
+      const mid = rowTop + (g.m.rowH - 10) / 2;
+
+      if (expect.honours) {
+        // Mirrors the drawing code exactly, so a tally that moved would be
+        // found missing rather than quietly measured somewhere else.
+        const counts = expect.heavy
+          ? { gold: 12 - (i % 3), silver: 10 + (i % 4), bronze: 11 + (i % 2) }
+          : { gold: i % 3, silver: (i + 1) % 3, bronze: (i + 2) % 3 };
+        const fit = g.m.honoursLine ? null : cardHonoursFit(ctx, slot.cols, counts, g.m);
+        const hx = fit ? fit.x : slot.cols.name;
+        const hy = g.m.honoursLine ? mid + g.m.honoursDy : mid + g.m.name / 3;
+        const size = fit ? fit.size : g.m.honoursSize;
+        const width = fit ? fit.width : cardHonoursWidth(ctx, counts, size);
+        if (!flat(ctx, Math.round(g.tx + g.k * hx), Math.round(g.ty + g.k * (hy - size)),
+          Math.round(g.k * width), Math.round(g.k * (size + 4)))) withHonours++;
+        // An inline tally shares its baseline with the exact figure, so it
+        // must stop before that figure starts. A tally on its own line passes
+        // harmlessly under it.
+        if (fit && fit.x + fit.width > slot.cols.exact - g.m.second * 1.2) tallyClash++;
+      }
+
       // Overlap is about ink meeting ink. An emoji tail may hang below its own
       // plate — that is a shape, not a collision. What must never happen is one
       // row's marks touching the next row's, so measure the clear pixel lines
       // between the last ink of this row and the first ink of the one below.
-      if (i + 1 < expect.rows) {
-        const band = (rowTop) => {
-          const y0 = Math.round(g.ty + g.k * rowTop) + 1;
-          const y1 = Math.round(g.ty + g.k * (rowTop + g.m.rowH));
-          const x0 = Math.round(g.tx + g.k * (CARD_PAD + 4));
-          const w = Math.max(1, Math.round(g.k * (CARD_W - CARD_PAD * 2 - 8)));
-          const grounds = [bg, pixelAt(ctx, x0, y0 + 1)];
-          const found = inkLines(ctx, x0, y0, w, Math.max(1, y1 - y0), grounds);
+      if (slot.row + 1 < g.m.perColumn && i + 1 < expect.rows) {
+        const band = (bandTop) => {
+          const y0 = Math.round(g.ty + g.k * bandTop) + 1;
+          const y1 = Math.round(g.ty + g.k * (bandTop + g.m.rowH));
+          const x0 = Math.round(g.tx + g.k * (slot.box.x + 4));
+          const w = Math.max(1, Math.round(g.k * (slot.box.width - 8)));
+          const found = inkLines(ctx, x0, y0, w, Math.max(1, y1 - y0), [bg, pixelAt(ctx, x0, y0 + 1)]);
           return { y0, first: found.first, last: found.last };
         };
-        const here = band(top), next = band(top + g.m.rowH);
+        const here = band(rowTop), next = band(rowTop + g.m.rowH);
         const clear = here.last == null || next.first == null
           ? 99
           : (next.y0 + next.first) - (here.y0 + here.last) - 1;
@@ -273,13 +308,50 @@ function checkCard(name, canvas, expect) {
         gaps.push(clear);
       }
     }
-    ok("honours are painted on EVERY row", withHonours === expect.rows,
-      withHonours + " of " + expect.rows + " rows carry a tally");
+
+    // A continued table repeats its headings, so the right-hand list reads as
+    // more of the same table rather than a different one.
+    for (let column = 0; column < g.m.columns; column += 1) {
+      const box = cardColumnBox(column, g.m.columns);
+      if (!flat(ctx, Math.round(g.tx + g.k * box.x), Math.round(g.ty + g.k * (g.head + 8)),
+        Math.round(g.k * box.width), Math.round(g.k * 36))) headed++;
+    }
+    ok("every column carries its own headings", headed === g.m.columns,
+      headed + " of " + g.m.columns + " columns headed");
+
+    if (expect.honours) {
+      ok("no honours tally runs into the exact column", tallyClash === 0, tallyClash + " clashes");
+      ok("honours are painted on EVERY row", withHonours === expect.rows,
+        withHonours + " of " + expect.rows + " rows carry a tally");
+    }
     ok("no row's ink runs into the next row", overlaps === 0,
-      overlaps + " collisions; narrowest clear space between rows " + Math.min(...gaps) + "px");
+      overlaps + " collisions; narrowest clear space between rows " + Math.min(...gaps, 99) + "px");
     ok("the whole table is exported", expect.rows === expect.members,
-      expect.rows + " of " + expect.members + " members");
+      expect.rows + " of " + expect.members + " members in "
+        + g.m.columns + (g.m.columns === 1 ? " column" : " columns of " + g.m.perColumn));
+
+    // Sol's floors, measured after the square transform, not before it.
+    const primary = Math.min(g.m.name, g.m.number, g.m.points) * g.k;
+    const secondary = Math.min(g.m.second, g.m.honoursSize) * g.k;
+    ok("names, ranks and points are at least 18px after the transform", primary >= 18 - 0.01,
+      primary.toFixed(1) + "px");
+    ok("secondary figures and honours are at least 15px after the transform", secondary >= 15 - 0.01,
+      secondary.toFixed(1) + "px");
+    ok("the layout solved the fit — no global shrinking", g.k >= 1,
+      "square fit " + g.k.toFixed(3));
   }
+
+  if (expect.podium === "none") {
+    // The rostrum used to live between the hero and the table head. That band
+    // is a gap now, and a gap is flat.
+    const g = tableGeometry(expect);
+    const y = Math.round(g.ty + g.k * (CARD_HEAD_H + CARD_GAP + CARD_HERO_H + 4));
+    ok("the export carries no rostrum between hero and table",
+      flat(ctx, Math.round(g.tx + g.k * CARD_PAD), y,
+        Math.round(g.k * (CARD_W - CARD_PAD * 2)), Math.max(1, Math.round(g.k * 18))),
+      "hero-to-table band is clear");
+  }
+
   // Measured, not asserted: how small the smallest word on the card ends up
   // once the square fit has scaled the design down.
   if (expect.metrics) {
@@ -294,22 +366,21 @@ function checkCard(name, canvas, expect) {
 try {
   for (const [name, draw] of Object.entries(SCENE)) {
     const canvas = draw();
-    let expect = {};
-    if (name.startsWith("weekly")) {
-      const rounds = { "weekly-not-started": [3, six(0), 0], "weekly-in-progress-with-void": [3, six(2, 1), 6],
-        "weekly-final": [3, six(5, 1), 6] };
-      const podiumH = name === "weekly-final" ? podiumHeight([
-        { place: "gold", entries: [1] }, { place: "silver", entries: [1] }, { place: "bronze", entries: [1] }]) + CARD_GAP : 0;
-      const chrome = CARD_HEAD_H + CARD_GAP + CARD_HERO_H + CARD_GAP + podiumH
-        + CARD_TABLE_HEAD_H + CARD_GAP + CARD_FOOT_H;
-      const m = cardRowMetrics(6, { chrome, base: CARD_ROW_H });
-      expect = { hero: name === "weekly-not-started" ? "bare" : "trophy", contentHeight: m.contentHeight,
-        metrics: { m, k: place(m.contentHeight).k } };
-    } else {
-      const members = name === "season-common" ? 8 : 30;
-      const g = seasonGeometry(members);
-      expect = { rows: members, members, metrics: { m: g.m, k: g.k } };
-    }
+    const members = WEEKLY_MEMBERS[name] ?? SEASON_MEMBERS[name];
+    const weekly = name.startsWith("weekly");
+    const chrome = weekly
+      ? CARD_HEAD_H + CARD_GAP + CARD_HERO_H + CARD_GAP + CARD_TABLE_HEAD_H + CARD_GAP + CARD_FOOT_H
+      : CARD_HEAD_H + CARD_GAP + CARD_TABLE_HEAD_H + CARD_GAP + CARD_FOOT_H;
+    const m = cardRowMetrics(members, { chrome, base: weekly ? CARD_ROW_H : CARD_SEASON_ROW_H });
+    const expect = {
+      rows: members, members, weekly, chrome, base: weekly ? CARD_ROW_H : CARD_SEASON_ROW_H,
+      honours: !weekly,
+      hero: weekly ? (name === "weekly-not-started" ? "bare" : "trophy") : null,
+      contentHeight: m.contentHeight,
+      metrics: { m, k: place(m.contentHeight).k },
+      podium: FINAL_MEMBERS[name] ? "none" : null,
+      heavy: HEAVY_SCENES.has(name),
+    };
     checkCard(name, canvas, expect);
   }
 } catch (error) {

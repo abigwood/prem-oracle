@@ -783,19 +783,26 @@ class CompetitionAppTests(unittest.TestCase):
         # A mixed league names both competitions, not just the first.
         self.assertIn("Prem Oracle ${leagueCompetitionNames(state)} table", self.app)
 
-    def test_matchweek_share_leads_with_the_podium(self):
-        # The shared matchweek is a drawn card now, and it leads with the same
-        # three names, in the same order, as the banner on the League tab.
+    def test_matchweek_share_leads_with_the_champion_not_a_rostrum(self):
+        # The shared matchweek still knows the same three names, in the same
+        # order, as the banner on the League tab — the model is unchanged.
         model = self.app[self.app.index("function weeklyCardModel(state, round)"):]
         model = model[:model.index("\n}")]
         self.assertIn('["gold", "silver", "bronze"]', model)
         self.assertIn("round.podium || []", model)
+        # v1.7 readability ruling: the EXPORT carries the hero and the whole
+        # table, and no rostrum — the block that used to squeeze the standings
+        # into eleven pixels. The on-screen podium is untouched.
         card = self.app[self.app.index("function drawWeeklyResultCard(state, round)"):]
         card = card[:card.index("\n}")]
-        self.assertLess(card.index("drawCardHero"), card.index("drawCardPodium"))
-        self.assertLess(card.index("drawCardPodium"), card.index("drawCardTableHead"))
-        # A worker too old to send a podium has one drawn for it by nobody.
-        self.assertIn("if (model.podium.length) {", card)
+        self.assertLess(card.index("drawCardHero"), card.index("drawCardTableColumns"))
+        self.assertNotIn("drawCardPodium", card)
+        self.assertNotIn("drawCardPodium", self.app)
+        self.assertNotIn("CARD_PODIUM", self.app)
+        # The medals still mark the three that matter, in the standings.
+        self.assertIn("PLACE_EMOJI[row.place]", card)
+        # And the screen keeps its rostrum.
+        self.assertIn('class="podium-block"', self.app)
 
     def test_per_competition_notification_preferences(self):
         self.assertIn('id="notificationPrefs"', self.html)

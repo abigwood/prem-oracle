@@ -1,6 +1,6 @@
 const SEASON_START = new Date("2026-08-21T20:00:00+01:00");
 const SEASON_START_DATE = "2026-08-21";
-const APP_BUILD = "20260823a";
+const APP_BUILD = "20260907a";
 const API = window.PREM_API || null;
 // Canonical public home of the web app. Inside the Capacitor shell the page is
 // served from premoracle://localhost, so location.origin can never be used to
@@ -557,6 +557,22 @@ const WEEK_CONVENTION = `<p class="week-convention">Weeks run Tuesday to Monday.
  * The everyday control: one horizontal strip, centred on the week in play.
  * Weeks already gone are faded and sit to the left; the rest are a swipe right.
  */
+/**
+ * Which chip a strip should open on.
+ *
+ * The week in play, unless the viewer deliberately chose another one this
+ * session and that week is still on the strip. A selection that has gone stale
+ * — a week trimmed from the board, a league that has moved on, a value from
+ * another league entirely — is not a choice any more, so the strip returns to
+ * now rather than opening on a week that is no longer there.
+ */
+function weekAnchorPeriod(periods, selected, current) {
+  const known = new Set(periods.map(String));
+  if (selected != null && known.has(String(selected))) return String(selected);
+  if (current != null && known.has(String(current))) return String(current);
+  return String(periods[0]);
+}
+
 function weekStrip(selected, attribute, only = null) {
   // `only` trims the chips to the weeks actually on the board, so the selector
   // never offers more than the view is showing.
@@ -567,6 +583,10 @@ function weekStrip(selected, attribute, only = null) {
   // matchweek league has an official number that needs no explaining and no
   // date beneath it.
   const windows = isWindowKey(periods[0]);
+  // The chip the strip scrolls to when it opens. Anchoring the CURRENT week
+  // regardless meant a deliberately chosen historic week was marked selected
+  // and then scrolled away from.
+  const anchored = weekAnchorPeriod(periods, selected, current);
   return `${windows ? WEEK_CONVENTION : ""}
     <div class="week-strip${windows ? "" : " week-strip-plain"}" role="group" aria-label="${windows ? "Choose a week" : "Choose a matchweek"}">
       ${periods.map((period) => {
@@ -576,7 +596,7 @@ function weekStrip(selected, attribute, only = null) {
         return `<button type="button"
           class="week-chip${isCurrent ? " is-current" : ""}${isSelected ? " is-selected" : ""}${past ? " is-past" : ""}"
           ${attribute}="${escapeHTML(period)}"
-          ${isCurrent ? 'data-week-anchor="1"' : ""}
+          ${String(period) === anchored ? 'data-week-anchor="1"' : ""}
           aria-current="${isCurrent ? "date" : "false"}">
           <b>${escapeHTML(periodLabel(period))}</b>
           ${windows ? `<em>${escapeHTML(weekDateRange(period))}</em>` : ""}
@@ -1151,7 +1171,14 @@ function setActiveLeague(code, refresh = true) {
   // this league" — must not follow you onto the next one, where it reads as
   // that league's name. Only on a real switch, so a flash set for the league
   // you are already on survives.
-  if (next !== activeLeague) clearFlash();
+  if (next !== activeLeague) {
+    clearFlash();
+    // Matchweek and My Picks each expand one card at a time. Two leagues can
+    // publish the very same fixture, so an id left open under the old league
+    // would silently reopen under the new one's name.
+    expandedFixtureId = null;
+    expandedPickId = null;
+  }
   activeLeague = next;
   selectedPeriod = null;
   roundState = null;
@@ -1447,12 +1474,19 @@ const RESULT_FIRST_STATES = ["completed", "completed-no-pick", "started-unsettle
 const isSettledCard = (match, pick = picks[match?.id]) =>
   RESULT_FIRST_STATES.includes(resultState(match, pick));
 
-/** The status badge: the one piece of chrome that survives full time. */
-function resultBadge(state) {
+/**
+ * The status badge: the one piece of chrome that survives full time.
+ *
+ * `match` is optional and used only to tell a POSTPONED fixture from a voided
+ * one. They share a result state — neither scores — but they are not the same
+ * news, and the Matchweek row already says which is which.
+ */
+function resultBadge(state, match = null) {
   if (state === "completed" || state === "completed-no-pick")
     return `<span class="result-badge" role="status">FINAL</span>`;
   if (state === "void")
-    return `<span class="result-badge result-badge-void" role="status">VOID</span>`;
+    return `<span class="result-badge result-badge-void" role="status">${
+      isPostponed(match) ? "POSTPONED" : "VOID"}</span>`;
   return `<span class="result-badge result-badge-pending" role="status">IN PLAY</span>`;
 }
 
@@ -1463,10 +1497,12 @@ function resultBadge(state) {
 function resultPickLine(match, state, pick) {
   if (state === "completed-no-pick")
     return `<p class="result-pick result-pick-empty">No pick made · 0 points</p>`;
-  if (state === "void")
+  if (state === "void") {
+    const word = isPostponed(match) ? "Postponed" : "Void";
     return `<p class="result-pick">${pick
-      ? `Your pick ${pick.p1}-${pick.p2} · Void — no points`
-      : "Void — no points"}</p>`;
+      ? `Your pick ${pick.p1}-${pick.p2} · ${word} — no points`
+      : `${word} — no points`}</p>`;
+  }
   if (state === "started-unsettled")
     return `<p class="result-pick">${pick
       ? `Your pick ${pick.p1}-${pick.p2} · Awaiting final score`
@@ -1482,7 +1518,12 @@ function resultPickLine(match, state, pick) {
  * no score picker. The reveal section stays, because seeing what everybody else
  * said is the reason to open a settled card at all (D3, R3).
  */
-function resultCard(match, reveal = null) {
+/**
+ * `social: false` suppresses the mates section entirely. My Picks is the
+ * personal surface (B10): it answers "what did I predict and what did it
+ * score", and the comparison belongs on Matchweek.
+ */
+function resultCard(match, reveal = null, { social = true } = {}) {
   const pick = picks[match.id];
   const state = resultState(match, pick);
   const actual = finalScore(match);
@@ -1495,7 +1536,7 @@ function resultCard(match, reveal = null) {
   return `<article class="match-card result-card" data-match-card="${match.id}" data-result-state="${state}">
     <div class="result-head">
       <span class="tour-badge">Matchweek ${match.matchday}</span>
-      ${resultBadge(state)}
+      ${resultBadge(state, match)}
     </div>
     <div class="result-score" role="group" aria-label="${escapeHTML(label)}">
       <div class="result-team">${teamBadge(match.player1)}<span class="player-name">${escapeHTML(match.player1)}</span></div>
@@ -1503,7 +1544,7 @@ function resultCard(match, reveal = null) {
       <div class="result-team">${teamBadge(match.player2)}<span class="player-name">${escapeHTML(match.player2)}</span></div>
     </div>
     ${resultPickLine(match, state, pick)}
-    ${reveal ? pickRevealSection(match, reveal) : fixtureRevealSection(match)}
+    ${!social ? "" : reveal ? pickRevealSection(match, reveal) : fixtureRevealSection(match)}
   </article>`;
 }
 
@@ -1719,8 +1760,8 @@ function scorePicker(match, open) {
   </div>`;
 }
 
-function matchCard(match, { resultFirst = false, reveal = null } = {}) {
-  if (resultFirst && isSettledCard(match)) return resultCard(match, reveal);
+function matchCard(match, { resultFirst = false, reveal = null, social = true } = {}) {
+  if (resultFirst && isSettledCard(match)) return resultCard(match, reveal, { social });
   const pick = picks[match.id];
   const open = matchOpen(match);
   const calendar = calendarLink(match);
@@ -1743,7 +1784,7 @@ function matchCard(match, { resultFirst = false, reveal = null } = {}) {
       ${pick ? pickStatus(match, pick, open) : ""}
       ${scorePicker(match, open)}
     </div>
-    ${reveal ? pickRevealSection(match, reveal) : fixtureRevealSection(match)}
+    ${!social ? "" : reveal ? pickRevealSection(match, reveal) : fixtureRevealSection(match)}
   </article>`;
 }
 
@@ -2057,18 +2098,59 @@ function dayBody(period, matches, open) {
  * the tab unusable. It is built when somebody asks for that fixture, and only
  * for that fixture.
  */
+/**
+ * The five states a Matchweek row can be in, and the ONE line each of them is
+ * allowed to say. They come from the fixture and the server's own result — the
+ * client never decides that something has finished, and never scores a game
+ * that has not settled (B6, B9).
+ */
+function matchweekRowState(fixture) {
+  if (isPostponed(fixture)) return "postponed";
+  if (isVoidFixture(fixture)) return "void";
+  if (finalScore(fixture)) return "settled";
+  const kickoff = Date.parse(fixture?.startAt || "");
+  if (Number.isFinite(kickoff) && Date.now() >= kickoff) return "in-progress";
+  // LOCKED is the window between the lock boundary and kick-off. It uses the
+  // same boundary the reveal gate uses (lockAt, falling back to kick-off), so
+  // a row cannot call itself open while mates are already being revealed.
+  const lock = clientLockMs(fixture);
+  if (Number.isFinite(lock) && Date.now() >= lock) return "locked";
+  return matchOpen(fixture) ? "open" : "locked";
+}
+
+const MATCHWEEK_ROW_LINE = {
+  open: "Open · edit until kick-off",
+  locked: "Locked · mates revealed at kick-off",
+  // Never a provisional score of our own: the round is running, and only the
+  // server may award points, once it settles.
+  "in-progress": "In progress · points pending settlement",
+  settled: "Final",
+  void: "Void — no points",
+  postponed: "Postponed — no points",
+};
+
+function matchweekRowMark(fixture, state) {
+  const actual = finalScore(fixture);
+  if (state === "settled" && actual) {
+    return `<span class="fixture-row-final">${actual[0]}<span class="result-sep">–</span>${actual[1]}</span>`;
+  }
+  const picked = picks[String(fixture.id)];
+  return `<span class="fixture-row-mark">${picked ? `${picked.p1}-${picked.p2}` : ""}</span>`;
+}
+
 function fixtureRow(fixture) {
   const id = String(fixture.id);
   const open = expandedFixtureId === id;
   const kickoff = fixture.startAt ? shortKickoff(fixture.startAt) : "";
-  const picked = picks[id];
-  return `<div class="fixture-row${open ? " is-open" : ""}" data-fixture-row="${escapeHTML(id)}">
+  const state = matchweekRowState(fixture);
+  return `<div class="fixture-row fixture-row-${state}${open ? " is-open" : ""}" data-fixture-row="${escapeHTML(id)}" data-row-state="${state}">
     <button type="button" class="fixture-row-head" data-expand-fixture="${escapeHTML(id)}"
       aria-expanded="${open ? "true" : "false"}" aria-controls="fx-${escapeHTML(id)}">
       <span class="fixture-row-when">${escapeHTML(kickoff)}</span>
       <span class="fixture-row-teams">${escapeHTML(fixture.player1)} v ${escapeHTML(fixture.player2)}</span>
-      <span class="fixture-row-mark">${picked ? `${picked.p1}-${picked.p2}` : ""}</span>
+      ${matchweekRowMark(fixture, state)}
     </button>
+    <p class="fixture-row-state">${escapeHTML(MATCHWEEK_ROW_LINE[state])}</p>
     <div class="fixture-row-body" id="fx-${escapeHTML(id)}">${open ? matchCard(fixture, { resultFirst: true }) : ""}</div>
   </div>`;
 }
@@ -2363,6 +2445,12 @@ function todayView() {
 }
 
 /**
+ * The former Schedule surface. RETAINED, NOT REACHED: no player route renders
+ * any of it since Matchweek replaced the season browser (M8). It is kept whole
+ * so Slice A can be reverted by pointing one entry in `views` back at
+ * scheduleView, and it is deliberately not wired to anything — if the direction
+ * survives the soak, this block is what Slice B deletes.
+ *
  * Schedule: opens on the current week and keeps every future week COLLAPSED but
  * expandable. Nothing is ever hidden — a week the host has not published yet is
  * still a week the league can see coming.
@@ -2433,6 +2521,199 @@ function scheduleView() {
 const scheduleMore = (hidden) => (hidden > 0
   ? `<button class="secondary wide" type="button" data-full-season>Show full season<span class="muted-count"> · ${hidden} more ${hidden === 1 ? "week" : "weeks"}</span></button>`
   : "");
+
+// --- Matchweek (v1.7 Slice A · M1, M2, M4, M8) -----------------------------
+//
+// Schedule was a season browser that could be scoped to your leagues. Matchweek
+// is the opposite: the selected league's CURRENT published slate, and nothing
+// else. There is no widening control and no fallback, because the fallback was
+// the defect — twenty-two competition fixtures standing in for the six a host
+// actually chose, which is what made the screen feel like a calendar instead of
+// this week's game.
+//
+// The route id, the storage keys and the deep links stay `schedule`. A rename
+// the user can see is not a reason to invalidate an installed client's state.
+
+/**
+ * The state for the league the pill is on — and only that league.
+ *
+ * `leagueState` is a global that a slower request can still be holding for a
+ * league the viewer has already left, so it is never trusted on its own: the
+ * code has to match the selection before anything drawn from it reaches the
+ * screen. hydrateCachedLeague() already nulls it on a switch; this is the
+ * second, independent check, because "the wrong league's fixtures" is the one
+ * failure this screen must not have.
+ */
+function matchweekLeagueState() {
+  if (!activeLeague) return null;
+  const live = leagueState && !leagueState.error && leagueState.code === activeLeague
+    ? leagueState : null;
+  const cached = leagueStates[activeLeague];
+  const state = live || (cached && !cached.error ? cached : null);
+  return state && state.code === activeLeague ? state : null;
+}
+
+/** The name to show while a league is still loading, from what we already hold. */
+const matchweekLeagueName = (state = null) =>
+  state?.name || leagueNames[activeLeague] || "";
+
+/**
+ * The selected league's current published slate, keyed by league AND period.
+ *
+ * A slate for a different period is a different question, so it is refused
+ * rather than shown under this week's heading — the worker only reports a
+ * published slate here, never a draft.
+ */
+function matchweekSlate(state = matchweekLeagueState()) {
+  if (!state) return null;
+  const period = state.currentPeriod;
+  const slate = state.currentSlate;
+  if (period == null || !slate) return null;
+  if (String(slate.period ?? slate.matchweek) !== String(period)) return null;
+
+  // NORMALISED: unique ids, in the order the host published them. This list is
+  // the published selection for every purpose on this screen — what is drawn,
+  // and what is counted. A duplicate is a slate defect, not a seventh game, so
+  // it collapses here rather than inflating the number on the header.
+  const ids = [];
+  const seen = new Set();
+  for (const raw of slate.fixtureIds || []) {
+    const id = String(raw);
+    if (seen.has(id)) continue;
+    seen.add(id);
+    ids.push(id);
+  }
+  if (!ids.length) return null;
+
+  // The ids ARE the selection. `count` is the worker's own tally of the same
+  // list, so a disagreement means one of them is wrong — and the ids are the
+  // thing we can actually draw, so they win. Advertising the other number
+  // would put a count on screen that no arrangement of rows could satisfy.
+  const declared = Number(slate.count);
+  const mismatch = Number.isFinite(declared) && declared !== ids.length
+    ? { code: state.code, period: String(period), declared, normalised: ids.length }
+    : null;
+  if (mismatch) noteMatchweekCountMismatch(mismatch);
+  return { code: state.code, period, slate, ids, count: ids.length, declared, mismatch };
+}
+
+/**
+ * A slate whose declared count disagrees with the ids it carries is a data
+ * fault worth seeing, but not worth interrupting anybody over: the screen stays
+ * truthful either way. Recorded once per league and week, and carried out in
+ * the diagnostics the profile dialog already copies.
+ */
+let matchweekCountMismatches = new Map();
+function noteMatchweekCountMismatch(mismatch) {
+  const key = `${mismatch.code}|${mismatch.period}`;
+  if (matchweekCountMismatches.has(key)) return;
+  matchweekCountMismatches.set(key, mismatch);
+  // Bounded: this is a diagnostic, not a log.
+  if (matchweekCountMismatches.size > 20) {
+    matchweekCountMismatches.delete(matchweekCountMismatches.keys().next().value);
+  }
+}
+
+const matchweekMismatchLines = () => [...matchweekCountMismatches.values()].map((m) =>
+  `slate count mismatch ${m.code} period ${m.period}: declared ${m.declared}, published ${m.normalised}`);
+
+/**
+ * The published slate as ORDERED SLOTS — one per unique id, in host order.
+ *
+ * Every published id gets a slot whether or not this device can resolve the
+ * fixture behind it. Skipping the unresolvable ones was wrong: it made the
+ * screen show five rows under a heading that said six, and the viewer has no
+ * way to tell a fixture that was never selected from one that failed to load.
+ * A slot that cannot resolve says so, in the position the host put it.
+ *
+ * Nothing is ever substituted from the competition calendar — the slot is the
+ * host's id or it is an admission.
+ */
+function matchweekSlots(plan) {
+  if (!plan) return [];
+  return plan.ids.map((id) => ({ id, fixture: fixtureById(id) }));
+}
+
+const matchweekHead = (name, plan) => {
+  const games = plan
+    ? `${plan.count} selected ${plan.count === 1 ? "game" : "games"}`
+    : "";
+  const label = plan ? periodLabel(plan.period) : "";
+  const sub = [escapeHTML(label), escapeHTML(games)].filter(Boolean).join(" · ");
+  return `<div class="section-head"><div>
+      <span class="eyebrow">${escapeHTML(name || "Your league")}</span>
+      <h2>Matchweek</h2>
+      ${sub ? `<p>${sub}</p>` : ""}
+    </div></div>`;
+};
+
+/**
+ * The selected-league context, kept in view while the list scrolls under it.
+ *
+ * The switcher is the context when there is more than one league. With a single
+ * league there are no pills to offer, so the name itself is the context — the
+ * screen must never be ambiguous about whose week it is showing.
+ */
+function matchweekContext(state) {
+  const pills = leagueSwitcher();
+  const inner = pills
+    || `<div class="matchweek-league"><span class="league-filter-name">${
+      escapeHTML(matchweekLeagueName(state))}</span></div>`;
+  return `<div class="matchweek-context" data-matchweek-context>${inner}</div>`;
+}
+
+/**
+ * The non-negotiable empty state. Exactly these two lines, and ZERO fixture
+ * cards: the whole point is that an unpublished slate does not become a
+ * competition calendar.
+ */
+const matchweekEmpty = () =>
+  `<div class="launch-card"><strong>No league fixtures selected yet.</strong>
+      <p>Your league fixtures will appear here when this week's line-up is published.</p></div>`;
+
+/**
+ * A published fixture this device cannot resolve, in the position the host gave
+ * it. Deliberately inert: no expander, no score controls, nothing that could
+ * take a prediction for a fixture we cannot even name. It is text, so a screen
+ * reader reads it as text rather than announcing an empty control.
+ *
+ * When the fixture data arrives the next paint puts the real row in this exact
+ * slot — the order comes from the slate, so nothing around it moves.
+ */
+const matchweekUnavailable = (id) =>
+  `<div class="fixture-row fixture-row-unavailable" data-matchweek-unavailable="${escapeHTML(String(id))}">
+      <strong>Fixture temporarily unavailable.</strong>
+      <span>Pull to refresh.</span>
+    </div>`;
+
+function matchweekView() {
+  // No league at all: the welcome Next already shows, not a season of fixtures
+  // belonging to nobody.
+  if (!leagueCodes.length) return onboardingState();
+
+  const state = matchweekLeagueState();
+  // Acknowledged, but nothing valid to draw for THIS league yet. The shell is
+  // the honest answer; the league we came from is not.
+  if (!state) {
+    return `${matchweekHead(matchweekLeagueName(), null)}
+      ${matchweekContext(null)}
+      ${pulsingStatus("Loading matchweek…")}`;
+  }
+
+  const plan = matchweekSlate(state);
+  if (!plan) {
+    return `${matchweekHead(state.name, null)}
+      ${matchweekContext(state)}
+      ${matchweekEmpty()}`;
+  }
+
+  const slots = matchweekSlots(plan);
+  return `${matchweekHead(state.name, plan)}
+    ${matchweekContext(state)}
+    <div class="matchweek-list" data-matchweek-list>${
+      slots.map((slot) => (slot.fixture ? fixtureRow(slot.fixture) : matchweekUnavailable(slot.id))).join("")
+    }</div>`;
+}
 
 // --- My Predictions ---------------------------------------------------------
 // One section per league, then everything else. A pick is only ever HIDDEN, and
@@ -2684,37 +2965,152 @@ function pickSection(title, subtitle, groups, contexts, code) {
   </details>`;
 }
 
-function picksView() {
-  const contexts = leaguePickContexts();
-  const hidden = hiddenPickIds(contexts);
-  const visible = visiblePickedFixtures(hidden);
-  const head = `<div class="section-head"><div><span class="eyebrow">${playerName || "Your profile"}</span><h2>My predictions</h2><p>Synced securely when online; cached on this device</p></div></div>
-    <div class="stats-grid stats-grid-single">
-      <div class="stat"><b>${visible.length}</b><span>Picks made</span></div>
-    </div>`;
-  const empty = `<div class="empty"><strong>No picks yet</strong><p>Choose a scoreline on any fixture before kick-off.</p></div>`;
+// --- v1.7 Slice B: My Picks, stripped to one personal job -------------------
+//
+// My Picks used to be a second fixture browser: every league the viewer plays,
+// grouped into foldable weeks, over the union of their line-ups. It answered
+// "what have I ever predicted?" when the only question it is for is "have I
+// predicted this week's games yet?".
+//
+// So it shows the selected league's current published slate and nothing else,
+// in the host's order, one editable row at a time. It shares Matchweek's slate
+// resolution exactly — the same functions, not a second copy — because two
+// screens disagreeing about which fixtures this week contains would be worse
+// than either being wrong on its own.
 
-  // No leagues: the plain week-grouped list, exactly as before.
-  if (!contexts.length) {
-    return `${head}${visible.length ? groupedMatchdays(visible) : empty}`;
+/** Which fixture My Picks has open for editing. One at a time (B5). */
+let expandedPickId = null;
+
+/** N of M complete, where M is the published slot count and N has a score. */
+function pickProgress(slots) {
+  const total = slots.length;
+  const complete = slots.filter((slot) => slot.fixture && picks[slot.fixture.id]).length;
+  return { complete, total };
+}
+
+/**
+ * The lock deadline for the slate, from the fixtures themselves: the earliest
+ * kick-off still ahead. Named honestly — a week whose first game has started is
+ * not "locking soon", it is part-locked.
+ */
+function pickDeadlineLine(slots) {
+  const now = Date.now();
+  const upcoming = slots
+    .map((slot) => slot.fixture)
+    .filter((fixture) => fixture && Date.parse(fixture.startAt || "") > now)
+    .sort((a, b) => Date.parse(a.startAt) - Date.parse(b.startAt))[0];
+  if (!upcoming) return "";
+  return `Locks ${shortKickoff(upcoming.startAt)}`;
+}
+
+/**
+ * One compact row. Closed it is a line; open it is the same line with the score
+ * controls under it — and only while the fixture is still open. After lock the
+ * controls are gone entirely rather than disabled, because a disabled stepper
+ * still reads as something you might be able to press.
+ */
+/**
+ * Editable means the SAME thing on both surfaces: the row Matchweek calls open.
+ * Deciding it separately here let a fixture past its lock boundary still offer
+ * score controls on My Picks while Matchweek already called it locked — two
+ * screens disagreeing about whether you may still change your mind.
+ */
+const pickEditable = (match) => matchweekRowState(match) === "open";
+
+function pickRow(slot, { expanded }) {
+  if (!slot.fixture) return matchweekUnavailable(slot.id);
+  const match = slot.fixture;
+  const id = String(match.id);
+  const pick = picks[id];
+  const state = resultState(match, pick);
+  const open = pickEditable(match);
+  const settled = state === "completed" || state === "completed-no-pick";
+
+  // A settled row is a result first: the score is the hero and the prediction
+  // and its points sit underneath it (B8).
+  if (settled || state === "void" || state === "started-unsettled") {
+    return `<div class="pick-row pick-row-result" data-pick-row="${escapeHTML(id)}" data-result-state="${state}">
+      ${resultCard(match, null, { social: false })}
+    </div>`;
   }
 
-  const claimed = new Set();
-  const sections = contexts.map((league) => {
-    const mine = visible.filter((fixture) => league.lineup.has(String(fixture.id)));
-    mine.forEach((fixture) => claimed.add(String(fixture.id)));
-    const state = leagueState?.code === league.code ? leagueState : leagueStates[league.code];
-    const mixed = (state?.competitions || []).length > 1;
-    return pickSection(league.name, null, pickWeekGroups(mine, mixed), contexts, league.code);
-  }).join("");
+  const mark = pick
+    ? `<span class="pick-row-score">${pick.p1}-${pick.p2}</span>`
+    : `<span class="pick-row-score pick-row-needed">—</span>`;
+  const status = pick ? "Prediction saved" : "Prediction needed";
+  return `<div class="pick-row${expanded ? " is-open" : ""}${pick ? "" : " is-needed"}" data-pick-row="${escapeHTML(id)}">
+    <button type="button" class="pick-row-head" data-expand-pick="${escapeHTML(id)}"
+      aria-expanded="${expanded ? "true" : "false"}" aria-controls="pk-${escapeHTML(id)}">
+      <span class="pick-row-when">${escapeHTML(match.startAt ? shortKickoff(match.startAt) : "")}</span>
+      <span class="pick-row-teams">${escapeHTML(match.player1)} v ${escapeHTML(match.player2)}</span>
+      ${mark}
+    </button>
+    <p class="pick-row-status">${open ? escapeHTML(status) : `Locked · ${escapeHTML(pick ? `your pick ${pick.p1}-${pick.p2}` : "no pick made")}`}</p>
+    <div class="pick-row-body" id="pk-${escapeHTML(id)}">${
+      expanded && open ? scorePicker(match, open) : ""}</div>
+  </div>`;
+}
 
-  // Anything predicted outside every current line-up — solo play lives here.
-  const others = visible.filter((fixture) => !claimed.has(String(fixture.id)));
-  const otherSection = pickSection("Your other predictions",
-    "Not in any of your leagues' line-ups", pickWeekGroups(others, isMixedActive()), contexts, null);
+/**
+ * Mounts one row's score controls and unmounts whichever was open, against the
+ * live DOM. A re-render would rebuild the list and lose the viewer's place on a
+ * screen that exists to be worked down.
+ */
+function expandPick(id) {
+  const wanted = expandedPickId === String(id) ? null : String(id);
+  for (const row of document.querySelectorAll("[data-pick-row]")) {
+    const rowId = row.dataset.pickRow;
+    const head = row.querySelector("[data-expand-pick]");
+    const body = row.querySelector(".pick-row-body");
+    if (!head || !body) continue;
+    if (rowId === wanted) {
+      const fixture = fixtureById(rowId);
+      body.innerHTML = fixture && pickEditable(fixture) ? scorePicker(fixture, true) : "";
+      row.classList.add("is-open");
+      head.setAttribute("aria-expanded", "true");
+    } else if (body.innerHTML) {
+      body.innerHTML = "";
+      row.classList.remove("is-open");
+      head.setAttribute("aria-expanded", "false");
+    }
+  }
+  expandedPickId = wanted;
+}
 
-  const body = `${sections}${otherSection}`;
-  return `${head}${body.trim() ? body : empty}`;
+function picksView() {
+  const head = (name, progress, deadline) =>
+    `<div class="section-head"><div>
+      <span class="eyebrow">${escapeHTML(name || playerName || "Your predictions")}</span>
+      <h2>My Picks</h2>
+      ${progress ? `<p>${progress.complete} of ${progress.total} complete${
+        deadline ? ` · ${escapeHTML(deadline)}` : ""}</p>` : ""}
+    </div></div>`;
+
+  if (!leagueCodes.length) return onboardingState();
+
+  const state = matchweekLeagueState();
+  if (!state) {
+    return `${head(matchweekLeagueName(), null, "")}
+      ${matchweekContext(null)}
+      ${pulsingStatus("Loading your picks…")}`;
+  }
+
+  const plan = matchweekSlate(state);
+  if (!plan) {
+    return `${head(state.name, null, "")}
+      ${matchweekContext(state)}
+      ${matchweekEmpty()}`;
+  }
+
+  const slots = matchweekSlots(plan);
+  const progress = pickProgress(slots);
+  return `${head(state.name, progress, pickDeadlineLine(slots))}
+    ${matchweekContext(state)}
+    <div class="pick-list" data-pick-list>${
+      slots.map((slot) => pickRow(slot, { expanded: expandedPickId === String(slot.id) })).join("")
+    }</div>
+    <p class="pick-social-link">Comparing with your mates happens on
+      <button class="link-quiet" type="button" data-view="schedule">Matchweek</button>.</p>`;
 }
 
 function leagueSwitcher() {
@@ -3209,6 +3605,9 @@ async function toggleWeeklyPicker() {
   const retained = retainedPickers.get(key);
   if (retained) {
     island.replaceChildren(retained);
+    // A detached node comes back with its scroller at zero, so a retained
+    // picker needs anchoring exactly as much as a freshly built one.
+    centreWeekStrip();
     traceTap("picker-retained-hit", {});
     return;
   }
@@ -3234,6 +3633,9 @@ async function toggleWeeklyPicker() {
     return;
   }
   target.replaceChildren(built);
+  // The dropdown has never done this, which is why it opened on Week 1 in
+  // March. It is the strip's own scrollLeft, so the page does not move.
+  centreWeekStrip();
   traceTap("picker-built", { chars: built.innerHTML.length });
 }
 
@@ -3886,21 +4288,22 @@ const CARD = {
   silver: "#D8DCE6",
   bronze: "#D79A66",
 };
-const CARD_BLOCK = { gold: CARD.gold, silver: CARD.silver, bronze: CARD.bronze };
-// Block heights in the drawn rostrum, in the same order the CSS one steps.
-const CARD_PODIUM = {
-  gold: { x: 390, w: 300, h: 200 },
-  silver: { x: 108, w: 268, h: 150 },
-  bronze: { x: 704, w: 268, h: 118 },
-};
 const CARD_HEAD_H = 190;
 const CARD_HERO_H = 220;
-// Headroom for one name on the tallest step. A shared place stacks its names
-// on the one step, so the region grows to keep them clear of the points line.
-const CARD_PODIUM_H = 350;
-const CARD_PODIUM_STACK = 34;
 const CARD_TABLE_HEAD_H = 56;
 const CARD_ROW_H = 74;
+// The floors Sol set for an exported table, in post-transform pixels: names,
+// ranks and points at 18, the secondary figures and honours at 15. They are
+// floors, not suggestions — nothing below this is legible in the preview a
+// group chat renders, which is where these cards are actually read.
+const CARD_TYPE_FLOOR = 18;
+const CARD_SECOND_FLOOR = 15;
+// The shortest row that can hold an 18px line with air above and below it.
+const CARD_MIN_ROW = 32;
+// A name column narrower than this is not a name, it is an initial.
+const CARD_MIN_NAME = 104;
+const CARD_MAX_COLUMNS = 4;
+const CARD_COL_GAP = 28;
 // The season row carries an honours line under the name, so it is taller.
 const CARD_SEASON_ROW_H = 92;
 const CARD_FOOT_H = 200;
@@ -3930,14 +4333,112 @@ function drawFitted(ctx, text, x, y, maxWidth, { weight = 900, max = 48, min = 2
   ctx.textAlign = "left";
 }
 
-function cardCanvas(height) {
+/**
+ * Both exports are SQUARE. A group chat crops and previews a square cleanly;
+ * the tall portrait the row-count used to produce was cropped to its middle,
+ * which is the part of a league table nobody needs.
+ *
+ * The design is still drawn in 1080-wide units. What changes is that the canvas
+ * is 1080x1080 whatever the table holds, and the drawing is scaled to fit into
+ * it — after the row height has already been reduced for the member count, so
+ * the scale is a small correction rather than the whole adaptation.
+ */
+const CARD_SIDE = 1080;
+
+/**
+ * The row height and type sizes a table of `rows` can have inside the square.
+ *
+ * The complete table always fits: rows shrink, then type shrinks with them, and
+ * the honours sub-line drops out when a row is too short to carry it. Nothing
+ * is ever dropped from the table itself — a truncated league table is not a
+ * smaller version of the card, it is a different and dishonest one.
+ */
+/**
+ * How a table fits inside the square: how many columns it needs, how tall its
+ * rows are, and how big its type is.
+ *
+ * Shrinking the whole card until it fits is not a layout — it is a smaller
+ * picture of an unreadable table, which is exactly what the 30-member export
+ * was. So the LAYOUT solves the fit: when one column cannot hold a readable
+ * row, the ranking continues into a second column, and a third if it must.
+ * Scale is then 1 and the floors hold by construction.
+ */
+function cardRowMetrics(rows, { chrome, base, min = CARD_MIN_ROW, maxColumns = CARD_MAX_COLUMNS }) {
+  const available = Math.max(0, CARD_SIDE - chrome);
+  let columns = 1;
+  while (columns < maxColumns && rows > 0 && available / Math.ceil(rows / columns) < min) columns += 1;
+  const perColumn = rows > 0 ? Math.ceil(rows / columns) : 0;
+  const fitted = perColumn > 0 ? available / perColumn : base;
+  const rowH = Math.max(min, Math.min(base, fitted));
+  const scale = Math.min(1, rowH / base);
+  // A roomy row still carries honours on their own baseline; a compressed one
+  // carries a compact tally beside a narrowed name. Neither ever drops them.
+  // Two columns buy the height back, so the second baseline survives further.
+  // An inline tally needs a name beside it AND clear air before the exact
+  // column. Where the column cannot hold all three, honours take their own
+  // baseline instead of being pushed through the figures next to them.
+  const box = cardColumnBox(0, columns);
+  const inlineRoom = cardColumnCols(box, columns).exact - cardColumnCols(box, columns).name;
+  const honoursLine = rowH >= (columns > 1 ? 46 : 62)
+    || inlineRoom < CARD_MIN_NAME + 12 + CARD_SECOND_FLOOR * 9 + CARD_SECOND_FLOOR * 2;
+  return {
+    columns,
+    perColumn,
+    rowH,
+    contentHeight: chrome + perColumn * rowH,
+    name: Math.max(CARD_TYPE_FLOOR, Math.round(34 * scale)),
+    number: Math.max(CARD_TYPE_FLOOR, Math.round(30 * scale)),
+    points: Math.max(CARD_TYPE_FLOOR, Math.round(34 * scale)),
+    second: Math.max(CARD_SECOND_FLOOR, Math.round(30 * scale)),
+    honoursLine,
+    honoursSize: honoursLine
+      ? Math.max(CARD_SECOND_FLOOR, Math.min(24, Math.round(rowH * 0.333)))
+      : Math.max(CARD_SECOND_FLOOR, Math.round(rowH * 0.42)),
+    // Where the two baselines sit inside a row that carries both.
+    nameDy: honoursLine ? -Math.round(rowH * 0.055) : 0,
+    honoursDy: Math.round(rowH * 0.42),
+  };
+}
+
+/** One column's slot in the 1080 design, gaps included. */
+function cardColumnBox(index, columns) {
+  const usable = CARD_W - CARD_PAD * 2 - CARD_COL_GAP * (columns - 1);
+  const width = usable / columns;
+  return { x: CARD_PAD + index * (width + CARD_COL_GAP), width };
+}
+
+/**
+ * Where a row's figures sit inside its column. One column keeps the accepted
+ * full-width positions exactly; more than one packs them against the column's
+ * own edges so every figure keeps its place relative to its own heading.
+ */
+function cardColumnCols(box, columns) {
+  if (columns === 1) return CARD_COL;
+  const right = box.x + box.width;
+  return { rank: box.x + 26, name: box.x + 58, exact: right - 104, pts: right - 46, medal: right - 16 };
+}
+
+/** Which column and which row of it the nth member belongs in. */
+function cardSlot(index, m) {
+  const column = m.perColumn > 0 ? Math.floor(index / m.perColumn) : 0;
+  const box = cardColumnBox(column, m.columns);
+  return { column, row: index - column * m.perColumn, box, cols: cardColumnCols(box, m.columns) };
+}
+
+function cardCanvas(contentHeight) {
   const canvas = document.createElement("canvas");
-  canvas.width = CARD_W;
-  canvas.height = height;
+  canvas.width = CARD_SIDE;
+  canvas.height = CARD_SIDE;
   const ctx = canvas.getContext("2d");
   ctx.fillStyle = CARD.bg;
-  ctx.fillRect(0, 0, CARD_W, height);
-  return { canvas, ctx };
+  ctx.fillRect(0, 0, CARD_SIDE, CARD_SIDE);
+  // Fit the 1080-wide design into the square and centre it. k is 1 for anything
+  // that already fits, so the common shapes are drawn exactly as designed.
+  const k = Math.min(1, CARD_SIDE / Math.max(contentHeight, 1));
+  if (ctx.setTransform) {
+    ctx.setTransform(k, 0, 0, k, (CARD_SIDE - CARD_W * k) / 2, (CARD_SIDE - contentHeight * k) / 2);
+  }
+  return { canvas, ctx, scale: k };
 }
 
 function drawCardHeader(ctx, league, line) {
@@ -3958,85 +4459,54 @@ function drawCardHeader(ctx, league, line) {
 // room before they read anything else.
 function drawCardHero(ctx, y, model) {
   const centre = CARD_W / 2;
+  const claimed = !!model.heroName;
   roundedRect(ctx, CARD_PAD, y, CARD_W - CARD_PAD * 2, CARD_HERO_H, 26);
-  ctx.fillStyle = CARD.goldWash;
+  ctx.fillStyle = claimed ? CARD.goldWash : CARD.row;
   ctx.fill();
-  ctx.strokeStyle = CARD.goldEdge;
+  ctx.strokeStyle = claimed ? CARD.goldEdge : CARD.line;
   ctx.lineWidth = 3;
   ctx.stroke();
   ctx.textAlign = "center";
   ctx.fillStyle = CARD.muted;
   ctx.font = cardFont(800, 26);
   ctx.fillText(model.heroEyebrow, centre, y + 56);
-  ctx.textAlign = "left";
-  drawFitted(ctx, `🏆 ${model.heroName}`, centre, y + 134, CARD_W - CARD_PAD * 2 - 72,
-    { max: 72, min: 32, colour: CARD.gold, align: "center" });
+  // A not-started week names nobody, so it draws nobody — and no trophy either.
+  // A floating cup above an empty name is a winner claim made in a picture
+  // instead of in words, which is the harder one to argue with.
+  if (model.heroName) {
+    ctx.textAlign = "left";
+    drawFitted(ctx, `🏆 ${model.heroName}`, centre, y + 134, CARD_W - CARD_PAD * 2 - 72,
+      { max: 72, min: 32, colour: CARD.gold, align: "center" });
+  }
   ctx.textAlign = "center";
   ctx.fillStyle = CARD.ink;
-  ctx.font = cardFont(800, 30);
-  ctx.fillText(model.heroLine, centre, y + 184);
+  ctx.font = cardFont(800, model.heroName ? 30 : 40);
+  // With no name the state line is the whole hero, so it sits where the name
+  // would have been rather than under a gap.
+  ctx.fillText(model.heroLine, centre, y + (model.heroName ? 184 : 140));
   ctx.textAlign = "left";
 }
 
-const podiumStackDepth = (groups) => Math.max(1, ...groups.map((group) => group.entries.length));
-const podiumHeight = (groups) => CARD_PODIUM_H + (podiumStackDepth(groups) - 1) * CARD_PODIUM_STACK;
-
-// The rostrum: second, first, third — first tallest and in gold. A place nobody
-// reached has no block, so a two-player league draws two.
-function drawCardPodium(ctx, y, groups) {
-  const base = y + podiumHeight(groups) - 30;
-  ctx.fillStyle = CARD.line;
-  ctx.fillRect(CARD_PAD, base, CARD_W - CARD_PAD * 2, 3);
-  for (const group of groups) {
-    const { x, w, h } = CARD_PODIUM[group.place];
-    const top = base - h;
-    const centre = x + w / 2;
-    roundedRect(ctx, x, top, w, h, 14);
-    ctx.fillStyle = CARD_BLOCK[group.place];
-    ctx.fill();
-    ctx.textAlign = "center";
-    ctx.fillStyle = CARD.brand;
-    ctx.font = cardFont(900, 62);
-    ctx.fillText(PLACE_NUMBER[group.place], centre, top + h / 2 + 22);
-    // A shared place stacks its names on the one block, because the podium
-    // rules never award the place below a tie to anybody. The stack is built
-    // upwards from the points line so the second name lands above the first
-    // rather than on top of the points.
-    const size = group.entries.length > 1 ? 26 : 34;
-    const lowest = top - 44;
-    group.entries.forEach((entry, index) => {
-      // Held to the width of its own block: a long name that spread wider than
-      // that reached across and sat on the step next to it.
-      drawFitted(ctx, entry.nick, centre, lowest - (group.entries.length - 1 - index) * (size + 8), w,
-        { max: size, min: 20, colour: CARD.ink, align: "center" });
-    });
-    ctx.textAlign = "center";
-    ctx.font = cardFont(900, 40);
-    ctx.fillStyle = CARD.ink;
-    ctx.fillText(PLACE_EMOJI[group.place], centre, lowest - (group.entries.length - 1) * (size + 8) - 36);
-    ctx.fillStyle = CARD.muted;
-    ctx.font = cardFont(800, 26);
-    ctx.fillText(`${group.entries[0].pts} pts`, centre, top - 12);
-    ctx.textAlign = "left";
-  }
-}
 
 const CARD_COL = { rank: 112, name: 168, exact: 730, pts: 880, medal: 962 };
 
-function drawCardTableHead(ctx, y) {
+function drawCardTableHead(ctx, y, cols = CARD_COL, box = { x: CARD_PAD, width: CARD_W - CARD_PAD * 2 }) {
+  const tight = box.width < 400;
   ctx.fillStyle = CARD.muted;
-  ctx.font = cardFont(800, 22);
-  ctx.fillText("PLAYER", CARD_COL.name, y + 36);
+  ctx.font = cardFont(800, box.width < 500 ? 19 : 22);
+  ctx.fillText("PLAYER", cols.name, y + 36);
   ctx.textAlign = "right";
-  ctx.fillText("EXACT", CARD_COL.exact, y + 36);
-  ctx.fillText("PTS", CARD_COL.pts, y + 36);
+  // A narrow column takes the short form rather than letting two headings meet
+  // in the middle and read as one word.
+  ctx.fillText(tight ? "EX" : "EXACT", cols.exact, y + 36);
+  ctx.fillText("PTS", cols.pts, y + 36);
   ctx.textAlign = "left";
   ctx.fillStyle = CARD.line;
-  ctx.fillRect(CARD_PAD, y + CARD_TABLE_HEAD_H - 10, CARD_W - CARD_PAD * 2, 2);
+  ctx.fillRect(box.x, y + CARD_TABLE_HEAD_H - 10, box.width, 2);
 }
 
-function drawCardRowPlate(ctx, y, height, index, place) {
-  roundedRect(ctx, CARD_PAD, y, CARD_W - CARD_PAD * 2, height - 10, 16);
+function drawCardRowPlate(ctx, y, height, index, place, box = { x: CARD_PAD, width: CARD_W - CARD_PAD * 2 }) {
+  roundedRect(ctx, box.x, y, box.width, height - 10, 16);
   ctx.fillStyle = place ? CARD.goldWash : index % 2 ? CARD.rowAlt : CARD.row;
   ctx.fill();
   if (!place) return;
@@ -4046,9 +4516,29 @@ function drawCardRowPlate(ctx, y, height, index, place) {
 }
 
 /** The three medals under a season name, zeros softly muted rather than hidden. */
-function drawCardHonours(ctx, x, y, counts) {
+/**
+ * Every member's gold, silver and bronze, always.
+ *
+ * They used to be dropped when a big table compressed the rows, which quietly
+ * made the export of a thirty-person league a different document from the
+ * export of a six-person one. M9 asks for the complete table, and honours are
+ * part of the table. A short row gets a COMPACT tally on the same baseline
+ * instead of a second line — smaller, never absent.
+ */
+/** How wide a tally will be, so it can be placed instead of hoped for. */
+function cardHonoursWidth(ctx, counts, size) {
+  const previous = ctx.font;
+  ctx.font = cardFont(800, size);
+  const width = [["🏆", counts.gold], ["🥈", counts.silver], ["🥉", counts.bronze]]
+    .reduce((sum, [emoji, count]) => sum + ctx.measureText(`${emoji} ${count}`).width, 0)
+    + ctx.measureText(" · ").width * 2;
+  ctx.font = previous;
+  return width;
+}
+
+function drawCardHonours(ctx, x, y, counts, { size = 24 } = {}) {
   const parts = [["🏆", counts.gold], ["🥈", counts.silver], ["🥉", counts.bronze]];
-  ctx.font = cardFont(800, 24);
+  ctx.font = cardFont(800, size);
   let cursor = x;
   parts.forEach(([emoji, count], index) => {
     const text = `${emoji} ${count}`;
@@ -4060,6 +4550,22 @@ function drawCardHonours(ctx, x, y, counts) {
     ctx.fillText(" · ", cursor, y);
     cursor += ctx.measureText(" · ").width;
   });
+}
+
+/**
+ * A heading over every column, and a hairline between them. A table that
+ * continues into a second column has to say so: the reader needs to know the
+ * right-hand list is ranks 11 to 20, not a different table.
+ */
+function drawCardTableColumns(ctx, y, m, rows) {
+  for (let column = 0; column < m.columns; column += 1) {
+    if (column * m.perColumn >= rows) break;
+    const box = cardColumnBox(column, m.columns);
+    drawCardTableHead(ctx, y, cardColumnCols(box, m.columns), box);
+    if (!column) continue;
+    ctx.fillStyle = CARD.line;
+    ctx.fillRect(box.x - CARD_COL_GAP / 2 - 1, y + 8, 2, CARD_TABLE_HEAD_H - 18 + m.perColumn * m.rowH);
+  }
 }
 
 function drawCardFooter(ctx, y, model) {
@@ -4098,12 +4604,29 @@ function weeklyCardModel(state, round) {
   const ranks = weeklyRanks(round.table);
   const names = winnerNames(round) || champions.map((entry) => entry.nick).join(" & ");
   const pts = champions[0]?.pts ?? (round.table || [])[0]?.pts ?? 0;
+  const status = weeklyShareStatus(round);
+  const final = status.final;
+  // "Started" means something has actually settled. Until then there are no
+  // settled points to lead on.
+  const started = status.terminal > 0;
+  const leader = started ? ((round.table || [])[0] || null) : null;
   return {
     league: state.name,
-    headline: `${week} · Final result · ${cardDate()}`,
-    heroEyebrow: champions.length > 1 ? "JOINT MATCHWEEK CHAMPIONS" : "MATCHWEEK CHAMPION",
-    heroName: names || "Nobody",
-    heroLine: `${week} champion · ${pts} pts`,
+    // The honest state, not a claim of finality (M9).
+    headline: `${weeklyShareStatus(round).label} · ${cardDate()}`,
+    // Three states, three claims. Crowning the first zero-point row "leading"
+    // before a ball has settled is not a smaller lie than crowning a champion:
+    // the order at 0-0-0 is alphabetical, and the card would be inventing a
+    // story out of a tie-break.
+    heroEyebrow: final
+      ? (champions.length > 1 ? "JOINT MATCHWEEK CHAMPIONS" : "MATCHWEEK CHAMPION")
+      : started ? "LEADING ON SETTLED POINTS" : "NOT STARTED",
+    heroName: final ? (names || "Nobody") : started ? (leader?.nick || "Nobody") : "",
+    heroLine: final
+      ? `${week} champion · ${pts} pts`
+      : started
+        ? `${status.label} · ${leader?.pts ?? 0} pts`
+        : status.label,
     podium: groups,
     rows: (round.table || []).map((row, index) => ({
       // The same weekly rank the table draws — a shared card that disagreed
@@ -4121,48 +4644,50 @@ function weeklyCardModel(state, round) {
 
 function drawWeeklyResultCard(state, round) {
   const model = weeklyCardModel(state, round);
-  const podiumH = model.podium.length ? podiumHeight(model.podium) + CARD_GAP : 0;
-  const height = CARD_HEAD_H + CARD_GAP + CARD_HERO_H + CARD_GAP + podiumH
-    + CARD_TABLE_HEAD_H + model.rows.length * CARD_ROW_H + CARD_GAP + CARD_FOOT_H;
-  const { canvas, ctx } = cardCanvas(height);
+  // The export carries no rostrum. On a square card the podium repeated the
+  // hero's claim in a second, larger form and left the standings it was meant
+  // to introduce at eleven pixels. The screen keeps its podium; the picture
+  // keeps the table, and the medals still mark the three that matter.
+  const chrome = CARD_HEAD_H + CARD_GAP + CARD_HERO_H + CARD_GAP
+    + CARD_TABLE_HEAD_H + CARD_GAP + CARD_FOOT_H;
+  const m = cardRowMetrics(model.rows.length, { chrome, base: CARD_ROW_H });
+  const { canvas, ctx } = cardCanvas(m.contentHeight);
   drawCardHeader(ctx, model.league, model.headline);
-  let y = CARD_HEAD_H + CARD_GAP;
-  drawCardHero(ctx, y, model);
-  y += CARD_HERO_H + CARD_GAP;
-  if (model.podium.length) {
-    drawCardPodium(ctx, y, model.podium);
-    y += podiumHeight(model.podium) + CARD_GAP;
-  }
-  drawCardTableHead(ctx, y);
-  y += CARD_TABLE_HEAD_H;
+  const y = CARD_HEAD_H + CARD_GAP + CARD_HERO_H + CARD_GAP;
+  const top = y + CARD_TABLE_HEAD_H;
+  drawCardHero(ctx, CARD_HEAD_H + CARD_GAP, model);
+  drawCardTableColumns(ctx, y, m, model.rows.length);
   model.rows.forEach((row, index) => {
-    const top = y + index * CARD_ROW_H;
-    const mid = top + (CARD_ROW_H - 10) / 2;
-    drawCardRowPlate(ctx, top, CARD_ROW_H, index, row.place);
+    const slot = cardSlot(index, m);
+    const rowTop = top + slot.row * m.rowH;
+    const mid = rowTop + (m.rowH - 10) / 2;
+    const baseline = mid + m.points / 3;
+    drawCardRowPlate(ctx, rowTop, m.rowH, slot.row, row.place, slot.box);
     ctx.textAlign = "center";
     ctx.fillStyle = row.place ? CARD.gold : CARD.muted;
-    ctx.font = cardFont(900, 30);
-    ctx.fillText(String(row.rank), CARD_COL.rank, mid + 11);
+    ctx.font = cardFont(900, m.number);
+    ctx.fillText(String(row.rank), slot.cols.rank, baseline);
     ctx.textAlign = "left";
-    drawFitted(ctx, row.nick, CARD_COL.name, mid + 12, 500, { max: 34, min: 24 });
+    const room = slot.cols.exact - slot.cols.name - (row.place ? 20 : 16);
+    drawFitted(ctx, row.nick, slot.cols.name, baseline, room,
+      { max: m.name, min: Math.min(CARD_TYPE_FLOOR, m.name) });
     ctx.textAlign = "right";
     ctx.fillStyle = CARD.muted;
-    ctx.font = cardFont(800, 30);
-    ctx.fillText(String(row.exact), CARD_COL.exact, mid + 11);
+    ctx.font = cardFont(800, m.second);
+    ctx.fillText(String(row.exact), slot.cols.exact, baseline);
     ctx.fillStyle = CARD.ink;
-    ctx.font = cardFont(900, 34);
-    ctx.fillText(String(row.pts), CARD_COL.pts, mid + 12);
+    ctx.font = cardFont(900, m.points);
+    ctx.fillText(String(row.pts), slot.cols.pts, baseline);
     ctx.textAlign = "center";
-    // The medal sits at the right edge, so the three that matter are findable
-    // down one side without reading a single name.
+    // The medal sits at the right edge of its own column, so the three that
+    // matter are findable down one side without reading a single name.
     if (row.place) {
-      ctx.font = cardFont(900, 34);
-      ctx.fillText(PLACE_EMOJI[row.place], CARD_COL.medal, mid + 12);
+      ctx.font = cardFont(900, m.second);
+      ctx.fillText(PLACE_EMOJI[row.place], slot.cols.medal, baseline);
     }
     ctx.textAlign = "left";
   });
-  y += model.rows.length * CARD_ROW_H + CARD_GAP;
-  drawCardFooter(ctx, y, model);
+  drawCardFooter(ctx, top + m.perColumn * m.rowH + CARD_GAP, model);
   return canvas;
 }
 
@@ -4173,7 +4698,7 @@ function drawWeeklyResultCard(state, round) {
 function seasonCardModel(state) {
   return {
     league: state.name,
-    headline: `Season league · ${sentenceCase(seasonProgressLine(state))}`,
+    headline: `Season table · ${seasonShareFreshness(state)}`,
     rows: (state.table || []).map((row, index) => ({
       rank: row.rank || index + 1,
       nick: row.nick,
@@ -4186,37 +4711,70 @@ function seasonCardModel(state) {
   };
 }
 
+/**
+ * Where an inline tally goes, and how big it is: as far right as it can sit
+ * while leaving the exact column its own space, shrinking to the floor before
+ * it crowds the name.
+ *
+ * A season's honours reach two digits, and three two-digit counts in a narrow
+ * column will not fit beside a full-width name at any size. Honours are never
+ * dropped, so in that case the NAME gives way — a name can be cut and still be
+ * recognised; a tally cut in half is a wrong number.
+ */
+function cardHonoursFit(ctx, cols, counts, m) {
+  const right = cols.exact - Math.round(m.second * 2);
+  const room = right - (cols.name + CARD_MIN_NAME + 12);
+  let size = m.honoursSize;
+  let width = cardHonoursWidth(ctx, counts, size);
+  while (size > CARD_SECOND_FLOOR && width > room) {
+    size -= 1;
+    width = cardHonoursWidth(ctx, counts, size);
+  }
+  return { size, width, x: Math.max(cols.name + 24, right - width) };
+}
+
 function drawSeasonTableCard(state) {
   const model = seasonCardModel(state);
-  const height = CARD_HEAD_H + CARD_GAP + CARD_TABLE_HEAD_H
-    + model.rows.length * CARD_SEASON_ROW_H + CARD_GAP + CARD_FOOT_H;
-  const { canvas, ctx } = cardCanvas(height);
+  const chrome = CARD_HEAD_H + CARD_GAP + CARD_TABLE_HEAD_H + CARD_GAP + CARD_FOOT_H;
+  const m = cardRowMetrics(model.rows.length, { chrome, base: CARD_SEASON_ROW_H });
+  const { canvas, ctx } = cardCanvas(m.contentHeight);
   drawCardHeader(ctx, model.league, model.headline);
-  let y = CARD_HEAD_H + CARD_GAP;
-  drawCardTableHead(ctx, y);
-  y += CARD_TABLE_HEAD_H;
+  const y = CARD_HEAD_H + CARD_GAP;
+  const top = y + CARD_TABLE_HEAD_H;
+  drawCardTableColumns(ctx, y, m, model.rows.length);
   model.rows.forEach((row, index) => {
-    const top = y + index * CARD_SEASON_ROW_H;
-    const mid = top + (CARD_SEASON_ROW_H - 10) / 2;
-    drawCardRowPlate(ctx, top, CARD_SEASON_ROW_H, index, null);
+    const slot = cardSlot(index, m);
+    const rowTop = top + slot.row * m.rowH;
+    const mid = rowTop + (m.rowH - 10) / 2;
+    drawCardRowPlate(ctx, rowTop, m.rowH, slot.row, null, slot.box);
     ctx.textAlign = "center";
     ctx.fillStyle = CARD.muted;
-    ctx.font = cardFont(900, 30);
-    ctx.fillText(String(row.rank), CARD_COL.rank, mid + 4);
+    ctx.font = cardFont(900, m.number);
+    ctx.fillText(String(row.rank), slot.cols.rank, mid + (m.honoursLine ? 4 : m.number / 3));
     ctx.textAlign = "left";
-    drawFitted(ctx, row.nick, CARD_COL.name, mid - 4, 500, { max: 34, min: 24 });
-    drawCardHonours(ctx, CARD_COL.name, mid + 30, row.honours);
+    // Present at every size: a second line when the row is tall enough, an
+    // inline tally beside the name when it is not. Sharing a baseline means
+    // the tally is MEASURED and placed clear of the exact column — running a
+    // bronze count into an exact count reads as a single wrong number.
+    const fit = m.honoursLine ? null : cardHonoursFit(ctx, slot.cols, row.honours, m);
+    const nameWidth = fit ? fit.x - slot.cols.name - 12 : slot.cols.exact - slot.cols.name - 16;
+    drawFitted(ctx, row.nick, slot.cols.name, mid + (m.honoursLine ? m.nameDy : m.name / 3), nameWidth,
+      { max: m.name, min: Math.min(CARD_TYPE_FLOOR, m.name) });
+    if (fit) {
+      drawCardHonours(ctx, fit.x, mid + m.name / 3, row.honours, { size: fit.size });
+    } else {
+      drawCardHonours(ctx, slot.cols.name, mid + m.honoursDy, row.honours, { size: m.honoursSize });
+    }
     ctx.textAlign = "right";
     ctx.fillStyle = CARD.muted;
-    ctx.font = cardFont(800, 30);
-    ctx.fillText(String(row.exact), CARD_COL.exact, mid + 4);
+    ctx.font = cardFont(800, m.second);
+    ctx.fillText(String(row.exact), slot.cols.exact, mid + (m.honoursLine ? 4 : m.second / 3));
     ctx.fillStyle = CARD.ink;
-    ctx.font = cardFont(900, 34);
-    ctx.fillText(String(row.pts), CARD_COL.pts, mid + 5);
+    ctx.font = cardFont(900, m.points);
+    ctx.fillText(String(row.pts), slot.cols.pts, mid + (m.honoursLine ? 5 : m.points / 3));
     ctx.textAlign = "left";
   });
-  y += model.rows.length * CARD_SEASON_ROW_H + CARD_GAP;
-  drawCardFooter(ctx, y, model);
+  drawCardFooter(ctx, top + m.perColumn * m.rowH + CARD_GAP, model);
   return canvas;
 }
 
@@ -4225,7 +4783,19 @@ function drawSeasonTableCard(state) {
 function weeklyCardCaption(state, round) {
   const competition = leagueCompetitionNames(state);
   const week = round.matchday != null ? `Matchweek ${round.matchday}` : periodLabel(round.period);
-  return `🏆 ${competition} ${week}: won by ${winnerNames(round) || "nobody"}. Think you can call it? Join ${state.name} with code ${state.code}: ${inviteLinkFor(state.code)}`;
+  const status = weeklyShareStatus(round);
+  const leader = (round.table || [])[0] || null;
+  // Nothing settled is not the same as something settled, and neither is the
+  // same as finished. Saying "nothing settled yet" after two results is as
+  // wrong as naming a winner before any.
+  const lead = status.final
+    ? `won by ${winnerNames(round) || "nobody"}`
+    : status.terminal === 0
+      ? `published — nothing settled yet`
+      // TERMINAL, not settled: a void is finished and scored nothing, so calling
+      // it settled would credit a game nobody got points for.
+      : `after ${status.terminal} of ${status.total} fixtures${leader ? `, ${leader.nick} leading on ${leader.pts}` : ""}`;
+  return `🏆 ${competition} ${week}: ${lead}. Think you can call it? Join ${state.name} with code ${state.code}: ${inviteLinkFor(state.code)}`;
 }
 
 function leagueTableShareText(state) {
@@ -4317,39 +4887,224 @@ function weeklyCardReady() {
 }
 
 /** What the share button says, and whether it does anything when pressed. */
+// --- v1.7 Slice C: anytime table exports (M9) -------------------------------
+//
+// The share control used to be a wide green button that said what it would do,
+// and the weekly card only existed once the week had settled. Both were wrong
+// for the same reason: sharing your league is a thing you want to do WHILE the
+// week is happening, and a text button the width of the screen is the loudest
+// thing on it.
+//
+// So the control is the platform square-with-arrow, 44x44, with a precise
+// accessible name; and the weekly card exists from publication onward and says
+// honestly how far through the week it is.
+
+/**
+ * How far through a published week we are, counted in TERMINAL fixtures only.
+ *
+ * Terminal means the result will not change again: settled, or void. A void
+ * advances the count and contributes no points — it is finished, it just
+ * finished with nothing. An in-progress fixture is not terminal however late it
+ * is, because its score is still the server's to confirm.
+ */
+function weeklyTerminalCount(round) {
+  const ids = round?.slate?.fixtureIds?.length
+    ? round.slate.fixtureIds.map(String)
+    : [...new Set((round?.reveal || []).map((entry) => String(entry.id)))];
+  const entries = new Map((round?.reveal || []).map((entry) => [String(entry.id), entry]));
+  let terminal = 0;
+  for (const id of ids) {
+    const entry = entries.get(id);
+    const fixture = fixtureById(id);
+    // A POSTPONED fixture is not terminal. It moves to a rescheduled window and
+    // will still be played, so counting it as done would let a week call itself
+    // Final while a game everybody predicted is yet to kick off. It counts only
+    // if the authoritative payload separately marks it void.
+    const settled = entry?.settled === true || (!!fixture && !!finalScore(fixture));
+    const voided = entry?.voided === true || (!!fixture && isVoidFixture(fixture));
+    if (settled || voided) terminal += 1;
+  }
+  return { terminal, total: ids.length };
+}
+
+/**
+ * The one honest line a weekly card is allowed to carry. `Final` is reserved
+ * for a week where every published slot is terminal — not "the last one we
+ * happened to see", and never a week still holding a fixture that could score.
+ */
+function weeklyShareStatus(round) {
+  const week = round?.matchday != null ? `Week ${round.matchday}` : periodLabel(round?.period ?? "");
+  const { terminal, total } = weeklyTerminalCount(round);
+  // Final FAILS CLOSED. `complete` is the server's summary and the terminal
+  // count is the evidence; when they disagree the card takes the weaker claim,
+  // because labelling a week Final while a published slot could still score is
+  // the one error a shared graphic cannot take back. The disagreement is
+  // recorded rather than swallowed — it means one of the two is wrong.
+  const claimsComplete = round?.complete === true;
+  const evidenceComplete = total > 0 && terminal === total;
+  if (claimsComplete !== evidenceComplete) {
+    noteWeeklyFinalMismatch({
+      period: String(round?.period ?? round?.matchday ?? ""),
+      complete: claimsComplete, terminal, total,
+    });
+  }
+  if (claimsComplete && evidenceComplete) {
+    return { label: `${week} · Final`, terminal, total, final: true };
+  }
+  // No slot information at all — an older worker, or a payload without the
+  // reveal array. "0 of 0 fixtures" would be a count we cannot support, so the
+  // card claims neither a count nor a finish and simply names the week.
+  if (!total) return { label: week, terminal, total, final: false, unknown: true };
+  if (terminal === 0) return { label: `${week} · not started · 0 of ${total} fixtures`, terminal, total, final: false };
+  // Every slot terminal but the server has not said so: honest progress, not
+  // Final. The two agree or the card waits.
+  return {
+    label: `${week} · in progress · after ${terminal} of ${total}`,
+    terminal, total, final: false,
+  };
+}
+
+/**
+ * A round whose `complete` flag and terminal count disagree. Bounded, and
+ * carried out in the diagnostics the profile dialog already copies — the same
+ * treatment the slate-count mismatch gets.
+ */
+let weeklyFinalMismatches = new Map();
+function noteWeeklyFinalMismatch(mismatch) {
+  const key = `${mismatch.period}|${mismatch.complete}|${mismatch.terminal}/${mismatch.total}`;
+  if (weeklyFinalMismatches.has(key)) return;
+  weeklyFinalMismatches.set(key, mismatch);
+  if (weeklyFinalMismatches.size > 20) {
+    weeklyFinalMismatches.delete(weeklyFinalMismatches.keys().next().value);
+  }
+}
+const weeklyFinalMismatchLines = () => [...weeklyFinalMismatches.values()].map((m) =>
+  `weekly Final mismatch period ${m.period}: complete=${m.complete}, terminal ${m.terminal}/${m.total}`);
+
+/** "Updated through Matchweek N" — the freshness M9 asks a season card to carry. */
+function seasonShareFreshness(state) {
+  if (state?.mixed || seasonRounds() == null) {
+    const period = state?.currentPeriod;
+    return period == null ? "Updated through the completed season" : `Updated through ${periodLabel(period)}`;
+  }
+  const played = state?.currentMatchday == null
+    ? seasonRounds()
+    : Math.max(0, Number(state.currentMatchday) - (state.currentMatchdayHasResults ? 0 : 1));
+  return played <= 0 ? "Updated before Matchweek 1" : `Updated through Matchweek ${played}`;
+}
+
+/**
+ * The share control. An icon, not a sentence — and never a bare glyph: the
+ * accessible name says exactly which table is about to leave the app, because
+ * "Share" on a screen with two tables is not a name, it is a shrug.
+ */
+function shareIconButton(state) {
+  const share = shareCardState();
+  if (share.hidden || !share.ready) return "";
+  return `<button class="share-icon" type="button" data-export-league-table="${escapeHTML(state.code)}"
+    aria-label="${escapeHTML(share.label)}" title="${escapeHTML(share.label)}">
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" width="22" height="22">
+      <path d="M12 3.5 8.5 7l1.4 1.4L11 7.3V15h2V7.3l1.1 1.1L15.5 7 12 3.5Z" fill="currentColor"/>
+      <path d="M5 11v8a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-8h-2v8H7v-8H5Z" fill="currentColor"/>
+    </svg>
+  </button>`;
+}
+
+/**
+ * The published slate a weekly export is allowed to speak for: this league's,
+ * this period's, and only when the worker has actually published it.
+ */
+function weeklySharePublished(round, period) {
+  if (!round || round.error || period == null) return null;
+  if (round.code && activeLeague && round.code !== activeLeague) return null;
+  // The ROUND must be the one on screen. Asking the round which period it is
+  // and then checking it against itself is not a check: a late response for
+  // last week answers that question just as confidently as this week's.
+  const roundPeriod = round.period ?? round.matchday;
+  if (roundPeriod == null || String(roundPeriod) !== String(period)) return null;
+  const slate = round.slate;
+  if (!slate || !slate.fixtureIds?.length) return null;
+  if (String(slate.period ?? slate.matchweek) !== String(period)) return null;
+  if (slate.status && slate.status !== "published") return null;
+  return slate;
+}
+
 function shareCardState() {
-  // Mates' Picks has no card of its own — the matchweek export is Phase 2 — and
-  // offering to share the season table from under a matrix would be a button
-  // that does something other than what the screen is about.
+  // Mates' Picks has no card of its own — offering to share the season table
+  // from under a matrix would be a control that does something other than what
+  // the screen is about.
   if (leagueTab === "mates") return { ready: false, hidden: true, label: "" };
   if (leagueTab === "matchday" && leagueSupportsRounds(leagueState)) {
+    // M9: available from publication onward — and no earlier. A table alone is
+    // not publication: a league with members has a table before its host has
+    // chosen a single fixture, and offering to share that would export standings
+    // for a week that does not exist yet.
+    //
+    // The slate, the round and the pill must all name the same league and the
+    // same period. Two of the three agreeing is how another league's week, or
+    // last week's, reaches a graphic somebody then sends to their mates.
+    // The period comes from the SCREEN, not from the response, so a round that
+    // arrived for another week fails the check instead of vouching for itself.
+    const period = selectedPeriod ?? currentPeriodKey();
+    const slate = weeklySharePublished(roundState, period);
+    const ready = !!(slate && roundState && !roundState.error && roundState.table?.length);
+    const status = ready ? weeklyShareStatus(roundState) : null;
+    void status;
     if (roundState?.matchday != null) {
-      return weeklyCardReady()
-        ? { ready: true, label: `Share Matchweek ${roundState.matchday} result` }
-        : { ready: false, label: `Matchweek ${roundState.matchday} shares once it's settled` };
+      return ready
+        ? { ready: true, label: `Share Matchweek ${roundState.matchday} standings` }
+        : { ready: false, label: `Matchweek ${roundState.matchday} standings are still loading` };
     }
-    // The same fallback the week segment uses, so a panel still loading is
-    // still named rather than offering to share "Matchweek null".
+    // A mixed league has no matchweek number, so it is named in its own terms.
     const week = periodLabel(roundState?.period ?? selectedPeriod ?? leagueState.currentPeriod ?? currentPeriodKey());
-    return weeklyCardReady()
-      ? { ready: true, label: `Share ${week} result` }
-      : { ready: false, label: `${week} shares once it's settled` };
+    return ready
+      ? { ready: true, label: `Share ${week} standings` }
+      : { ready: false, label: `${week} standings are still loading` };
   }
-  return { ready: !!leagueState?.table?.length, label: "Share season table" };
+  return {
+    ready: !!leagueState?.table?.length,
+    label: `Share season table, ${seasonShareFreshness(leagueState)}`,
+  };
+  // (the season control names its own freshness; the weekly one is named by
+  // its Matchweek, and the week's honest state rides on the card itself)
 }
 
 /**
  * The share, start to finish, inside the tap that asked for it. Drawing is
  * synchronous and so is the PNG, so nothing is awaited before the sheet.
  */
+/**
+ * The share path, traced stage by stage.
+ *
+ * Every stage here is SYNCHRONOUS and on the main thread: building the model,
+ * drawing the canvas, and encoding the PNG. Timing only the model — which is
+ * the cheap one — measured the wrong thing; the encode of a 1080x1080 bitmap is
+ * the stage that can actually be felt. These land in the same tap trace the
+ * profile dialog copies, so a slow share on a real phone can be read rather
+ * than guessed at.
+ */
 function shareCardNow() {
   const state = leagueState;
   if (!state || state.error || !shareCardState().ready) return;
   const weekly = leagueTab === "matchday" && leagueSupportsRounds(state);
-  const png = weekly
-    ? cardPng(drawWeeklyResultCard(state, roundState), "prem-oracle-matchweek.png")
-    : cardPng(drawSeasonTableCard(state), "prem-oracle-season-table.png");
-  const title = weekly ? `${state.name} matchweek result` : `${state.name} season table`;
+  const at = () => (typeof performance !== "undefined" ? performance.now() : Date.now());
+  const t0 = at();
+  const model = weekly ? weeklyCardModel(state, roundState) : seasonCardModel(state);
+  const rows = model.rows?.length ?? 0;
+  const t1 = at();
+  traceTap("share-model", { card: weekly ? "weekly" : "season", rows, ms: Math.round(t1 - t0) });
+  const canvas = weekly ? drawWeeklyResultCard(state, roundState) : drawSeasonTableCard(state);
+  const t2 = at();
+  traceTap("share-draw", { rows, side: canvas.width, ms: Math.round(t2 - t1) });
+  const png = cardPng(canvas, weekly ? "prem-oracle-matchweek.png" : "prem-oracle-season-table.png");
+  const t3 = at();
+  traceTap("share-encode", { rows, bytes: png.base64.length, ms: Math.round(t3 - t2) });
+  traceTap("share-handoff", { rows, ms: Math.round(at() - t3), total: Math.round(at() - t0) });
+  // Not "result" until there is one: the title travels with the file into a
+  // chat, where it is read before the picture loads.
+  const title = weekly
+    ? `${state.name} ${weeklyShareStatus(roundState).final ? "matchweek result" : "matchweek standings"}`
+    : `${state.name} season table`;
   const text = weekly ? weeklyCardCaption(state, roundState) : leagueTableShareText(state);
   shareCardFile(png, { title, text });
 }
@@ -4544,6 +5299,60 @@ function renderPickerLayer() {
   document.body.classList.toggle("picker-open", pickerOpen);
 }
 
+/**
+ * The counter and the publish gate, in one place each.
+ *
+ * A tap now updates these in the DOM instead of rebuilding the overlay, and two
+ * copies of the same arithmetic is how the printed count and the live one drift
+ * apart. The gate is the maximum-selection validation: over or under, the
+ * publish button is not available.
+ */
+const pickerCounterLabel = (bounds, count) => (bounds.min === bounds.max
+  ? `Select ${bounds.max} · ${count} selected`
+  : `Select ${bounds.min}–${bounds.max} · ${count} selected`);
+
+const pickerReady = (bounds, count) => count >= bounds.min && count <= bounds.max;
+
+/**
+ * One fixture in or out, against the DOM that is already on screen.
+ *
+ * The tap used to call render(), which rebuilds #pickerLayer from scratch —
+ * a new .picker-list, a new scroller, and the host thrown back to the top of
+ * the week after every single tap. Picking six fixtures meant six trips back
+ * down the list.
+ *
+ * So nothing is rebuilt and nothing is reordered: the row that was tapped
+ * changes state, and the counter and the publish gate are brought up to date.
+ * The scroller is never touched, so it stays exactly where the finger left it.
+ */
+function togglePickerFixture(id) {
+  const key = String(id);
+  if (pickerSelection.has(key)) pickerSelection.delete(key);
+  else pickerSelection.add(key);
+  pickerMode = "custom";
+  markPickerRow(key);
+  syncPickerCounter();
+}
+
+/** The tapped row's own selected state — the green circle and its label. */
+function markPickerRow(id) {
+  const row = document.querySelector(`[data-picker-fixture="${CSS.escape(String(id))}"]`);
+  if (!row) return;
+  const selected = pickerSelection.has(String(id));
+  row.classList.toggle("is-selected", selected);
+  row.setAttribute("aria-pressed", selected ? "true" : "false");
+}
+
+/** The count, and whether the league can be published with it. */
+function syncPickerCounter() {
+  const bounds = pickerBounds(pickerFixtures().length);
+  const count = pickerSelection.size;
+  const counter = document.querySelector(".picker-counter strong");
+  if (counter) counter.textContent = pickerCounterLabel(bounds, count);
+  const publish = document.querySelector("[data-picker-set]");
+  if (publish) publish.disabled = !pickerReady(bounds, count);
+}
+
 function fixturePickerView() {
   if (!pickerOpen) return "";
   const list = pickerFixtures();
@@ -4552,10 +5361,8 @@ function fixturePickerView() {
   const leagueName = leagueState?.name || "your league";
   const mixed = isMixedActive();
   // The default is a suggestion for this week, not a requirement.
-  const counter = bounds.min === bounds.max
-    ? `Select ${bounds.max} · ${count} selected`
-    : `Select ${bounds.min}–${bounds.max} · ${count} selected`;
-  const ready = count >= bounds.min && count <= bounds.max;
+  const counter = pickerCounterLabel(bounds, count);
+  const ready = pickerReady(bounds, count);
 
   // Grouped under competition headers when the pool spans more than one.
   const present = [...new Set(list.map((fixture) => competitionOfFixture(fixture.id) || DEFAULT_COMPETITION))];
@@ -4945,7 +5752,6 @@ function leagueView() {
   const state = leagueState;
   const isOwner = state && !state.error && state.owner === uid();
   const supportsRounds = leagueSupportsRounds(state);
-  const share = shareCardState();
   // A PLACEHOLDER, never a built panel. Any global render while Season is
   // selected used to rebuild the whole heavy Season panel synchronously — which
   // is what made a pill switch cost four seconds even after the pill itself was
@@ -4962,7 +5768,7 @@ function leagueView() {
           ${supportsRounds ? `${roundToggle()}<div class="picker-island" data-picker-island></div>` : ""}
           <div class="slate-slot">${hostSlateControl(state)}</div>
           ${inner}
-          <button class="whatsapp-share wide" type="button" data-export-league-table="${state.code}"${share.ready ? "" : " disabled"}${share.hidden ? " hidden" : ""}>${escapeHTML(share.label)}</button>
+          ${shareIconButton(state)}
           ${leagueSettings(state, isOwner)}
         </section>`;
   return `<div class="section-head"><div><span class="eyebrow">Private predictor leagues</span><h2>League table</h2></div></div>${flash()}${leagueSwitcher()}${content}${controls}${restore}`;
@@ -5106,17 +5912,27 @@ function rememberMatchDay(matchId) {
  * Done on the strip's own scrollLeft rather than with scrollIntoView, which
  * would drag the page as well as the strip.
  */
-function centreWeekStrip() {
+// A handful of frames is enough for a strip that is going to be laid out at
+// all; beyond that it is hidden or detached, and retrying forever would be a
+// loop nobody stops.
+const CENTRE_ATTEMPTS = 5;
+
+function centreWeekStrip(attempts = CENTRE_ATTEMPTS) {
   requestAnimationFrame(() => {
+    let unlaid = false;
     document.querySelectorAll(".week-strip").forEach((strip) => {
       const anchor = strip.querySelector("[data-week-anchor]");
-      // No width yet means the strip has not been laid out; a later paint will
-      // anchor it rather than this one writing a nonsense offset.
-      if (!anchor || !strip.clientWidth) return;
+      if (!anchor) return;
+      // No width yet means the strip has not been laid out. Writing an offset
+      // against a zero width is a nonsense number, and the old code answered
+      // that by giving up — which is exactly the case a dropdown opening for
+      // the first time is in. So wait for the paint that gives it a width.
+      if (!strip.clientWidth) { unlaid = true; return; }
       const stripBox = strip.getBoundingClientRect();
       const chipBox = anchor.getBoundingClientRect();
       strip.scrollLeft += (chipBox.left - stripBox.left) - (strip.clientWidth - chipBox.width) / 2;
     });
+    if (unlaid && attempts > 1) centreWeekStrip(attempts - 1);
   });
 }
 
@@ -5295,7 +6111,9 @@ function render(options = {}) {
   // Held, not dropped: the newest request wins and lands when the tap is done.
   if (tapInProgress) { heldRender = options; traceTap("render-held", {}); return; }
   const app = document.getElementById("app");
-  const views = { today: todayView, schedule: scheduleView, picks: picksView, league: leagueView, rules: rulesView };
+  // The `schedule` key is the route id, the storage key and the deep-link
+  // target. Slice A renames what the viewer sees, not what the client stores.
+  const views = { today: todayView, schedule: matchweekView, picks: picksView, league: leagueView, rules: rulesView };
   const html = (views[currentView] || todayView)();
   const changed = html !== renderedHTML;
   if (changed) {
@@ -5352,7 +6170,7 @@ const VIEW_SHELLS = {
   // paint first" was walking the whole fixture list. On Adam's phone the shell
   // itself did not reach the DOM until 2908ms. A shell that has to compute
   // anything is not a shell.
-  schedule: () => `<div class="section-head"><div><span class="eyebrow">Full season</span><h2>Prediction schedule</h2></div></div>${pulsingStatus("Loading schedule…")}`,
+  schedule: () => `<div class="section-head"><div><span class="eyebrow">Your league</span><h2>Matchweek</h2></div></div>${pulsingStatus("Loading matchweek…")}`,
   picks: () => `<div class="section-head"><div><span class="eyebrow">Your profile</span><h2>My predictions</h2></div></div>${pulsingStatus("Loading your predictions…")}`,
   league: () => `<div class="section-head"><div><span class="eyebrow">Private predictor leagues</span><h2>League table</h2></div></div>${pulsingStatus("Loading your leagues…")}`,
   today: () => pulsingStatus("Loading fixtures…"),
@@ -5611,6 +6429,8 @@ function diagnosticsText() {
     `scale ${report.scale}  viewport ${report.vvWidth}  offsetTop ${report.offsetTop}`,
     `innerWidth ${report.innerWidth}  screenWidth ${report.screenWidth}  dpr ${report.dpr}`,
     `rootFont ${report.rootFontPx}px  native ${report.native}`,
+    ...matchweekMismatchLines(),
+    ...weeklyFinalMismatchLines(),
   ];
   // Times are milliseconds from the physical pointerdown, which is where a slow
   // tap actually begins — not where a handler eventually hears about it.
@@ -5791,11 +6611,7 @@ async function handlePickerClick(event) {
   }
   const row = event.target.closest("[data-picker-fixture]");
   if (row) {
-    const id = row.dataset.pickerFixture;
-    if (pickerSelection.has(id)) pickerSelection.delete(id);
-    else pickerSelection.add(id);
-    pickerMode = "custom";
-    render();
+    togglePickerFixture(row.dataset.pickerFixture);
     return true;
   }
   return !!event.target.closest(".picker-overlay");
@@ -5815,6 +6631,13 @@ document.addEventListener("click", async (event) => {
   const expand = event.target.closest("[data-expand-fixture]");
   if (expand) {
     expandFixture(expand.dataset.expandFixture);
+    return;
+  }
+  // My Picks opens one editable row at a time, as a DOM edit rather than a
+  // re-render, so working down the list never loses your place.
+  const pickRowHead = event.target.closest("[data-expand-pick]");
+  if (pickRowHead) {
+    expandPick(pickRowHead.dataset.expandPick);
     return;
   }
   // A settled My Picks card's mates. NOT awaited: everything the viewer sees

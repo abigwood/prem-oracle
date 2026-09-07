@@ -2060,3 +2060,102 @@ body.picker-open { overflow: hidden; }
 @media (prefers-reduced-motion: reduce) {
   .pick-reveal-chevron { transition: none; }
 }
+
+/* --- Matchweek (v1.7 Slice A) ---------------------------------------------
+   The selected league stays in view while its week scrolls under it: the one
+   thing this screen must never be ambiguous about is whose fixtures these are. */
+.matchweek-context {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  margin: 0 0 10px;
+  padding: 8px 0;
+  /* `main` is the scroller and body paints --cream behind it, so the sticky
+     bar has to paint the same or the list shows through it as it passes. */
+  background: var(--cream);
+}
+/* The switcher already lays its pills out; this only stops the sticky bar from
+   collapsing when there is a single league and therefore no pills. */
+.matchweek-league {
+  display: flex;
+  align-items: center;
+  min-height: 34px;
+  font-weight: 900;
+  color: var(--purple);
+}
+.matchweek-list { display: flex; flex-direction: column; gap: 8px; }
+
+/* A published fixture we cannot resolve, holding its host-selected place.
+   Muted and plainly not a card: it must not read as a game you could predict. */
+.fixture-row-unavailable {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 12px 14px;
+  border: 1px dashed var(--line);
+  border-radius: 12px;
+  background: var(--white);
+  color: var(--muted);
+}
+.fixture-row-unavailable strong { font-size: .88rem; font-weight: 800; color: var(--ink); }
+.fixture-row-unavailable span { font-size: .8rem; }
+
+/* --- v1.7 Slice B: My Picks, compact and personal -------------------------- */
+.pick-list { display: flex; flex-direction: column; gap: 8px; }
+.pick-row {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--white);
+  overflow: hidden;
+}
+.pick-row.is-needed { border-color: var(--purple); }
+.pick-row-head {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 44px;
+  padding: 10px 12px 4px;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.pick-row-when { font-size: .74rem; font-weight: 800; color: var(--muted); }
+.pick-row-teams { min-width: 0; font-size: .88rem; font-weight: 900; overflow-wrap: anywhere; }
+.pick-row-score { font-size: 1rem; font-weight: 900; color: var(--purple); }
+.pick-row-score.pick-row-needed { color: var(--muted); }
+.pick-row-status { margin: 0; padding: 0 12px 10px; font-size: .76rem; color: var(--muted); }
+.pick-row-body:empty { display: none; }
+.pick-row-body { padding: 0 12px 12px; }
+.pick-row-result { border: 0; background: none; }
+.pick-social-link { margin-top: 14px; font-size: .82rem; color: var(--muted); text-align: center; }
+
+/* --- v1.7 Slice B: Matchweek row states ----------------------------------- */
+.fixture-row-state { margin: 0; padding: 0 12px 10px; font-size: .74rem; font-weight: 800; color: var(--muted); }
+.fixture-row-settled .fixture-row-state { color: var(--green); }
+.fixture-row-void .fixture-row-state,
+.fixture-row-postponed .fixture-row-state { color: var(--danger); }
+.fixture-row-final { font-size: 1.05rem; font-weight: 900; color: var(--ink); }
+.fixture-row-final .result-sep { padding: 0 3px; color: var(--muted); }
+
+/* --- v1.7 Slice C: the platform share control ------------------------------
+   An icon, sized to the 44x44 minimum target whatever the glyph inside it
+   measures. The name lives in aria-label, not in the pixels. */
+.share-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--white);
+  color: var(--purple);
+  cursor: pointer;
+}
+.share-icon:active { background: var(--purple-soft); }
+.share-icon:focus-visible { outline: 2px solid var(--purple); outline-offset: 2px; }

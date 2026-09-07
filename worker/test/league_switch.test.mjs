@@ -45,6 +45,7 @@ function loaders({ delays = {}, roundDelays = {}, fail = false, cachedLeagues = 
     let activeLeague = active, leagueState = null, roundState = null;
     // v1.7: setActiveLeague closes the open Matchweek card on a real switch.
     let expandedFixtureId = null;
+    let expandedPickId = null;
     let selectedPeriod = null, leagueTab = "matchday", leagueStates = { ...cachedLeagues };
     let leagueStateRequest = 0, roundStateRequest = 0;
     let navGeneration = 0;
@@ -444,6 +445,7 @@ function renamer() {
   const build = new Function(`
     "use strict";
     let expandedFixtureId = null;
+    let expandedPickId = null;
     let leagueState = { code: "AAA", table: [{ uid: "u1", nick: "Adam" }], reveals: [], cabinet: [] };
     let roundState = { code: "BBB", table: [{ uid: "u1", nick: "Biggers" }], podium: [{ uid: "u1", nick: "Biggers" }] };
     let leagueStates = {
@@ -496,6 +498,7 @@ function switcher() {
     let activeLeague = "AAA", selectedPeriod = null, roundState = null, leagueState = null;
     // v1.7: a real switch closes the open Matchweek card.
     let expandedFixtureId = null;
+    let expandedPickId = null;
     let flashMessage = "", flashTone = "success";
     let leagueStates = { AAA: { code: "AAA" }, BBB: { code: "BBB" } };
     const STORAGE = { activeLeague: "k" };

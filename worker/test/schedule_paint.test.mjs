@@ -63,7 +63,19 @@ function board({ open = new Set(["md-1"]), filter = "all", current = "1" } = {})
     const matchCard = (f) => { heavy.push(f.id); return '<div data-match-card="' + f.id + '"></div>'; };
     const picks = {};
     let expandedFixtureId = null;
+    let expandedPickId = null;
     const shortKickoff = () => "Sat 21 Aug 15:00";
+    // v1.7 Slice B: the row now names its own state, so the harness lifts the
+    // contract behind it as well as the row itself.
+    ${lift("function matchweekRowState(fixture)")}
+    ${lift("function matchweekRowMark(fixture, state)")}
+    ${lift("const MATCHWEEK_ROW_LINE")}
+    ${lift("function closedStatus(match)")}
+    ${lift("function matchOpen(match)")}
+    ${lift("function finalScore(match)")}
+    ${liftConst("VOID_STATUSES")}
+    ${liftConst("isVoidFixture")}
+    ${liftConst("isPostponed")}
     ${lift("function fixtureRow(fixture)").replace("const id = String(fixture.id);", "const id = String(fixture.id); built.push(id);")}
     const periodOfFixture = (f) => f.matchday;
     const comparePeriods = (a, b) => Number(a) - Number(b);

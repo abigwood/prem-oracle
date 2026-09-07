@@ -1413,11 +1413,14 @@ class WeekPickerTests(unittest.TestCase):
     def test_the_strip_is_centred_on_the_current_week(self):
         strip = self.app[self.app.index("function weekStrip(selected, attribute, only = null)"):]
         strip = strip[:strip.index("\n}")]
-        # The current week is marked so the scroller can find it...
-        self.assertIn('data-week-anchor="1"', strip)
+        # The chip the strip should open on is marked so the scroller can find
+        # it — the selected week when that is a real choice, else the current
+        # one (Adam's v1.7 UX rider A).
+        self.assertIn('${String(period) === anchored ? \'data-week-anchor="1"\' : ""}', strip)
+        self.assertIn("const anchored = weekAnchorPeriod(periods, selected, current);", strip)
         self.assertIn('aria-current="${isCurrent ? "date" : "false"}"', strip)
         # ...and the scroller centres it without dragging the page with it.
-        centre = self.app[self.app.index("function centreWeekStrip()"):]
+        centre = self.app[self.app.index("function centreWeekStrip(attempts = CENTRE_ATTEMPTS)"):]
         centre = centre[:centre.index("function render(options = {})")]
         self.assertIn('strip.querySelector("[data-week-anchor]")', centre)
         self.assertIn("strip.scrollLeft += (chipBox.left - stripBox.left) - (strip.clientWidth - chipBox.width) / 2;", centre)
@@ -1547,7 +1550,7 @@ class WeekPickerTests(unittest.TestCase):
         self.assertIn("<strong>${escapeHTML(title)}</strong>", row)
 
     def test_the_strip_re_anchors_however_it_was_left(self):
-        centre = self.app[self.app.index("function centreWeekStrip()"):]
+        centre = self.app[self.app.index("function centreWeekStrip(attempts = CENTRE_ATTEMPTS)"):]
         centre = centre[:centre.index("function render(options = {})")]
         # Measured against the strip, not the page — offsetLeft was the bug.
         self.assertIn("strip.getBoundingClientRect()", centre)
@@ -1557,7 +1560,13 @@ class WeekPickerTests(unittest.TestCase):
         # assumed to be zero.
         self.assertIn("strip.scrollLeft +=", centre)
         # An unlaid-out strip waits for a later paint instead of writing junk.
-        self.assertIn("if (!anchor || !strip.clientWidth) return;", centre)
+        # A strip with nothing to anchor to is left alone; one with no width
+        # yet waits for the paint that gives it one, rather than giving up —
+        # which is the case a dropdown opening for the first time is in.
+        self.assertIn("if (!anchor) return;", centre)
+        self.assertIn("if (!strip.clientWidth) { unlaid = true; return; }", centre)
+        self.assertIn("if (unlaid && attempts > 1) centreWeekStrip(attempts - 1);", centre)
+        self.assertIn("const CENTRE_ATTEMPTS = 5;", self.app)
         # And it runs on every paint, which is what makes reopening re-anchor.
         self.assertIn("centreWeekStrip();", self.app)
 

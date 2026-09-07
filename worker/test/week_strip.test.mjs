@@ -66,12 +66,17 @@ function runCentre(strips) {
     "use strict";
     const requestAnimationFrame = (fn) => frames.push(fn);
     const document = { querySelectorAll: () => strips };
-    ${lift("function centreWeekStrip()")}
+    const CENTRE_ATTEMPTS = 5;
+    ${lift("function centreWeekStrip(attempts = CENTRE_ATTEMPTS)")}
     return centreWeekStrip;
   `);
   const centre = build(strips, frames);
   centre();
-  frames.forEach((fn) => fn());
+  // Drain, because an unlaid strip now queues another frame rather than
+  // silently giving up. A laid-out strip still settles on the first one.
+  for (let pass = 0; pass < 8 && frames.length; pass += 1) {
+    frames.splice(0, frames.length).forEach((fn) => fn());
+  }
   return strips;
 }
 

@@ -557,6 +557,22 @@ const WEEK_CONVENTION = `<p class="week-convention">Weeks run Tuesday to Monday.
  * The everyday control: one horizontal strip, centred on the week in play.
  * Weeks already gone are faded and sit to the left; the rest are a swipe right.
  */
+/**
+ * Which chip a strip should open on.
+ *
+ * The week in play, unless the viewer deliberately chose another one this
+ * session and that week is still on the strip. A selection that has gone stale
+ * — a week trimmed from the board, a league that has moved on, a value from
+ * another league entirely — is not a choice any more, so the strip returns to
+ * now rather than opening on a week that is no longer there.
+ */
+function weekAnchorPeriod(periods, selected, current) {
+  const known = new Set(periods.map(String));
+  if (selected != null && known.has(String(selected))) return String(selected);
+  if (current != null && known.has(String(current))) return String(current);
+  return String(periods[0]);
+}
+
 function weekStrip(selected, attribute, only = null) {
   // `only` trims the chips to the weeks actually on the board, so the selector
   // never offers more than the view is showing.
@@ -567,6 +583,10 @@ function weekStrip(selected, attribute, only = null) {
   // matchweek league has an official number that needs no explaining and no
   // date beneath it.
   const windows = isWindowKey(periods[0]);
+  // The chip the strip scrolls to when it opens. Anchoring the CURRENT week
+  // regardless meant a deliberately chosen historic week was marked selected
+  // and then scrolled away from.
+  const anchored = weekAnchorPeriod(periods, selected, current);
   return `${windows ? WEEK_CONVENTION : ""}
     <div class="week-strip${windows ? "" : " week-strip-plain"}" role="group" aria-label="${windows ? "Choose a week" : "Choose a matchweek"}">
       ${periods.map((period) => {
@@ -576,7 +596,7 @@ function weekStrip(selected, attribute, only = null) {
         return `<button type="button"
           class="week-chip${isCurrent ? " is-current" : ""}${isSelected ? " is-selected" : ""}${past ? " is-past" : ""}"
           ${attribute}="${escapeHTML(period)}"
-          ${isCurrent ? 'data-week-anchor="1"' : ""}
+          ${String(period) === anchored ? 'data-week-anchor="1"' : ""}
           aria-current="${isCurrent ? "date" : "false"}">
           <b>${escapeHTML(periodLabel(period))}</b>
           ${windows ? `<em>${escapeHTML(weekDateRange(period))}</em>` : ""}
@@ -3585,6 +3605,9 @@ async function toggleWeeklyPicker() {
   const retained = retainedPickers.get(key);
   if (retained) {
     island.replaceChildren(retained);
+    // A detached node comes back with its scroller at zero, so a retained
+    // picker needs anchoring exactly as much as a freshly built one.
+    centreWeekStrip();
     traceTap("picker-retained-hit", {});
     return;
   }
@@ -3610,6 +3633,9 @@ async function toggleWeeklyPicker() {
     return;
   }
   target.replaceChildren(built);
+  // The dropdown has never done this, which is why it opened on Week 1 in
+  // March. It is the strip's own scrollLeft, so the page does not move.
+  centreWeekStrip();
   traceTap("picker-built", { chars: built.innerHTML.length });
 }
 
@@ -5834,17 +5860,27 @@ function rememberMatchDay(matchId) {
  * Done on the strip's own scrollLeft rather than with scrollIntoView, which
  * would drag the page as well as the strip.
  */
-function centreWeekStrip() {
+// A handful of frames is enough for a strip that is going to be laid out at
+// all; beyond that it is hidden or detached, and retrying forever would be a
+// loop nobody stops.
+const CENTRE_ATTEMPTS = 5;
+
+function centreWeekStrip(attempts = CENTRE_ATTEMPTS) {
   requestAnimationFrame(() => {
+    let unlaid = false;
     document.querySelectorAll(".week-strip").forEach((strip) => {
       const anchor = strip.querySelector("[data-week-anchor]");
-      // No width yet means the strip has not been laid out; a later paint will
-      // anchor it rather than this one writing a nonsense offset.
-      if (!anchor || !strip.clientWidth) return;
+      if (!anchor) return;
+      // No width yet means the strip has not been laid out. Writing an offset
+      // against a zero width is a nonsense number, and the old code answered
+      // that by giving up — which is exactly the case a dropdown opening for
+      // the first time is in. So wait for the paint that gives it a width.
+      if (!strip.clientWidth) { unlaid = true; return; }
       const stripBox = strip.getBoundingClientRect();
       const chipBox = anchor.getBoundingClientRect();
       strip.scrollLeft += (chipBox.left - stripBox.left) - (strip.clientWidth - chipBox.width) / 2;
     });
+    if (unlaid && attempts > 1) centreWeekStrip(attempts - 1);
   });
 }
 

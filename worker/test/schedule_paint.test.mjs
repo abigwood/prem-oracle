@@ -439,6 +439,9 @@ function island({ buildMs = 0 } = {}) {
     ${lift("function markSegment(tab)")}
     ${lift("function markLeaguePill(code)")}
     let retainedPickers = new Map();
+    // v1.7 UX rider A: opening the dropdown anchors the strip it just showed.
+    let centred = 0;
+    const centreWeekStrip = () => { centred += 1; };
     const pickerKey = () =>
       activeLeague + "|" + Object.values(fixtureRevisions).join(",") + "|" + (selectedPeriod ?? currentPeriodKey());
     ${lift("function pickerIsland()")}
@@ -468,6 +471,7 @@ function island({ buildMs = 0 } = {}) {
       showResultsPanel, markSegment, markLeaguePill, mountResults,
       replaceCard: (code) => { card.replaceChildren(leagueCardShell(leagueNames[code] || code, code)); },
       toggleWeeklyPicker, closeWeeklyPicker, selectWeeklyPeriod,
+      centred: () => centred,
       roundCalls: () => roundCalls.slice(),
       setRoundDelay: (ms) => { roundDelayMs = ms; },
       seedRound: (code, period) => { cachedRounds[code + ":" + period] = { code, period, matchday: period, cached: true,
@@ -1038,6 +1042,20 @@ test("the share label follows the visible tab through a swap", async () => {
 });
 
 // (E10)
+test("opening the weekly dropdown brings its strip into view", async () => {
+  const app = island();
+  assert.equal(app.centred(), 0, "nothing anchored before it opens");
+  await app.toggleWeeklyPicker();
+  assert.equal(app.centred(), 1, "the built strip was left wherever it happened to be");
+  // Closing does not touch the scroller; reopening from the retained node does,
+  // because a detached node comes back with its scroller at zero.
+  await app.toggleWeeklyPicker();
+  assert.equal(app.centred(), 1, "closing moved a scroller");
+  await app.toggleWeeklyPicker();
+  assert.equal(app.centred(), 2, "a retained picker came back unanchored");
+  assert.equal(app.apiCalls(), 0, "anchoring asked the network something");
+});
+
 test("toggling Week and Season makes no API call", () => {
   const handler = APP.slice(APP.indexOf('const roundTab = event.target.closest("[data-round-tab]");'));
   const branch = handler.slice(0, handler.indexOf('const roundMd = event.target.closest'));

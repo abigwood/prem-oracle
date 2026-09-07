@@ -55,14 +55,13 @@ function board({ open = new Set(["md-1"]), filter = "all", current = "1" } = {})
     let fixtures = fixturesIn;
     let openScheduleDates = openIn;
     let matchdayFilter = filterIn;
-    let currentView = "schedule";
+    let currentView = "picks";
     let built = [];
     let heavy = [];
     const traceTap = () => {};   // the trace is measured in the browser, not here
     const escapeHTML = (v) => String(v ?? "");
     const matchCard = (f) => { heavy.push(f.id); return '<div data-match-card="' + f.id + '"></div>'; };
     const picks = {};
-    let expandedFixtureId = null;
     let expandedPickId = null;
     const shortKickoff = () => "Sat 21 Aug 15:00";
     // v1.7 Slice B: the row now names its own state, so the harness lifts the
@@ -111,142 +110,22 @@ function fakeCard(period) {
   return { querySelector: (sel) => (sel === "[data-lazy-body]" && body.dataset.lazyBody ? body : null), body };
 }
 
-// --- what gets built --------------------------------------------------------
+// --- arriving on the weekly screen ------------------------------------------
+//
+// The lazy day-card season browser this file used to measure is gone: Adam's
+// v1.7 ruling folded the week into My Picks, and its rows are covered by
+// test/matchweek.test.mjs and test/slicebcd.test.mjs. What survives here is
+// what the NAVIGATION owes that screen.
 
-test("only the open week's cards are built", () => {
-  const { h, built } = board().html();
-  assert.equal(built.length, PER_WEEK, "one week's worth, not the whole season");
-  assert.ok(built.every((id) => id.startsWith("pl-w1-")), "and it is the open week's");
-  // Every other week is still listed, just not furnished.
-  assert.equal((h.match(/data-day-card=/g) || []).length, WEEKS);
-  assert.equal((h.match(/data-lazy-body=/g) || []).length, WEEKS - 1);
-});
-
-test("the summary still counts a week it has not built", () => {
-  const { h } = board().html();
-  // Thirty-eight weeks of ten, whether or not their cards exist yet.
-  assert.equal((h.match(/10 fixtures/g) || []).length, WEEKS);
-});
-
-test("a closed week costs a stub, not a card", () => {
-  const { h } = board().html();
-  const closed = h.slice(h.indexOf('data-day-card="md-2"'));
-  const body = closed.slice(closed.indexOf('<div class="day-body"'), closed.indexOf("</details>"));
-  assert.match(body, /data-lazy-body="2"/);
-  assert.doesNotMatch(body, /data-match-card/);
-});
-
-test("opening a week builds exactly that week", () => {
-  const app = board();
-  app.html();
-  const card = fakeCard(7);
-  const built = app.fill(card);
-  assert.equal(built.length, PER_WEEK);
-  assert.ok(built.every((id) => id.startsWith("pl-w7-")), built.slice(0, 3).join());
-  // Rows, not prediction cards — the heavy markup is mounted on a tap.
-  assert.match(card.body.innerHTML, /data-fixture-row="pl-w7-/);
-  assert.doesNotMatch(card.body.innerHTML, /data-match-card/);
-});
-
-test("a week is built once and not again", () => {
-  const app = board();
-  app.html();
-  const card = fakeCard(7);
-  assert.equal(app.fill(card).length, PER_WEEK);
-  assert.equal(app.fill(card).length, 0, "the stub is gone, so there is nothing left to fill");
-});
-
-test("every week's cards are reachable, none are lost", () => {
-  const app = board();
-  const { built } = app.html();
-  const all = new Set(built);
-  for (let week = 2; week <= WEEKS; week++) for (const id of app.fill(fakeCard(week))) all.add(id);
-  assert.equal(all.size, fixtures.length, "expanding every week accounts for every fixture");
-});
-
-// --- which week starts open -------------------------------------------------
-
-test("with no history the current week is the open one", () => {
-  const { built } = board({ open: new Set(), current: "5" }).html();
-  assert.ok(built.every((id) => id.startsWith("pl-w5-")));
-});
-
-test("once the viewer has chosen, their choice wins", () => {
-  const { built } = board({ open: new Set(["md-9"]), current: "5" }).html();
-  assert.ok(built.every((id) => id.startsWith("pl-w9-")), "not the current week");
-});
-
-test("filtering to a week opens it, so it is never an empty row", () => {
-  // The click handler adds the filtered week to the open set; the rule that
-  // decides what is open is then the ordinary one.
-  const handler = APP.slice(APP.indexOf('const filter = event.target.closest("[data-filter]");'));
-  const branch = handler.slice(0, handler.indexOf("const league = event.target.closest"));
-  assert.match(branch, /if \(matchdayFilter !== "all"\) openScheduleDates\.add\(`md-\$\{matchdayFilter\}`\);/);
-  const { built } = board({ open: new Set(["md-12"]), filter: "12", current: "1" }).html();
-  assert.ok(built.every((id) => id.startsWith("pl-w12-")));
-});
-
-// --- reference-first Schedule ------------------------------------------------
-
-test("navigation builds NO prediction cards, only rows", () => {
-  const { h, built, heavy } = board().html();
-  assert.equal(heavy.length, 0, "matchCard() must not run during navigation");
-  assert.ok(built.length > 0, "but the open week's rows are there");
-  assert.doesNotMatch(h, /data-match-card/);
-  assert.match(h, /data-fixture-row=/);
-});
-
-test("a row says when and who, and nothing heavier", () => {
-  const row = lift("function fixtureRow(fixture)");
-  assert.match(row, /fixture-row-when/);
-  assert.match(row, /fixture-row-teams/);
-  // The card is mounted only for the fixture being looked at.
-  assert.match(row, /\$\{open \? matchCard\(fixture, \{ resultFirst: true \}\) : ""\}/);
-  // And it announces itself as expandable.
-  assert.match(row, /aria-expanded="\$\{open \? "true" : "false"\}"/);
-  assert.match(row, /aria-controls="fx-/);
-});
-
-test("only one rich card is ever mounted", () => {
-  const fn = lift("function expandFixture(id)");
-  // Opening another unmounts the previous, and collapsing removes the markup
-  // rather than merely hiding it.
-  assert.match(fn, /body\.innerHTML = "";/);
-  assert.match(fn, /body\.innerHTML = fixture \? matchCard\(fixture, \{ resultFirst: true \}\) : "";/);
-  assert.match(fn, /head\.setAttribute\("aria-expanded", "false"\)/);
-  assert.match(fn, /head\.setAttribute\("aria-expanded", "true"\)/);
-  // A DOM edit, not a re-render: browsing never rebuilds the board.
-  assert.doesNotMatch(fn, /\brender\(/);
-});
-
-test("tapping the same fixture again closes it", () => {
-  const fn = lift("function expandFixture(id)");
-  assert.match(fn, /const wanted = expandedFixtureId === String\(id\) \? null : String\(id\);/);
-});
-
-test("the board opens on the current week and the two after it", () => {
-  const fn = lift("function scheduleWindow(periods, current)");
-  assert.match(fn, /periods\.slice\(start, start \+ SCHEDULE_WEEKS_SHOWN\)/);
-  assert.match(APP, /const SCHEDULE_WEEKS_SHOWN = 3;/);
-  // A filter or an explicit reveal opts out of the window.
-  assert.match(fn, /if \(scheduleFullSeason \|\| matchdayFilter !== "all"\) return periods;/);
-});
-
-test("the week selector is trimmed to what the board is showing", () => {
-  const strip = lift("function weekStrip(selected, attribute, only = null)");
-  assert.match(strip, /const periods = only && only\.length \? only : periodsInOrder\(\);/);
-  const view = APP.slice(APP.indexOf("function scheduleView()"), APP.indexOf("// --- My Predictions"));
-  assert.match(view, /scheduleFilters\(shown\)/);
-  assert.match(view, /data-full-season/);
-});
-
-test("arriving at Schedule resets the scroller BEFORE content is added", () => {
-  const nav = lift("async function navigateToView(view)");
+test("arriving at My Picks resets the scroller BEFORE content is added", () => {
+  const nav = lift("async function navigateToView(requested)");
   const reset = nav.indexOf("appScroller()?.scrollTo({ top: 0 })");
   assert.ok(reset > 0, "the scroller is put back");
-  assert.ok(reset < nav.indexOf("render({ scrollTop: true })"), "before the board is built");
-  assert.match(nav, /scheduleFullSeason = false;/);
-  assert.match(nav, /expandedFixtureId = null;/);
+  assert.ok(reset < nav.indexOf("render({ scrollTop: true })"), "before the list is built");
+  assert.match(nav, /expandedPickId = null;/, "an open row survives the arrival");
+  // And the legacy route id lands there rather than on nothing.
+  assert.match(APP, /const LEGACY_VIEWS = \{ schedule: "picks" \};/);
+  assert.match(nav, /const view = normaliseView\(requested\);/);
 });
 
 test("expanding and revealing answer on the tap, before any await", () => {
@@ -254,8 +133,8 @@ test("expanding and revealing answer on the tap, before any await", () => {
   const head = listener.slice(0, listener.indexOf("const leagueCountStep"));
   const code = head.replace(/\/\/[^\n]*/g, "");
   assert.doesNotMatch(code, /\bawait\b/);
-  assert.match(code, /expandFixture\(expand\.dataset\.expandFixture\)/);
-  assert.match(code, /scheduleFullSeason = true/);
+  assert.match(code, /expandPick\(pickRowHead\.dataset\.expandPick\)/);
+  assert.match(code, /toggleSeasonSection\(fold\.dataset\.seasonToggle\)/);
 });
 
 test("a nav tap's trace survives the taps used to report it", () => {
@@ -358,6 +237,8 @@ function island({ buildMs = 0 } = {}) {
     const currentPeriodKey = () => 1;
     const weekStrip = () => { apiCalls += 0; return "<weeks/>"; };
     const shareBtn = new El("button");
+    // The control carries the surface it belongs to, as the real one does.
+    shareBtn.dataset = {};
     const card = new El("section");
     const segs = ["matchday", "season"].map((t) => { const e = new El("button"); e.dataset = { roundTab: t }; return e; });
     const pills = ["AAA", "BBB"].map((c) => { const e = new El("button"); e.dataset = { league: c }; return e; });
@@ -368,7 +249,10 @@ function island({ buildMs = 0 } = {}) {
         : sel === ".league-card" ? card
         : sel === "[data-picker-island]" ? pickerEl
         : sel === '[data-round-tab="matchday"]' ? matchdaySeg : null),
-      querySelectorAll: (sel) => (sel === "[data-round-tab]" ? segs : sel === "[data-league]" ? pills : []),
+      querySelectorAll: (sel) => (sel === "[data-round-tab]" ? segs
+        : sel === "[data-league]" ? pills
+        // One control per surface now, so the label sync walks them all.
+        : sel === "[data-export-league-table]" ? [shareBtn] : []),
     };
     let renders = 0;
     const render = () => { renders++; };
@@ -433,7 +317,14 @@ function island({ buildMs = 0 } = {}) {
     ${lift("function weeklyTerminalCount(round)")}
     ${lift("function weeklyShareStatus(round)")}
     ${lift("function seasonShareFreshness(state)")}
-    ${lift("function shareCardState()")}
+    // v1.7 consolidation: the control knows which surface it is on. The island
+    // already declares currentView above.
+    ${liftConst("LEGACY_VIEWS")}
+    ${lift("function shareSurface()")}
+    ${lift("function shareRound(surface = shareSurface())")}
+    ${lift("function sharePeriod(surface = shareSurface())")}
+    ${lift("function shareCardState(surface = shareSurface())")}
+    ${lift("function shareIconButton(state, surface = shareSurface())")}
     ${lift("function syncShareLabel()")}
     ${lift("function mountResults()")}
     ${lift("function markSegment(tab)")}
@@ -458,7 +349,7 @@ function island({ buildMs = 0 } = {}) {
       text: () => resultsEl.innerHTML,
       html: () => resultsEl.innerHTML,
       bumpTruth: () => bumpStamp(activeLeague),
-      shareLabel: () => shareBtn.textContent,
+      shareLabel: () => shareBtn.getAttribute("aria-label") || "",
       cardText: () => card.textContent,
       segState: () => segs.map((s) => ({ tab: s.dataset.roundTab, on: s.classList.contains("active"), aria: s.getAttribute("aria-selected") })),
       pillState: () => pills.map((p) => ({ code: p.dataset.league, on: p.classList.contains("active"), aria: p.getAttribute("aria-selected") })),
@@ -661,10 +552,15 @@ test("the share label always matches the visible tab", () => {
   // The button is told what it is by one function, so the label and whether
   // it does anything can never disagree.
   const fn = lift("function syncShareLabel()");
-  assert.match(fn, /shareCardState\(\)/);
-  assert.match(fn, /button\.disabled = !ready/);
-  const which = lift("function shareCardState()");
-  assert.match(which, /leagueTab === "matchday"/);
+  assert.match(fn, /shareCardState\(button\.dataset\.shareSurface \|\| undefined\)/);
+  // An icon-only control is hidden when it cannot act, rather than shown greyed.
+  assert.match(fn, /button\.hidden = !!hidden \|\| !ready;/);
+  assert.match(fn, /button\.setAttribute\("aria-label", label\)/);
+  const which = lift("function shareCardState(surface = shareSurface())");
+  assert.match(which, /surface === "weekly"/);
+  const surface = lift("function shareSurface()");
+  assert.match(surface, /leagueTab === "matchday" && leagueSupportsRounds\(leagueState\)/);
+  assert.match(surface, /normaliseView\(currentView\) === "picks"/, "My Picks shares its week");
   assert.match(which, /Share season table/);
   // Called on every path that changes what is on screen.
   const swap = lift("async function showResultsPanel({ status } = {})");
@@ -984,8 +880,10 @@ test("Season is built in bounded stages, yielding between every one", async () =
   const chunks = app.events.filter((e) => e.trace === "chunk").map((e) => e.stage);
   // No "weeks": the month calendar cost 8,185 chars and 3.5s of synchronous
   // build to duplicate navigation the Weekly League dropdown already owns.
-  assert.deepEqual(chunks, ["banner", "cabinet", "standings", "reveals"]);
-  assert.equal(app.panelNode().children.length, 4);
+  // v1.7 rider item 3: the share control is its own stage, immediately below
+  // the table it exports and above the mates' section.
+  assert.deepEqual(chunks, ["banner", "cabinet", "standings", "share", "reveals"]);
+  assert.equal(app.panelNode().children.length, 5);
   const fn = lift("async function fillPanelProgressively(panel, capture)");
   assert.match(fn, /await nextPaint\(\);/, "and it yields between them");
 });
@@ -1090,21 +988,22 @@ test("the week chip is marked and the picker shut before anything is awaited", (
 
 test("every tab has a shell it can show before doing any work", () => {
   const shells = APP.slice(APP.indexOf("const VIEW_SHELLS = {"), APP.indexOf("const loadingLine ="));
-  for (const view of ["schedule", "picks", "league", "today", "rules"]) {
+  for (const view of ["picks", "league", "today", "rules"]) {
     assert.match(shells, new RegExp(`\\b${view}:`), `${view} has no shell`);
   }
-  // The Schedule shell is the header and filters — no fixture cards.
+  // Matchweek folded into My Picks, so there is no shell for it — and the
+  // route that still points there is translated rather than rendered.
+  assert.ok(!/\bschedule:/.test(shells), "a shell survives for a view nobody can reach");
   // Literal markup only: the shell that called scheduleFilters() -> weekStrip()
   // -> periodsInOrder() took 2908ms to reach the DOM on a real phone.
-  // v1.7 Slice A renamed the surface; the shell stays literal and cheap.
-  assert.match(shells, /pulsingStatus\("Loading matchweek…"\)/);
+  assert.match(shells, /pulsingStatus\("Loading this week…"\)/);
   for (const computed of ["scheduleFilters(", "weekStrip(", "periodsInOrder(", "groupedPeriods(", "fixtureRow("]) {
     assert.ok(!shells.replace(/\/\/[^\n]*/g, "").includes(computed), `shell must not call ${computed}`);
   }
 });
 
 test("the shell is painted, and the highlight moved, before the view is built", () => {
-  const nav = lift("async function navigateToView(view)");
+  const nav = lift("async function navigateToView(requested)");
   const shellAt = nav.indexOf("paintShell(view)");
   const renderAt = nav.indexOf("render({ scrollTop: true })");
   assert.ok(shellAt > 0 && renderAt > shellAt, "the shell must come first");
@@ -1147,11 +1046,11 @@ test("navigation is handled before any unrelated awaited branch", () => {
   assert.equal(/\bawait\b/.test(code), false, "an await before nav delays the tap that opens the heaviest screen");
   // The gesture-sensitive branches that genuinely must be first are still first.
   assert.match(code, /data-share-league/);
-  assert.match(code, /data-expand-fixture/);
+  assert.match(code, /data-expand-pick/);
 });
 
 test("the tab is marked and the shell inserted before the board is built", () => {
-  const nav = lift("async function navigateToView(view)");
+  const nav = lift("async function navigateToView(requested)");
   const shell = nav.indexOf("paintShell(view)");
   const board = nav.indexOf('traceTap("board-build-start"');
   assert.ok(shell > 0 && board > shell, "the board must come after the shell");
@@ -1163,14 +1062,14 @@ test("the tab is marked and the shell inserted before the board is built", () =>
 });
 
 test("arriving at Schedule resets the scroller before the shell", () => {
-  const nav = lift("async function navigateToView(view)");
+  const nav = lift("async function navigateToView(requested)");
   assert.ok(nav.indexOf("appScroller()?.scrollTo({ top: 0 })") < nav.indexOf("paintShell(view)"));
 });
 
 // --- build 16: the stale-render race ----------------------------------------
 
 test("every navigation takes a generation", () => {
-  const nav = lift("async function navigateToView(view)");
+  const nav = lift("async function navigateToView(requested)");
   assert.match(nav, /const generation = \+\+navGeneration;/);
   assert.match(APP, /const navCurrent = \(generation, view\) => generation === navGeneration && view === currentView;/);
   // Checked after every await, not just the first.
@@ -1202,7 +1101,7 @@ test("startup restores league, period and round together", () => {
 });
 
 test("League navigation paints from cache before it asks for anything", () => {
-  const nav = lift("async function navigateToView(view)");
+  const nav = lift("async function navigateToView(requested)");
   const branch = nav.slice(nav.indexOf('if (currentView === "league")'));
   assert.ok(branch.indexOf("hydrateCachedLeague();") < branch.indexOf("refreshLeague(generation)"));
   assert.match(branch, /if \(leagueState\) \{ render\(\); traceTap\("cached-league-painted", \{\}\); \}/);
@@ -1216,7 +1115,7 @@ test("a valid cached week is never replaced by a loading state", () => {
 });
 
 test("season and round revalidate in parallel when the week is known", () => {
-  const nav = lift("async function navigateToView(view)");
+  const nav = lift("async function navigateToView(requested)");
   // One place decides parallel vs serial, shared by navigation, startup and
   // the league-pill switch.
   const refresh = lift("async function refreshLeague(generation = navGeneration)");
@@ -1243,33 +1142,22 @@ test("the separated timings are all traced", () => {
 
 // --- nothing else changed ---------------------------------------------------
 
-test("a lazily built card is the same card", () => {
-  // Both paths call the one matchCard, so calendar links, TV info and score
-  // controls cannot differ between them.
-  const body = lift("function dayBody(period, matches, open)");
-  assert.match(body, /matches\.map\(fixtureRow\)\.join\(""\)/);
-  const fill = lift("function fillDayBody(card)");
-  assert.match(fill, /matches\.map\(fixtureRow\)\.join\(""\)/);
+test("there is one card builder, and one row builder", () => {
+  // The lazy day-card browser is gone; what mattered about it — that both
+  // paths built the SAME card — is now guaranteed by there being one of each.
   assert.equal((APP.match(/function matchCard\(/g) || []).length, 1, "one card builder, one behaviour");
+  assert.equal((APP.match(/function pickRow\(/g) || []).length, 1, "one row builder, one behaviour");
+  // And an expansion builds exactly what the first paint would have.
+  assert.match(lift("function expandPick(id)"), /pickRowBody\(fixture, pickEditable\(fixture\)\)/);
 });
 
-test("expanding still records the week, so it survives a repaint", () => {
-  const toggle = APP.slice(APP.indexOf('document.addEventListener("toggle"'));
-  const branch = toggle.slice(toggle.indexOf('const card = event.target.closest?.("[data-day-card]")'), toggle.indexOf("}, true);"));
-  assert.match(branch, /fillDayBody\(card\);/);
-  assert.match(branch, /openScheduleDates\.add\(card\.dataset\.dayCard\);/);
-  assert.match(branch, /openScheduleDates\.delete\(card\.dataset\.dayCard\);/);
-  // Built on the way open, before it is recorded — order matters only in that
-  // both must happen.
-  assert.ok(branch.indexOf("fillDayBody") < branch.indexOf("openScheduleDates.add"));
-});
-
-test("the whole list is walked once, not once per week", () => {
-  // The old shape filtered the full list inside a map over every period, which
-  // is thirty-eight scans of nine hundred fixtures before a card is even built.
-  const group = lift("function groupedPeriods(list, currentPeriod = null)");
-  assert.doesNotMatch(group, /list\.filter/);
-  assert.match(group, /byPeriod\(list\)/);
-  const grouper = lift("function byPeriod(list)");
-  assert.match(grouper, /for \(const fixture of list\)/);
+test("the week is read from the slate, not scanned out of the season", () => {
+  // The old shape filtered the full fixture list inside a map over every
+  // period — thirty-eight scans of nine hundred fixtures before a card was
+  // even built. The consolidated screen never walks the calendar at all: it
+  // maps the host's own ids and resolves each one.
+  const slots = lift("function matchweekSlots(plan)");
+  assert.match(slots, /plan\.ids\.map\(/);
+  const view = lift("function picksView()");
+  assert.doesNotMatch(view, /fixtures\.filter|fixtures\.map/);
 });

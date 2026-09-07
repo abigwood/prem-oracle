@@ -155,7 +155,12 @@ function cards({ native = false } = {}) {
     ${lift("function leagueTableShareText(state)")}
     ${lift("function leagueSupportsRounds(state)")}
     ${lift("function weeklyCardReady()")}
-    ${lift("function shareCardState()")}
+    let currentView = "league";
+    const normaliseView = (view) => (view === "schedule" ? "picks" : view);
+    ${lift("function shareSurface()")}
+    ${lift("function shareRound(surface = shareSurface())")}
+    ${lift("function sharePeriod(surface = shareSurface())")}
+    ${lift("function shareCardState(surface = shareSurface())")}
 
     return {
       weeklyModel: () => weeklyCardModel(leagueState, roundState),

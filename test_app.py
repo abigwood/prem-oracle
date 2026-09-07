@@ -536,7 +536,7 @@ class MatchweekTerminologyTests(unittest.TestCase):
             "🏆 ${competition} ${week}",
             'title="${escapeHTML(label)}">Weekly \u25be',   # the week is the tooltip; the segment says what it is
             "Share Matchweek ",
-            "Loading matchweek",
+            "Loading this week",
             '"Choose a matchweek"',
         ):
             self.assertIn(snippet, self.app, snippet)
@@ -544,8 +544,8 @@ class MatchweekTerminologyTests(unittest.TestCase):
 
     def test_code_identifiers_and_data_fields_are_unchanged(self):
         # The football-data field name stays `matchday` everywhere.
-        for identifier in ("selectedMatchday", "matchdayFilter", "currentMatchday",
-                           "nextMatchday", "groupedMatchdays", "match.matchday"):
+        for identifier in ("selectedMatchday", "currentMatchday",
+                           "nextMatchday", "match.matchday"):
             self.assertIn(identifier, self.app, identifier)
         self.assertTrue(all("matchday" in fixture for fixture in self.fixtures))
         self.assertFalse(any("matchweek" in fixture for fixture in self.fixtures))
@@ -1202,8 +1202,7 @@ class WeeklyLoopTests(unittest.TestCase):
         # The worker's own週 helpers all route through it rather than re-deriving.
         self.assertIn("periodKeyForLeague", self.worker)
         self.assertIn("comparePeriods", self.worker)
-        # And the app groups the Schedule on the same abstraction.
-        self.assertIn("function groupedPeriods(list, currentPeriod = null)", self.app)
+        # And the app reads a fixture's period through the same abstraction.
         self.assertIn("const period = periodOfFixture(fixture);", self.app)
 
     def test_the_window_runs_tuesday_to_monday(self):
@@ -1305,29 +1304,23 @@ class WeeklyLoopTests(unittest.TestCase):
         # It no longer shows "today's card" regardless of the league's slate.
         self.assertNotIn("Today's predictions", self.app)
 
-    def test_schedule_opens_on_now_and_collapses_the_future_without_hiding_it(self):
-        # Which week starts open is now its own rule, shared by the renderer
-        # and the lazy-body decision so they can never disagree.
-        rule = self.app[self.app.index("function periodIsOpen(period, current)"):]
-        rule = rule[:rule.index("\n}")]
-        self.assertIn('String(period) === String(current)', rule)
-        self.assertIn("openScheduleDates.has(`md-${period}`)", rule)
-
-        grouped = self.app[self.app.index("function groupedPeriods(list, currentPeriod = null)"):]
-        grouped = grouped[:grouped.index("\n}")]
-        self.assertIn("<details", grouped)
-        self.assertIn("periodIsOpen(period, current)", grouped)
-        # Every period is still rendered; only the open attribute and whether
-        # its cards exist yet vary.
-        self.assertNotIn("filter((period) =>", grouped)
-        self.assertIn("dayBody(period, matches, open)", grouped)
+    def test_the_week_on_screen_is_the_one_the_host_published(self):
+        # Which week is shown is no longer a browser's open/closed rule: the
+        # host publishes one slate and My Picks shows exactly that.
+        slate = self.app[self.app.index("function matchweekSlate(state = matchweekLeagueState())"):]
+        slate = slate[:slate.index("\n}")]
+        self.assertIn("currentSlate", slate)
+        view = self.app[self.app.index("function picksView()"):]
+        view = view[:view.index("\n}")]
+        self.assertIn("matchweekSlots(plan)", view)
+        self.assertIn("matchweekEmpty()", view)
 
     def test_the_launch_decision_tree_has_all_four_branches(self):
         branch = self.app[self.app.index("function launchBranch()"):]
         branch = branch[:branch.index("// True once the viewer has chosen a tab")]
         for name in ("onboarding", "picks", "preseason", "awaiting"):
             self.assertIn(f'"{name}"', branch, name)
-        self.assertIn('currentView = launchBranch() === "awaiting" ? "schedule" : "today";', self.app)
+        self.assertIn('currentView = launchBranch() === "awaiting" ? "picks" : "today";', self.app)
         # A cold install re-evaluates once the league and its period are known,
         # and stops the moment the viewer picks a tab themselves.
         self.assertIn("let launchRouted = false;", self.app)
@@ -1370,7 +1363,7 @@ class WeeklyLoopTests(unittest.TestCase):
     def test_other_leagues_are_prefetched_when_the_league_screen_opens(self):
         self.assertIn("async function prefetchLeagueStates()", self.app)
         self.assertIn("leagueCodes.filter((code) => code !== activeLeague)", self.app)
-        opener = self.app[self.app.index("async function navigateToView(view)"):]
+        opener = self.app[self.app.index("async function navigateToView(requested)"):]
         opener = opener[:opener.index("// Publishes the slate")]
         self.assertIn("prefetchLeagueStates();", opener)
 
@@ -1422,7 +1415,7 @@ class WeeklyLoopTests(unittest.TestCase):
 
     def test_next_is_never_empty(self):
         today = self.app[self.app.index("function todayView()"):]
-        today = today[:today.index("const scheduleHead = ()")]
+        today = today[:today.index("\n}\n")]
         # Every path out of the Next tab returns content.
         self.assertIn('if (branch === "onboarding") return', today)
         self.assertIn('if (branch === "preseason") return', today)
@@ -1534,7 +1527,7 @@ class WeekPickerTests(unittest.TestCase):
             "Pick fixtures for ${escapeHTML(periodLabelLong(period))}",
             "Pick fixtures for ${escapeHTML(periodLabelLong(state.currentPeriod))}",
             "${escapeHTML(periodLabelLong(pickerPeriod))}",
-            "periodLabel(roundState?.period ?? selectedPeriod",
+            "periodLabel(round?.period ?? period)",
             "periodLabel(round.period)",
             "${periodLabel(period)} in progress",
         ):
@@ -1547,14 +1540,11 @@ class WeekPickerTests(unittest.TestCase):
         ):
             self.assertNotIn(gone, self.app, gone)
 
-    def test_a_day_card_shows_the_weeks_own_range(self):
-        grouped = self.app[self.app.index("function groupedPeriods(list, currentPeriod = null)"):]
-        grouped = grouped[:grouped.index("// My Picks still groups by matchweek")]
-        self.assertIn("<strong>${escapeHTML(periodLabel(period))}</strong>", grouped)
-        # The week's own range, not the first fixture's date, which misleads
-        # whenever a week opens on something other than its first day.
-        self.assertIn("escapeHTML(weekDateRange(period))", grouped)
-        self.assertIn("dateLabel(firstDate, true)", grouped)
+    def test_the_week_is_named_by_its_own_range(self):
+        # The day-card browser that carried this is gone; the naming helper it
+        # used is still the one every surface goes through.
+        self.assertIn("function weekDateRange(period)", self.app)
+        self.assertIn("periodLabel(period)", self.app)
 
     def test_the_convention_is_stated_at_most_once_per_screen(self):
         # Only the two pickers emit it: the const plus one use in each.
@@ -1660,7 +1650,7 @@ class WeekPickerTests(unittest.TestCase):
         picks = picks[:picks.index("function leagueSwitcher")]
         # v1.7 Slice B: the standalone stat box is replaced by the header's own
         # dynamic progress line (B3). What must stay gone is what it replaced.
-        self.assertIn("${progress.complete} of ${progress.total} complete", picks)
+        self.assertIn("${progress.complete} of ${progress.total} saved", picks)
         self.assertNotIn("Total fixtures", self.app)
         self.assertNotIn("To pick", self.app)
         self.assertNotIn("fixtures.length - picked.length", self.app)
@@ -1831,7 +1821,7 @@ class MyPredictionsTests(unittest.TestCase):
         view = self.app[self.app.index("function picksView()"):]
         view = view[:view.index("function leagueSwitcher")]
         self.assertIn("const progress = pickProgress(slots);", view)
-        self.assertIn("${progress.complete} of ${progress.total} complete", view)
+        self.assertIn("${progress.complete} of ${progress.total} saved", view)
         counter = self.app[self.app.index("function pickProgress(slots)"):]
         counter = counter[:counter.index("\n}")]
         self.assertIn("const total = slots.length;", counter)
@@ -1929,9 +1919,8 @@ class MyPredictionsTests(unittest.TestCase):
         self.assertIn("if (section.open) collapsedPickSections.delete(key);", handler)
         self.assertIn("else collapsedPickSections.add(key);", handler)
         self.assertIn("localStorage.setItem(STORAGE.pickSections, JSON.stringify([...collapsedPickSections]));", handler)
-        # The schedule day-cards keep their own separate memory.
-        self.assertIn("openScheduleDates.add(card.dataset.dayCard);", handler)
-        self.assertLess(handler.index("data-pick-section"), handler.index("data-day-card"))
+        # The day-card browser that kept its own separate memory is gone.
+        self.assertNotIn("data-day-card", handler)
 
     def test_the_chevron_turns_with_the_section(self):
         self.assertIn('.pick-section-head::after', self.css)
@@ -1942,7 +1931,7 @@ class MyPredictionsTests(unittest.TestCase):
         self.assertIn("list-style: none;", self.css[self.css.index(".pick-section-head {"):])
 
     def test_my_picks_loads_every_leagues_state_and_fixtures(self):
-        nav = self.app[self.app.index("async function navigateToView(view)"):]
+        nav = self.app[self.app.index("async function navigateToView(requested)"):]
         nav = nav[:nav.index("// Publishes the slate")]
         self.assertIn('if (currentView === "picks") {', nav)
         self.assertIn("await prefetchLeagueStates();", nav)
@@ -2013,7 +2002,7 @@ class LeagueSwitchAndShareTests(unittest.TestCase):
         # Matchweek card, because two leagues can publish the same fixture.
         self.assertIn("if (next !== activeLeague) {", fn)
         self.assertIn("clearFlash();", fn)
-        self.assertIn("expandedFixtureId = null;", fn)
+        self.assertIn("expandedPickId = null;", fn)
         # The banner names no league, so it can only be read as the one on screen.
         self.assertIn("setFlash(`Now showing as ${result.nick} in this league`);", self.app)
 
@@ -2084,12 +2073,12 @@ class LeagueSwitchAndShareTests(unittest.TestCase):
         self.assertIn('event.target.closest("[data-share-league]")', code)
         self.assertIn("shareNow(leagueInvite(share.dataset.shareLeague));", code)
         self.assertIn('event.target.closest("[data-export-league-table]")', code)
-        self.assertIn("shareCardNow();", code)
+        self.assertIn("shareCardNow(exportBtn.dataset.shareSurface || undefined);", code)
 
     def test_the_share_card_is_drawn_inside_the_tap(self):
         # Build 19 had to wait on toBlob before it could share, which on iOS
         # ends the tap and loses the sheet. Nothing on this path awaits.
-        for name in ("function shareCardNow()", "function cardPng(canvas, filename)",
+        for name in ("function shareCardNow(surface = shareSurface())", "function cardPng(canvas, filename)",
                      "function shareCardFile(png, { title, text })"):
             fn = self.app[self.app.index(name):]
             fn = fn[:fn.index("\n}")]
@@ -2111,12 +2100,12 @@ class LeagueSwitchAndShareTests(unittest.TestCase):
         # progress is exactly when people want to send the table, so the card
         # ships from publication onward and states honestly how far through it
         # is. Withholding it was a rule about tidiness, not about honesty.
-        state = self.app[self.app.index("function shareCardState()"):]
+        state = self.app[self.app.index("function shareCardState(surface = shareSurface())"):]
         state = state[:state.index("\n}")]
         self.assertNotIn("shares once it's settled", state)
         # ...but no earlier than publication: a table alone is not a slate.
-        self.assertIn("const slate = weeklySharePublished(roundState, period);", state)
-        self.assertIn("const ready = !!(slate && roundState && !roundState.error && roundState.table?.length);", state)
+        self.assertIn("const slate = weeklySharePublished(round, period);", state)
+        self.assertIn("const ready = !!(slate && round && !round.error && round.table?.length);", state)
         gate = self.app[self.app.index("function weeklySharePublished(round, period)"):]
         gate = gate[:gate.index("\n}")]
         self.assertIn("round.code !== activeLeague", gate)
@@ -2144,7 +2133,7 @@ class LeagueSwitchAndShareTests(unittest.TestCase):
         # The KV-read lesson: a card must never cost a request.
         for name in ("function weeklyCardModel(state, round)", "function seasonCardModel(state)",
                      "function drawWeeklyResultCard(state, round)", "function drawSeasonTableCard(state)",
-                     "function shareCardNow()"):
+                     "function shareCardNow(surface = shareSurface())"):
             fn = self.app[self.app.index(name):]
             fn = fn[:fn.index("\n}")]
             for reach in ("fetch(", "api(", "loadRoundState", "loadLeagueState", "fetchState"):
@@ -2160,14 +2149,17 @@ class ScheduleTabTests(unittest.TestCase):
         cls.css = (ROOT / "styles.css").read_text()
 
     def test_every_tab_acknowledges_the_tap_before_working(self):
-        nav = self.app[self.app.index("async function navigateToView(view)"):]
+        nav = self.app[self.app.index("async function navigateToView(requested)"):]
         nav = nav[:nav.index("\n}")]
         self.assertIn("if (paintShell(view)) await nextPaint();", nav)
         self.assertLess(nav.index("paintShell(view)"), nav.index("render({ scrollTop: true })"))
-        # The rule is not Schedule-only: every view has a shell.
+        # The rule is not one view's: every reachable view has a shell — and
+        # the legacy id is translated to one rather than rendered.
         shells = self.app[self.app.index("const VIEW_SHELLS = {"):self.app.index("const loadingLine =")]
-        for view in ("schedule", "picks", "league", "today", "rules"):
+        for view in ("picks", "league", "today", "rules"):
             self.assertIn(f"{view}:", shells, view)
+        self.assertNotIn("schedule:", shells)
+        self.assertIn("const view = normaliseView(requested);", nav)
 
     def test_the_schedule_shell_is_literal_and_data_independent(self):
         # The old shell called scheduleFilters() -> weekStrip() ->
@@ -2182,8 +2174,8 @@ class ScheduleTabTests(unittest.TestCase):
         ):
             self.assertNotIn(computed, shells, computed)
         # v1.7 Slice A: the same literal shell, renamed (M1).
-        self.assertIn("<h2>Matchweek</h2>", shells)
-        self.assertIn('pulsingStatus("Loading matchweek…")', shells)
+        self.assertIn("<h2>My Picks</h2>", shells)
+        self.assertIn('pulsingStatus("Loading this week…")', shells)
         self.assertNotIn("Prediction schedule", shells)
         self.assertIn(".view-loading", self.css)
 
@@ -2210,37 +2202,30 @@ class ScheduleTabTests(unittest.TestCase):
         # The moment the shell reaches the glass is recorded, not assumed.
         self.assertIn('traceTap("shell-painted", {});', block)
 
-    def test_a_closed_week_builds_no_cards(self):
-        body = self.app[self.app.index("function dayBody(period, matches, open)"):]
-        body = body[:body.index("\n}")]
-        self.assertIn('if (!open) return `<div class="day-body" data-lazy-body=', body)
-        # Rows, not prediction cards: building matchCard() for every fixture
-        # during navigation is what blocked the web view for 2263ms.
-        self.assertIn('matches.map(fixtureRow).join("")', body)
-        self.assertNotIn("matchCard", body)
+    def test_the_season_browser_and_its_second_row_builder_are_gone(self):
+        # Adam's v1.7 ruling folded the week into My Picks. The lazy day-card
+        # browser was the other implementation of a fixture row, and two of
+        # them is how they drift, so it goes with the tab.
+        for gone in ("function dayBody(", "function fillDayBody(", "function groupedPeriods(",
+                     "function periodIsOpen(", "function scheduleView(", "function fixtureRow(",
+                     "function expandFixture(", "function matchweekView(", "expandedFixtureId",
+                     "matchdayFilter", "openScheduleDates", "scheduleFullSeason",
+                     "data-full-season", "data-schedule-scope", "[data-day-card]"):
+            self.assertNotIn(gone, self.app, gone)
+        # One row builder, and an expansion builds exactly what it would have.
+        self.assertEqual(self.app.count("function pickRow("), 1)
+        expand = self.app[self.app.index("function expandPick(id)"):]
+        expand = expand[:expand.index("\n}")]
+        self.assertIn("pickRowBody(fixture, pickEditable(fixture))", expand)
 
-    def test_expanding_builds_that_week_on_demand(self):
-        fill = self.app[self.app.index("function fillDayBody(card)"):]
-        fill = fill[:fill.index("\n}")]
-        self.assertIn('const body = card.querySelector("[data-lazy-body]");', fill)
-        self.assertIn("if (!body) return;", fill)
-        self.assertIn('body.removeAttribute("data-lazy-body");', fill)
-        # Same card builder as the eager path, so calendar and TV info cannot drift.
-        self.assertIn('matches.map(fixtureRow).join("")', fill)
-        self.assertNotIn("matchCard", fill)
-        toggle = self.app[self.app.index('document.addEventListener("toggle"'):]
-        self.assertIn("fillDayBody(card);", toggle)
-
-    def test_the_list_is_walked_once(self):
-        group = self.app[self.app.index("function groupedPeriods(list, currentPeriod = null)"):]
-        group = group[:group.index("\n}")]
-        self.assertNotIn("list.filter", group)
-        self.assertIn("byPeriod(list)", group)
-
-    def test_filtering_to_a_week_opens_it(self):
-        handler = self.app[self.app.index('const filter = event.target.closest("[data-filter]");'):]
-        handler = handler[:handler.index("const league = event.target.closest")]
-        self.assertIn('if (matchdayFilter !== "all") openScheduleDates.add(`md-${matchdayFilter}`);', handler)
+    def test_the_week_is_read_from_the_slate_not_scanned_from_the_season(self):
+        slots = self.app[self.app.index("function matchweekSlots(plan)"):]
+        slots = slots[:slots.index("\n}")]
+        self.assertIn("plan.ids.map(", slots)
+        view = self.app[self.app.index("function picksView()"):]
+        view = view[:view.index("\n}")]
+        self.assertNotIn("fixtures.filter", view)
+        self.assertNotIn("fixtures.map", view)
 
 
 class NamesAndViewportTests(unittest.TestCase):
@@ -2387,7 +2372,7 @@ class NamesAndViewportTests(unittest.TestCase):
 
     def test_opening_the_league_still_refreshes_it(self):
         # Removing the poll is only safe because navigation still refreshes.
-        nav = self.app[self.app.index("async function navigateToView(view)"):]
+        nav = self.app[self.app.index("async function navigateToView(requested)"):]
         nav = nav[:nav.index("\n}")]
         self.assertIn('if (currentView === "league") {', nav)
         self.assertIn("refreshLeague(generation)", nav)
@@ -2785,9 +2770,9 @@ class MatesPicksTests(unittest.TestCase):
     def test_the_export_card_is_not_offered_from_this_view(self):
         # Phase 2. Offering the season card from under the matrix would be a
         # button that does something other than what the screen is about.
-        fn = self.app[self.app.index("function shareCardState()"):]
+        fn = self.app[self.app.index("function shareCardState(surface = shareSurface())"):]
         fn = fn[:fn.index("\n}")]
-        self.assertIn('if (leagueTab === "mates") return { ready: false, hidden: true, label: "" };', fn)
+        self.assertIn('if (!surface) return { ready: false, hidden: true, label: "" };', fn)
 
     def test_deferred_surfaces_are_absent(self):
         # §3.3 and §6: member-row expansion, historic Mates' Picks and the

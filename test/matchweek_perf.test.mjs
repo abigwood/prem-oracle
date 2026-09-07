@@ -15,13 +15,15 @@ import { load } from "./harness.mjs";
 
 const NAMES = [
   "matchweekLeagueState", "matchweekLeagueName", "matchweekSlate",
-  "matchweekSlots", "matchweekHead", "matchweekContext", "matchweekEmpty",
-  "matchweekUnavailable", "matchweekView",
+  "matchweekSlots", "matchweekContext", "matchweekEmpty",
+  "matchweekUnavailable", "picksView",
   "noteMatchweekCountMismatch", "matchweekMismatchLines",
   // The REAL row builder, so the measurement is of work that ships.
-  "fixtureRow", "shortKickoff",
+  "pickRow", "pickRowBody", "pickRowLabel", "pickJustSaved", "pickProgress",
+  "pickListState", "pickDeadlineLine", "pickEditable", "isSettledCard",
+  "RESULT_FIRST_STATES", "resultState", "shortKickoff",
   // ...and the row-state contract Slice B put behind it.
-  "matchweekRowState", "matchweekRowMark", "MATCHWEEK_ROW_LINE",
+  "matchweekRowState", "MATCHWEEK_ROW_LINE",
   "isPostponed", "isVoidFixture", "VOID_STATUSES", "finalScore", "matchOpen",
   "closedStatus", "clientLockMs",
 ];
@@ -51,15 +53,19 @@ function box(active, states, { fixtures = SEASON } = {}) {
     leagueStates: states,
     leagueCodes: Object.keys(states),
     leagueNames: {},
-    expandedFixtureId: null,
+    expandedPickId: null,
+    playerName: "Adam",
     matchweekCountMismatches: new Map(),
     periodLabel: (p) => `Matchweek ${p}`,
     pulsingStatus: (m) => m,
     onboardingState: () => "",
     leagueSwitcher: () => "",
-    // Only reached for an EXPANDED row, and nothing is expanded here — the
-    // heavy card is Slice B's problem, not the shell's.
+    // Only reached for an EXPANDED row, and nothing is expanded here.
     matchCard: () => "<div class=match-card></div>",
+    scorePicker: () => "<div class=score-picker></div>",
+    fixtureRevealSection: () => "",
+    resultCard: (m) => `<article data-match-card="${m.id}"></article>`,
+    pickShareRow: () => "",
   });
 }
 
@@ -79,8 +85,8 @@ test("P1 · the maximum slate builds well inside the 50ms synchronous budget", (
   const ids = SEASON.slice(0, SLATE_MAX).map((f) => f.id);
   const s = box("AAA", { AAA: state("AAA", ids) });
   // Warm, then measure.
-  s.matchweekView();
-  const ms = median(21, () => s.matchweekView());
+  s.picksView();
+  const ms = median(21, () => s.picksView());
   console.log(`    max slate (${SLATE_MAX} fixtures, ${SEASON.length}-fixture calendar): ${ms.toFixed(2)}ms`);
   assert.ok(ms < 50, `${ms.toFixed(2)}ms exceeds the 50ms synchronous budget`);
 });
@@ -91,9 +97,9 @@ test("P1 · cost tracks the SLATE, not the calendar behind it", () => {
   const ids = SEASON.slice(0, SLATE_MAX).map((f) => f.id);
   const big = box("AAA", { AAA: state("AAA", ids) }, { fixtures: SEASON });
   const small = box("AAA", { AAA: state("AAA", ids) }, { fixtures: SEASON.slice(0, 90) });
-  big.matchweekView(); small.matchweekView();
-  const bigMs = median(21, () => big.matchweekView());
-  const smallMs = median(21, () => small.matchweekView());
+  big.picksView(); small.picksView();
+  const bigMs = median(21, () => big.picksView());
+  const smallMs = median(21, () => small.picksView());
   console.log(`    900-fixture calendar ${bigMs.toFixed(2)}ms · 90-fixture calendar ${smallMs.toFixed(2)}ms`);
   // Generous bound: the point is "no calendar-sized term", not a micro-benchmark.
   assert.ok(bigMs < Math.max(smallMs * 6, 5),
@@ -106,8 +112,8 @@ test("P2 · a league switch with a valid cache paints inside 250ms", () => {
   const aaa = state("AAA", SEASON.slice(0, SLATE_MAX).map((f) => f.id));
   const bbb = state("BBB", SEASON.slice(40, 46).map((f) => f.id));
   const s = box("BBB", { AAA: aaa, BBB: bbb });
-  s.matchweekView();
-  const ms = median(21, () => s.matchweekView());
+  s.picksView();
+  const ms = median(21, () => s.picksView());
   console.log(`    cached-league paint: ${ms.toFixed(2)}ms`);
   assert.ok(ms < 250, `${ms.toFixed(2)}ms exceeds the 250ms retained-content target`);
 });
@@ -116,19 +122,19 @@ test("P3 · the acknowledged shell costs nothing to build", () => {
   // No valid state for the selected league: the shell must be cheap, because
   // it is what answers the tap while the network runs.
   const s = box("CCC", { AAA: state("AAA", SEASON.slice(0, SLATE_MAX).map((f) => f.id)) });
-  s.matchweekView();
-  const ms = median(21, () => s.matchweekView());
+  s.picksView();
+  const ms = median(21, () => s.picksView());
   console.log(`    acknowledged shell: ${ms.toFixed(3)}ms`);
   assert.ok(ms < 5, `${ms.toFixed(2)}ms is too slow for a shell`);
   // And it really is the shell, not the league we left.
-  assert.ok(!s.matchweekView().includes("AAA League"));
+  assert.ok(!s.picksView().includes("AAA League"));
 });
 
 test("P4 · the empty state is cheaper still, and draws no cards", () => {
   const s = box("AAA", { AAA: state("AAA", []) });
-  s.matchweekView();
-  const ms = median(21, () => s.matchweekView());
+  s.picksView();
+  const ms = median(21, () => s.picksView());
   console.log(`    empty state: ${ms.toFixed(3)}ms`);
   assert.ok(ms < 5);
-  assert.equal((s.matchweekView().match(/data-fixture-row=/g) || []).length, 0);
+  assert.equal((s.picksView().match(/data-fixture-row=/g) || []).length, 0);
 });

@@ -26,8 +26,8 @@ const F = [
 ];
 
 const NAMES = ["matchweekLeagueState", "matchweekLeagueName", "matchweekSlate", "matchweekSlots",
-  "matchweekHead", "matchweekContext", "matchweekEmpty", "matchweekUnavailable", "matchweekView",
-  "matchweekRowState", "matchweekRowMark", "MATCHWEEK_ROW_LINE", "fixtureRow", "shortKickoff",
+  "matchweekContext", "matchweekEmpty", "matchweekUnavailable", "picksView",
+  "matchweekRowState", "matchweekRowMark", "MATCHWEEK_ROW_LINE", "shortKickoff",
   "closedStatus", "matchOpen", "finalScore", "clientLockMs", "VOID_STATUSES", "isVoidFixture",
   "isPostponed", "picksView", "pickRow", "pickEditable", "pickProgress", "pickDeadlineLine",
   "resultCard", "resultState", "resultPickLine", "resultBadge", "isSettledCard",
@@ -96,9 +96,9 @@ const world = (over = {}) => load(NAMES, {
 });
 
 const s = world();
-show("MATCHWEEK - six-fixture slate, every card state", s.matchweekView());
+show("MATCHWEEK - six-fixture slate, every card state", s.picksView());
 s.evalIn('expandedFixtureId = "f4";');
-show("MATCHWEEK - one card expanded (settled: mates on expansion)", s.matchweekView());
+show("MATCHWEEK - one card expanded (settled: mates on expansion)", s.picksView());
 
 const p = world();
 show("MY PICKS - 3 of 6 complete, compact rows", p.picksView());
@@ -106,7 +106,7 @@ p.evalIn('expandedPickId = "f1";');
 show("MY PICKS - one editable row open, controls only there", p.picksView());
 
 const empty = world({ leagueState: leagueState(null), picks: {} });
-show("MATCHWEEK - no published slate", empty.matchweekView());
+show("MATCHWEEK - no published slate", empty.picksView());
 show("MY PICKS - no published slate", empty.picksView());
 
 // --- the two square cards, as their models --------------------------------

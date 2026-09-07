@@ -3,7 +3,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { load, APP, sourceOf } from "./harness.mjs";
+import { load, APP, sourceOf, constOf } from "./harness.mjs";
 import { scorePick } from "../worker/src/logic.js";
 
 const CSS = readFileSync(new URL("../styles.css", import.meta.url), "utf8");
@@ -129,9 +129,11 @@ test("R1 · all three named surfaces route through the one result-first path", (
   // ones through resultCard with social:false (B10) — the personal surface no
   // longer carries the mates section. pickEntry belongs to the retained,
   // unreached v1.6.6 layout.
+  // Adam's ruling folded Matchweek into My Picks, so there is ONE row builder
+  // and one result-first path through it.
   assert.match(sourceOf("pickRow"), /resultCard\(match, null, \{ social: false \}\)/);
-  assert.match(sourceOf("fixtureRow"), /matchCard\(fixture, \{ resultFirst: true \}\)/);
-  assert.match(sourceOf("expandFixture"), /matchCard\(fixture, \{ resultFirst: true \}\)/);
+  assert.ok(!APP.includes("function fixtureRow("), "the second row builder survives");
+  assert.ok(!APP.includes("function expandFixture("), "the second expander survives");
   assert.match(sourceOf("matchCard"), /if \(resultFirst && isSettledCard\(match\)\) return resultCard\(match, reveal, \{ social \}\);/);
 });
 
@@ -228,34 +230,19 @@ test("S1 · the union is empty for a viewer with no leagues", () => {
   assert.equal(s.leagueSlateFixtureIds([]).size, 0);
 });
 
-test("S1 · no leagues gets All Fixtures with no toggle and no explanation", () => {
-  const view = sourceOf("scheduleView");
-  const noLeagues = view.slice(view.indexOf("if (!hasLeagues)"), view.indexOf("const slateIds"));
-  assert.ok(!noLeagues.includes("scheduleScopeToggle"));
-  assert.ok(!noLeagues.includes("data-schedule-scope"));
-  assert.match(noLeagues, /groupedPeriods\(inWindow, current\)/);
-});
-
-test("S1 · joined-but-unpublished explains itself and never silently falls back", () => {
-  const view = sourceOf("scheduleView");
-  assert.match(view, /const unpublished = scoping && !scoped\.length;/);
-  // Exact pinned wording.
-  assert.match(view, /<strong>No league fixtures selected yet\.<\/strong>/);
-  assert.match(view, /<p>Your league fixtures will appear here when this week's line-up is published\.<\/p>/);
-  assert.match(view, /data-schedule-scope="all">View all fixtures<\/button>/);
-  // The list stays scoped while the notice is up: it does not quietly widen.
-  assert.match(view, /const list = scoping \? scoped : inWindow;/);
-});
-
-test("S1 · the union is taken inside the visible window, never the whole season", () => {
-  const view = sourceOf("scheduleView");
-  assert.ok(view.indexOf("const inWindow") < view.indexOf("const scoped"));
-  assert.match(view, /const scoped = inWindow\.filter\(\(fixture\) => slateIds\.has\(String\(fixture\.id\)\)\);/);
-});
-
-test("S1 · Show full season is unchanged", () => {
-  assert.match(APP, /data-full-season>Show full season/);
-  assert.match(sourceOf("scheduleWindow"), /if \(scheduleFullSeason \|\| matchdayFilter !== "all"\) return periods;/);
+test("S1 · the season browser is deleted, and its honest empty state lives on My Picks", () => {
+  // These used to describe the revert path. Adam's ruling removed the tab for
+  // good, so the browser goes with it — and the one piece of it that mattered,
+  // the unpublished-line-up wording, is on the surface that replaced it.
+  for (const gone of ["function scheduleView()", "function groupedPeriods(", "data-full-season",
+    "data-schedule-scope", "scheduleScopeToggle"]) {
+    assert.ok(!APP.includes(gone), `${gone} survives the consolidation`);
+  }
+  const empty = constOf("matchweekEmpty");
+  assert.match(empty, /<strong>No league fixtures selected yet\.<\/strong>/);
+  assert.match(empty, /Your league fixtures will appear here when this week's line-up is published\./);
+  // And My Picks is what shows it.
+  assert.match(sourceOf("picksView"), /matchweekEmpty\(\)/);
 });
 
 // --- L1 -------------------------------------------------------------------

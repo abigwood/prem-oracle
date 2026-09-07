@@ -71,6 +71,8 @@ function loaders({ delays = {}, cachedRounds = {}, horizon = null } = {}) {
     ${liftLine("const roundStatePath =")}
     ${liftLine("const matesPeriod =")}
     ${lift("function matesUsable(state)")}
+    // v1.7 consolidation: a league change also closes the open pick row.
+    let expandedPickId = null;
     ${lift("function forgetMatesState()")}
     ${lift("function lockHorizonOf(state)")}
     ${lift("function cacheRoundState(code, period, state)")}
@@ -237,7 +239,6 @@ function switching({ seasonDelay = 0, roundDelay = 0, cachedRounds = {}, cachedL
     "use strict";
     let activeLeague = "AAA";
     // v1.7: a real switch closes the open Matchweek card.
-    let expandedFixtureId = null;
     let expandedPickId = null;
     let leagueTab = tab;
     let selectedPeriod = null, roundState = null;

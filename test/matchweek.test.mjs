@@ -16,8 +16,8 @@ const HTML = readFileSync(new URL("../index.html", import.meta.url), "utf8");
 
 const NAMES = [
   "matchweekLeagueState", "matchweekLeagueName", "matchweekSlate",
-  "matchweekSlots", "matchweekHead", "matchweekContext", "matchweekEmpty",
-  "matchweekUnavailable", "matchweekView",
+  "matchweekSlots", "matchweekContext", "matchweekEmpty",
+  "matchweekUnavailable", "picksView", "pickRow", "pickRowLabel", "pickJustSaved",
   "noteMatchweekCountMismatch", "matchweekMismatchLines",
 ];
 
@@ -45,14 +45,28 @@ const leagueState = ({ code, name, period = "7", ids = null, count = null }) => 
 const BASE_STUBS = {
   picks: {},
   leagueNames: {},
-  expandedFixtureId: null,
+  expandedPickId: null,
+  playerName: "Adam",
   // Fresh per sandbox: the mismatch record is a diagnostic, not shared state.
   matchweekCountMismatches: new Map(),
   periodLabel: (p) => `Matchweek ${p}`,
   pulsingStatus: (m) => `<p class="pulse">${m}</p>`,
   onboardingState: () => `<div class="onboarding">Create a league</div>`,
   leagueSwitcher: () => "",
-  fixtureRow: (f) => `<div class="fixture-row" data-fixture-row="${f.id}">${f.player1} v ${f.player2}</div>`,
+  // The real row, so a placeholder is the real placeholder. What the row is
+  // made OF — the result card, the picker, the mates section — is somebody
+  // else's test, so those are stubs.
+  matchweekRowState: () => "open",
+  pickEditable: () => true,
+  isSettledCard: () => false,
+  resultCard: (m) => `<article data-match-card="${m.id}"></article>`,
+  scorePicker: () => `<div class="score-picker"></div>`,
+  fixtureRevealSection: () => "",
+  shortKickoff: () => "Sat 15:00",
+  pickProgress: (slots) => ({ complete: 0, total: slots.length }),
+  pickListState: () => "",
+  pickDeadlineLine: () => "",
+  pickShareRow: () => "",
 };
 
 function world({ active = "AAA", live = null, cached = {}, codes = null, names = {} } = {}) {
@@ -70,25 +84,27 @@ function world({ active = "AAA", live = null, cached = {}, codes = null, names =
   });
 }
 
-const cardIds = (html) => [...html.matchAll(/data-fixture-row="([^"]+)"/g)].map((m) => m[1]);
+const cardIds = (html) => [...html.matchAll(/data-pick-row="([^"]+)"/g)].map((m) => m[1]);
 
 // --- 1 · the rename, without breaking the client --------------------------
 
-test("A1 · the navigation and the heading read Matchweek", () => {
-  assert.match(HTML, /data-view="schedule"><span>🗓️<\/span>Matchweek<\/button>/);
+test("A1 · the week lives on My Picks, and Matchweek is not in the navigation", () => {
+  // Adam's ruling: one weekly journey, four tabs.
+  assert.ok(!/data-view="schedule"/.test(HTML), "the Matchweek tab is still in the bar");
+  assert.ok(!/>Matchweek<\/button>/.test(HTML), "a Matchweek tab label survives");
   assert.ok(!/>Schedule<\/button>/.test(HTML), "a visible Schedule label survives");
   const box = world({ live: leagueState({ code: "AAA", name: "Sunday Six", ids: ["pl-001"] }) });
-  assert.match(box.matchweekView(), /<h2>Matchweek<\/h2>/);
+  assert.match(box.picksView(), /<h2>My Picks<\/h2>/);
   // And the shell that answers the tap says the same thing.
-  assert.match(APP, /schedule: \(\) => `<div class="section-head">.*<h2>Matchweek<\/h2>/);
+  assert.match(APP, /picks: \(\) => `<div class="section-head">[\s\S]*?<h2>My Picks<\/h2>/);
 });
 
-test("A1 · internal identifiers are untouched, so installed clients still work", () => {
-  // The route id, the deep-link target and the stored view key.
-  assert.match(APP, /schedule: matchweekView/);
-  assert.match(APP, /await navigateToView\("schedule"\)/);
-  assert.match(APP, /currentView = launchBranch\(\) === "awaiting" \? "schedule" : "today"/);
-  assert.match(HTML, /data-view="schedule"/);
+test("A1 · installed clients still work: the old route redirects rather than breaking", () => {
+  // The stored view key and the deep-link target are still `schedule` on
+  // devices that have not updated. They must land on My Picks, not on nothing.
+  assert.match(APP, /const LEGACY_VIEWS = \{ schedule: "picks" \};/);
+  assert.match(APP, /await navigateToView\("picks"\)/);
+  assert.match(APP, /currentView = launchBranch\(\) === "awaiting" \? "picks" : "today"/);
   // Storage keys are presentation-independent and must not have moved.
   for (const key of ["prem_oracle_active_league", "prem_oracle_league_states",
     "prem_oracle_round_states", "prem_oracle_pick_weeks"]) {
@@ -102,12 +118,12 @@ test("A2 · the permitted minimum, the common six and the product maximum", () =
   for (const size of [3, 6, 20]) {
     const ids = Array.from({ length: size }, (_, i) => `pl-${String(i + 1).padStart(3, "0")}`);
     const box = world({ live: leagueState({ code: "AAA", name: "Sunday Six", ids }) });
-    const html = box.matchweekView();
+    const html = box.picksView();
     const drawn = cardIds(html);
     assert.equal(drawn.length, size, `${size}-game slate drew ${drawn.length} cards`);
     assert.deepEqual(drawn, ids, `${size}-game slate lost host order`);
     assert.equal(new Set(drawn).size, size, "a fixture was drawn twice");
-    assert.match(html, new RegExp(`${size} selected game`), "the header count is wrong");
+    assert.match(html, new RegExp(`of ${size} saved`), "the header count is wrong");
   }
 });
 
@@ -115,27 +131,27 @@ test("A2 · host order is preserved even when it contradicts kick-off order", ()
   // Deliberately reversed against the calendar, which is sorted by kick-off.
   const ids = ["pl-006", "pl-001", "pl-004", "pl-002"];
   const box = world({ live: leagueState({ code: "AAA", name: "Sunday Six", ids }) });
-  assert.deepEqual(cardIds(box.matchweekView()), ids);
+  assert.deepEqual(cardIds(box.picksView()), ids);
 });
 
 test("A2 · the count is the host's, never a hard-coded six", () => {
-  assert.ok(!/\b6 selected\b|\bsix\b/i.test(constOf("matchweekHead")),
+  assert.ok(!/\bof 6\b|\bsix\b/i.test(sourceOf("picksView")),
     "the header hard-codes a fixture count");
   const one = world({ live: leagueState({ code: "AAA", name: "L", ids: ["pl-001"] }) });
-  assert.match(one.matchweekView(), /1 selected game</, "singular is not handled");
+  assert.match(one.picksView(), /of 1 saved/, "a one-fixture week is not counted");
 });
 
 test("A2 · a slate listing a fixture twice still renders it once", () => {
   const box = world({ live: leagueState({ code: "AAA", name: "L", ids: ["pl-001", "pl-002", "pl-001"] }) });
-  assert.deepEqual(cardIds(box.matchweekView()), ["pl-001", "pl-002"]);
-  assert.match(box.matchweekView(), /2 selected games</);
+  assert.deepEqual(cardIds(box.picksView()), ["pl-001", "pl-002"]);
+  assert.match(box.picksView(), /of 2 saved/);
 });
 
 // --- 3 · the non-negotiable empty state -----------------------------------
 
 test("A3 · no published slate gives the exact two lines and ZERO cards", () => {
   const box = world({ live: leagueState({ code: "AAA", name: "Sunday Six", ids: null }) });
-  const html = box.matchweekView();
+  const html = box.picksView();
   assert.match(html, /<strong>No league fixtures selected yet\.<\/strong>/);
   assert.match(html,
     /<p>Your league fixtures will appear here when this week's line-up is published\.<\/p>/);
@@ -149,8 +165,8 @@ test("A3 · no published slate gives the exact two lines and ZERO cards", () => 
 
 test("A3 · an empty fixture list is treated as unpublished, not as a slate", () => {
   const box = world({ live: leagueState({ code: "AAA", name: "L", ids: [] }) });
-  assert.match(box.matchweekView(), /No league fixtures selected yet\./);
-  assert.equal(cardIds(box.matchweekView()).length, 0);
+  assert.match(box.picksView(), /No league fixtures selected yet\./);
+  assert.equal(cardIds(box.picksView()).length, 0);
 });
 
 test("A3 · a slate for another period is refused rather than shown as this week", () => {
@@ -159,47 +175,52 @@ test("A3 · a slate for another period is refused rather than shown as this week
   state.currentSlate.matchweek = 6;
   const box = world({ live: state });
   assert.equal(box.matchweekSlate(state), null, "last week's slate answered for this week");
-  assert.match(box.matchweekView(), /No league fixtures selected yet\./);
+  assert.match(box.picksView(), /No league fixtures selected yet\./);
 });
 
 // --- 4 · no path substitutes the competition calendar ---------------------
 
-test("A4 · the Matchweek journey never reaches the season browser", () => {
-  const view = sourceOf("matchweekView");
+test("A4 · the weekly journey never reaches the season browser", () => {
+  const view = sourceOf("picksView");
   for (const banned of ["groupedPeriods", "scheduleFilters", "scheduleScopeToggle",
     "scheduleMore", "scheduleWindow", "leagueSlateFixtureIds", "periodsInOrder",
     "matchdayFilter", "scheduleFullSeason"]) {
-    assert.ok(!view.includes(banned), `matchweekView reaches ${banned}`);
+    assert.ok(!view.includes(banned), `picksView reaches ${banned}`);
   }
   // It draws from the slate's own ids, never from the fixture list.
   assert.ok(!/\bfixtures\.filter\(|\bfixtures\.map\(/.test(view),
-    "matchweekView walks the competition fixture list");
+    "picksView walks the competition fixture list");
   assert.match(sourceOf("matchweekSlots"), /plan\.ids\.map\(/);
 });
 
 test("A4 · every drawn card came from the slate, at every league size", () => {
   for (const ids of [["pl-001"], ["pl-003", "pl-009"], CALENDAR.slice(0, 20).map((f) => f.id)]) {
     const box = world({ live: leagueState({ code: "AAA", name: "L", ids }) });
-    const drawn = cardIds(box.matchweekView());
+    const drawn = cardIds(box.picksView());
     assert.ok(drawn.every((id) => ids.includes(id)), "a card appeared that the host did not select");
     assert.ok(drawn.length <= CALENDAR.length);
   }
 });
 
-test("A4 · the old season browser is retained but unreachable from the route", () => {
-  // Kept whole so Slice A reverts by one line — and wired to nothing.
-  assert.ok(APP.includes("function scheduleView()"), "the revert path was deleted");
-  assert.match(APP, /RETAINED, NOT REACHED/);
-  assert.ok(!/schedule: scheduleView/.test(APP), "the route still renders the browser");
-  const views = APP.slice(APP.indexOf("const views = {"));
-  assert.ok(!views.slice(0, 200).includes("scheduleView"));
+test("A4 · the old season browser is gone, not merely unreachable", () => {
+  // It was kept whole through the soak so the direction could be reverted by
+  // one line. The direction is now a ruling, so the second implementation of a
+  // fixture row goes with it — two of them is how they drift.
+  for (const gone of ["function scheduleView()", "function fixtureRow(", "function expandFixture(",
+    "function dayBody(", "function fillDayBody(", "function groupedPeriods(",
+    "function matchweekView()", "expandedFixtureId"]) {
+    assert.ok(!APP.includes(gone), `${gone} survives the consolidation`);
+  }
+  assert.ok(!APP.includes("RETAINED, NOT REACHED"));
+  // One row implementation, and it is the consolidated one.
+  assert.ok(APP.includes("function pickRow(slot, { expanded })"));
 });
 
 // --- 5 · sticky league context --------------------------------------------
 
 test("A5 · the selected league stays visible and is not a decoration", () => {
   const box = world({ live: leagueState({ code: "AAA", name: "Sunday Six", ids: ["pl-001"] }) });
-  const html = box.matchweekView();
+  const html = box.picksView();
   assert.match(html, /data-matchweek-context/);
   // With a single league there are no pills, so the name itself is the context.
   assert.match(html, /Sunday Six/);
@@ -214,14 +235,10 @@ test("A5 · with several leagues the switcher is the sticky context", () => {
     fixtures: CALENDAR, picks: {}, activeLeague: "AAA",
     leagueState: leagueState({ code: "AAA", name: "Sunday Six", ids: ["pl-001"] }),
     leagueStates: {}, leagueCodes: ["AAA", "BBB"], leagueNames: { AAA: "Sunday Six", BBB: "Bury" },
-    expandedFixtureId: null,
-    periodLabel: (p) => `Matchweek ${p}`,
-    pulsingStatus: (m) => m,
-    onboardingState: () => "",
+    ...BASE_STUBS,
     leagueSwitcher: () => `<div class="filters league-switcher"><button data-league="AAA">Sunday Six</button><button data-league="BBB">Bury</button></div>`,
-    fixtureRow: (f) => `<div data-fixture-row="${f.id}"></div>`,
   });
-  const html = box.matchweekView();
+  const html = box.picksView();
   const context = html.slice(html.indexOf("data-matchweek-context"));
   assert.match(context.slice(0, 300), /league-switcher/);
   assert.match(context.slice(0, 300), /data-league="BBB"/);
@@ -237,11 +254,11 @@ test("A6 · a league we have left can never draw, however stale the global is", 
     cached: {},
     codes: ["AAA", "BBB"],
   });
-  const html = box.matchweekView();
+  const html = box.picksView();
   assert.equal(box.matchweekLeagueState(), null, "AAA's state answered for BBB");
   assert.equal(cardIds(html).length, 0, "AAA's fixtures painted under BBB");
   assert.ok(!html.includes("Sunday Six"), "AAA's name painted under BBB");
-  assert.match(html, /Loading matchweek/, "no acknowledged shell was drawn");
+  assert.match(html, /Loading this week/, "no acknowledged shell was drawn");
 });
 
 test("A6 · a valid cache for the new league paints without waiting", () => {
@@ -251,7 +268,7 @@ test("A6 · a valid cache for the new league paints without waiting", () => {
     cached: { BBB: leagueState({ code: "BBB", name: "Bury Legends", ids: ["pl-005", "pl-003"] }) },
     codes: ["AAA", "BBB"],
   });
-  const html = box.matchweekView();
+  const html = box.picksView();
   assert.deepEqual(cardIds(html), ["pl-005", "pl-003"], "the cached league did not paint in host order");
   assert.match(html, /Bury Legends/);
   assert.ok(!html.includes("Sunday Six"), "the league we left is still named");
@@ -265,7 +282,7 @@ test("A6 · an errored cache is not content, and does not resurrect the old leag
     cached: { BBB: { code: "BBB", error: "offline" } },
     codes: ["AAA", "BBB"],
   });
-  const html = box.matchweekView();
+  const html = box.picksView();
   assert.equal(box.matchweekLeagueState(), null);
   assert.equal(cardIds(html).length, 0);
   assert.ok(!html.includes("Sunday Six"));
@@ -273,7 +290,7 @@ test("A6 · an errored cache is not content, and does not resurrect the old leag
 
 test("A6 · switching clears the open card, so it cannot reopen under a new name", () => {
   const switcher = sourceOf("setActiveLeague");
-  assert.match(switcher, /if \(next !== activeLeague\) \{[\s\S]*expandedFixtureId = null;/);
+  assert.match(switcher, /if \(next !== activeLeague\) \{[\s\S]*expandedPickId = null;/);
 });
 
 test("A6 · a superseded response is cached but never painted", () => {
@@ -292,13 +309,13 @@ test("A7 · a shared fixture id shows each league's own slate, never a merge", (
   const onA = world({ active: "AAA", live: aaa, cached: { AAA: aaa, BBB: bbb }, codes: ["AAA", "BBB"] });
   const onB = world({ active: "BBB", live: bbb, cached: { AAA: aaa, BBB: bbb }, codes: ["AAA", "BBB"] });
 
-  assert.deepEqual(cardIds(onA.matchweekView()), ["pl-001", "pl-002", "pl-004"]);
-  assert.deepEqual(cardIds(onB.matchweekView()), ["pl-002", "pl-004", "pl-009"]);
+  assert.deepEqual(cardIds(onA.picksView()), ["pl-001", "pl-002", "pl-004"]);
+  assert.deepEqual(cardIds(onB.picksView()), ["pl-002", "pl-004", "pl-009"]);
   // Neither borrowed the other's exclusive fixture, and neither is a union.
-  assert.ok(!cardIds(onA.matchweekView()).includes("pl-009"));
-  assert.ok(!cardIds(onB.matchweekView()).includes("pl-001"));
-  assert.match(onA.matchweekView(), /3 selected games/);
-  assert.match(onB.matchweekView(), /3 selected games/);
+  assert.ok(!cardIds(onA.picksView()).includes("pl-009"));
+  assert.ok(!cardIds(onB.picksView()).includes("pl-001"));
+  assert.match(onA.picksView(), /of 3 saved/);
+  assert.match(onB.picksView(), /of 3 saved/);
 });
 
 test("A7 · the view is a pure function of the SELECTED league", () => {
@@ -308,7 +325,7 @@ test("A7 · the view is a pure function of the SELECTED league", () => {
   const seen = new Set();
   for (const live of [aaa, bbb, null, { code: "AAA", error: "x" }]) {
     const box = world({ active: "BBB", live, cached: { AAA: aaa, BBB: bbb }, codes: ["AAA", "BBB"] });
-    seen.add(cardIds(box.matchweekView()).join(","));
+    seen.add(cardIds(box.picksView()).join(","));
   }
   assert.deepEqual([...seen], ["pl-005"], "the answer changed with the stale global");
 });
@@ -324,7 +341,7 @@ test("A8 · rapid switching lands on the final selection", () => {
   // Every intermediate global the churn could leave behind, against the final pill.
   for (const live of [states.AAA, states.BBB, states.CCC, null]) {
     const box = world({ active: "CCC", live, cached: states, codes: ["AAA", "BBB", "CCC"] });
-    const html = box.matchweekView();
+    const html = box.picksView();
     assert.deepEqual(cardIds(html), ["pl-009", "pl-010"], "a mid-flight league won");
     assert.match(html, /Third/);
     assert.ok(!html.includes("Sunday Six") && !html.includes("Bury Legends"));
@@ -335,7 +352,7 @@ test("A8 · rapid switching lands on the final selection", () => {
 
 test("A9 · no league at all gets the welcome, not a season of fixtures", () => {
   const box = world({ active: "", live: null, cached: {}, codes: [] });
-  const html = box.matchweekView();
+  const html = box.picksView();
   assert.match(html, /onboarding/);
   assert.equal(cardIds(html).length, 0, "a viewer with no league was shown the calendar");
 });
@@ -345,7 +362,7 @@ test("A9 · the other surfaces are untouched", () => {
   for (const view of ["todayView", "picksView", "leagueView", "rulesView"]) {
     assert.ok(APP.includes(`function ${view}(`), `${view} went missing`);
   }
-  assert.match(APP, /today: todayView, schedule: matchweekView, picks: picksView, league: leagueView, rules: rulesView/);
+  assert.match(APP, /today: todayView, picks: picksView, league: leagueView, rules: rulesView/);
   // Prediction, scoring, mates, notifications, sharing and host admin still there.
   for (const anchor of ["function scorePicker(", "function savePick(", "function matesMatrix(",
     "function pickRevealSection(", "readNotificationRoute", "data-share-league",
@@ -367,7 +384,7 @@ test("A9 · no worker, schema or endpoint change", () => {
   }
   assert.ok(!/matchweekView[\s\S]{0,400}\bapi\(|matchweekView[\s\S]{0,400}fetch\(/.test(APP),
     "Matchweek issues a request of its own");
-  const view = sourceOf("matchweekView");
+  const view = sourceOf("picksView");
   assert.ok(!/fetch\(|\bapi\(/.test(view), "matchweekView fetches");
 });
 
@@ -387,17 +404,17 @@ test("A9 · no worker, schema or endpoint change", () => {
 const MISSING = "missing-X";
 
 const slotsOf = (html) =>
-  [...html.matchAll(/data-fixture-row="([^"]+)"|data-matchweek-unavailable="([^"]+)"/g)]
+  [...html.matchAll(/data-pick-row="([^"]+)"|data-matchweek-unavailable="([^"]+)"/g)]
     .map((m) => (m[1] ? { kind: "row", id: m[1] } : { kind: "unavailable", id: m[2] }));
 
 const headerCount = (html) => {
-  const m = html.match(/(\d+) selected game/);
+  const m = html.match(/of (\d+) saved/);
   return m ? Number(m[1]) : null;
 };
 
 test("A10 · [known, missing, known] renders three ordered slots", () => {
   const box = world({ live: leagueState({ code: "AAA", name: "L", ids: ["pl-001", MISSING, "pl-002"] }) });
-  const slots = slotsOf(box.matchweekView());
+  const slots = slotsOf(box.picksView());
   assert.deepEqual(slots, [
     { kind: "row", id: "pl-001" },
     { kind: "unavailable", id: MISSING },
@@ -409,7 +426,7 @@ test("A10 · the header reports three, not the stale declared count nor the two 
   const box = world({
     live: leagueState({ code: "AAA", name: "L", ids: ["pl-001", MISSING, "pl-002"], count: 6 }),
   });
-  const html = box.matchweekView();
+  const html = box.picksView();
   assert.equal(headerCount(html), 3, "the header did not report the published slot count");
   assert.notEqual(headerCount(html), 6, "a stale declared count reached the screen");
   assert.notEqual(headerCount(html), 2, "the header counted only what resolved");
@@ -427,7 +444,7 @@ test("A10 · the count always equals rendered rows plus explicit placeholders", 
   ];
   for (const ids of cases) {
     const box = world({ live: leagueState({ code: "AAA", name: "L", ids }) });
-    const html = box.matchweekView();
+    const html = box.picksView();
     assert.equal(headerCount(html), slotsOf(html).length,
       `header disagreed with the screen for ${JSON.stringify(ids)}`);
     assert.equal(slotsOf(html).length, ids.length);
@@ -438,7 +455,7 @@ test("A10 · the count always equals rendered rows plus explicit placeholders", 
 test("A10 · a resolvable id replaces its placeholder in place, moving nothing", () => {
   const ids = ["pl-001", MISSING, "pl-002"];
   const before = world({ live: leagueState({ code: "AAA", name: "L", ids }) });
-  assert.deepEqual(slotsOf(before.matchweekView()).map((s) => s.kind),
+  assert.deepEqual(slotsOf(before.picksView()).map((s) => s.kind),
     ["row", "unavailable", "row"]);
 
   // The fixture arrives — the only thing that changed is what the device holds.
@@ -449,20 +466,20 @@ test("A10 · a resolvable id replaces its placeholder in place, moving nothing",
     leagueState: leagueState({ code: "AAA", name: "L", ids }),
     leagueStates: {}, leagueCodes: ["AAA"],
   });
-  const slots = slotsOf(after.matchweekView());
+  const slots = slotsOf(after.picksView());
   assert.deepEqual(slots, [
     { kind: "row", id: "pl-001" },
     { kind: "row", id: MISSING },
     { kind: "row", id: "pl-002" },
   ], "the arriving fixture reordered the slate");
-  assert.equal(headerCount(after.matchweekView()), 3, "the count moved when the data arrived");
+  assert.equal(headerCount(after.picksView()), 3, "the count moved when the data arrived");
 });
 
 test("A10 · duplicates render once and cannot inflate the count", () => {
   const box = world({
     live: leagueState({ code: "AAA", name: "L", ids: ["pl-001", "pl-002", "pl-001", MISSING, MISSING], count: 5 }),
   });
-  const html = box.matchweekView();
+  const html = box.picksView();
   assert.deepEqual(slotsOf(html).map((s) => s.id), ["pl-001", "pl-002", MISSING]);
   assert.equal(headerCount(html), 3, "duplicates inflated the displayed count");
   assert.equal(headerCount(html), slotsOf(html).length);
@@ -471,7 +488,7 @@ test("A10 · duplicates render once and cannot inflate the count", () => {
 test("A10 · an unresolved id never pulls a fixture out of the calendar", () => {
   for (const ids of [[MISSING], ["pl-001", MISSING], [MISSING, "missing-Y"]]) {
     const box = world({ live: leagueState({ code: "AAA", name: "L", ids }) });
-    const html = box.matchweekView();
+    const html = box.picksView();
     const drawn = slotsOf(html).filter((s) => s.kind === "row").map((s) => s.id);
     assert.ok(drawn.every((id) => ids.includes(id)),
       `a calendar fixture stood in for an unresolved id: ${drawn}`);
@@ -489,7 +506,7 @@ test("A10 · a mismatched declared count is recorded, not displayed", () => {
   assert.equal(plan.count, 2, "the ids are not the display authority");
   assert.equal(plan.declared, 6);
   assert.deepEqual({ ...plan.mismatch }, { code: "AAA", period: "7", declared: 6, normalised: 2 });
-  assert.equal(headerCount(box.matchweekView()), 2);
+  assert.equal(headerCount(box.picksView()), 2);
   // It reaches the diagnostics the profile dialog already copies, once.
   box.matchweekSlate(); box.matchweekSlate();
   // Spread into this realm: an array built inside the vm has the vm's
@@ -507,7 +524,7 @@ test("A10 · an agreeing count records nothing", () => {
 
 test("A10 · the placeholder is readable text and accepts nothing", () => {
   const box = world({ live: leagueState({ code: "AAA", name: "L", ids: [MISSING] }) });
-  const html = box.matchweekView();
+  const html = box.picksView();
   const slot = html.slice(html.indexOf("fixture-row-unavailable"));
   assert.match(slot, /<strong>Fixture temporarily unavailable\.<\/strong>/);
   assert.match(slot, /<span>Pull to refresh\.<\/span>/);
@@ -527,8 +544,8 @@ test("A10 · a placeholder, its count and its state cannot cross to another leag
   const onA = world({ active: "AAA", live: broken, cached: { AAA: broken, BBB: whole }, codes: ["AAA", "BBB"] });
   const onB = world({ active: "BBB", live: broken, cached: { AAA: broken, BBB: whole }, codes: ["AAA", "BBB"] });
 
-  const a = onA.matchweekView();
-  const b = onB.matchweekView();
+  const a = onA.picksView();
+  const b = onB.picksView();
   assert.equal(slotsOf(a).filter((s) => s.kind === "unavailable").length, 1);
   assert.equal(headerCount(a), 3);
 

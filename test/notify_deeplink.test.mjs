@@ -65,23 +65,27 @@ test("N7 · a thrown handler still opens the app", () => {
 
 test("N3 · the tap activates the payload's league before navigating", () => {
   const src = sourceOf("openNotificationTarget");
-  assert.ok(src.indexOf("setActiveLeague(league, false)") < src.indexOf('navigateToView("schedule")'),
+  assert.ok(src.indexOf("setActiveLeague(league, false)") < src.indexOf('navigateToView("picks")'),
     "the league is switched after the screen is built");
   // `false` matters: the refresh comes from navigateToView, not from a second
   // request racing it.
   assert.match(src, /setActiveLeague\(league, false\)/);
 });
 
-test("N3 · the fixture's own week is opened, and no filter hides it", () => {
+test("N3 · a fixture outside the published slate is a fallback, not a blank screen", () => {
+  // My Picks shows the host's slate and nothing else, so there is no week to
+  // unfold and no filter to clear — a fixture that is not on it is honestly
+  // reported as not on screen.
   const src = sourceOf("openNotificationTarget");
-  assert.match(src, /openScheduleDates\.add\(`md-\$\{period\}`\)/);
-  assert.match(src, /matchdayFilter = "all";/);
+  assert.ok(!src.includes("openScheduleDates"), "the deep link still unfolds a season browser");
+  assert.ok(!src.includes("matchdayFilter"), "the deep link still clears a filter that is gone");
+  assert.match(src, /return "fallback:not-on-screen";/);
 });
 
 test("N3 · the exact card is expanded and scrolled to", () => {
   const src = sourceOf("openNotificationTarget");
-  assert.match(src, /document\.querySelector\(`\[data-fixture-row="\$\{cssEscape\(fixtureId\)\}"\]`\)/);
-  assert.match(src, /expandFixture\(fixtureId\)/);
+  assert.match(src, /document\.querySelector\(`\[data-pick-row="\$\{cssEscape\(fixtureId\)\}"\]`\)/);
+  assert.match(src, /expandPick\(fixtureId\)/);
   assert.match(src, /scrollIntoView\(\{ block: "center", behavior: "smooth" \}\)/);
 });
 

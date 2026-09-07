@@ -39,11 +39,12 @@ const leagueState = ({ code = "AAA", name = "Sunday Six", period = "7", ids, cou
 
 const VIEW_NAMES = [
   "matchweekLeagueState", "matchweekLeagueName", "matchweekSlate", "matchweekSlots",
-  "matchweekHead", "matchweekContext", "matchweekEmpty", "matchweekUnavailable",
-  "matchweekView", "matchweekRowState", "matchweekRowMark", "MATCHWEEK_ROW_LINE",
-  "fixtureRow", "shortKickoff", "closedStatus", "matchOpen", "finalScore",
+  "matchweekContext", "matchweekEmpty", "matchweekUnavailable",
+  "matchweekRowState", "MATCHWEEK_ROW_LINE",
+  "shortKickoff", "closedStatus", "matchOpen", "finalScore",
   "VOID_STATUSES", "isVoidFixture", "isPostponed", "clientLockMs",
-  "picksView", "pickRow", "pickProgress", "pickDeadlineLine", "expandPick", "pickEditable",
+  "picksView", "pickRow", "pickRowBody", "pickRowLabel", "pickJustSaved", "pickListState",
+  "pickShareRow", "pickProgress", "pickDeadlineLine", "expandPick", "pickEditable",
   "resultCard", "resultState", "resultPickLine", "resultBadge", "isSettledCard",
   "scorePickLocal", "RESULT_FIRST_STATES",
 ];
@@ -51,8 +52,9 @@ const VIEW_NAMES = [
 const BASE = {
   picks: {},
   leagueNames: {},
-  expandedFixtureId: null,
   expandedPickId: null,
+  // The share control is the share tests' subject, not this sandbox's.
+  shareIconButton: () => "",
   matchweekCountMismatches: new Map(),
   periodLabel: (p) => `Matchweek ${p}`,
   pulsingStatus: (m) => `<p class="pulse">${m}</p>`,
@@ -94,16 +96,14 @@ test("D1 · both surfaces render minimum, common and maximum slates", () => {
       ...BASE, fixtures, activeLeague: "AAA",
       leagueState: leagueState({ ids }), leagueStates: {}, leagueCodes: ["AAA"],
     });
-    assert.deepEqual(rows(s.matchweekView()), ids, `Matchweek lost order at ${size}`);
     assert.deepEqual(rows(s.picksView()), ids, `My Picks lost order at ${size}`);
-    assert.match(s.matchweekView(), new RegExp(`${size} selected game`));
-    assert.match(s.picksView(), new RegExp(`0 of ${size} complete`));
+    assert.match(s.picksView(), new RegExp(`0 of ${size} saved`));
   }
 });
 
 test("D1 · My Picks counts N of M from the slate, not from the calendar", () => {
   const s = box({ ids: [OPEN.id, LOCKED.id, SETTLED.id], picks: { [OPEN.id]: { p1: 1, p2: 0 }, [SETTLED.id]: { p1: 2, p2: 1 } } });
-  assert.match(s.picksView(), /2 of 3 complete/);
+  assert.match(s.picksView(), /2 of 3 saved/);
   const progress = s.pickProgress(s.matchweekSlots(s.matchweekSlate()));
   assert.deepEqual({ ...progress }, { complete: 2, total: 3 });
 });
@@ -119,7 +119,7 @@ test("D2 · every card state resolves, and says exactly one honest line", () => 
   for (const fixture of ALL) {
     assert.equal(s.matchweekRowState(fixture), expected[fixture.id], `${fixture.id} resolved wrongly`);
   }
-  const html = s.matchweekView();
+  const html = s.picksView();
   for (const [id, state] of Object.entries(expected)) {
     assert.ok(html.includes(`data-row-state="${state}"`), `${id} lost its state marker`);
   }
@@ -130,7 +130,7 @@ test("D2 · every card state resolves, and says exactly one honest line", () => 
 
 test("D2 · no provisional points anywhere, on either surface", () => {
   const s = box({ picks: Object.fromEntries(ALL.map((f) => [f.id, { p1: 1, p2: 1 }])) });
-  for (const [label, html] of [["Matchweek", s.matchweekView()], ["My Picks", s.picksView()]]) {
+  for (const [label, html] of [["Matchweek", s.picksView()], ["My Picks", s.picksView()]]) {
     // An in-progress fixture states pending, and never a score of our own.
     assert.match(html, /points pending settlement|Awaiting final score/, `${label} says nothing about pending`);
     assert.ok(!/provisional/i.test(html), `${label} mentions provisional`);
@@ -141,11 +141,11 @@ test("D2 · no provisional points anywhere, on either surface", () => {
 
 test("D2 · a settled row leads with the final score", () => {
   const s = box({ ids: [SETTLED.id], picks: { [SETTLED.id]: { p1: 2, p2: 1 } } });
-  const mw = s.matchweekView();
-  assert.match(mw, /fixture-row-final">2<span class="result-sep">–<\/span>1/);
-  // And on My Picks the settled row is the result card: score first, then the
-  // prediction and its points (B8).
+  // One surface now: the settled row IS the result card — score first, then
+  // the prediction and its points, with the mates behind the disclosure.
   const mine = s.picksView();
+  assert.match(mine, /class="pick-row pick-row-result/);
+  assert.match(mine, /data-expand-pick="[^"]+"[\s\S]*?Mates&#39; picks/);
   const scoreAt = mine.indexOf("result-score");
   const pickAt = mine.indexOf("result-pick");
   assert.ok(scoreAt > -1 && pickAt > scoreAt, "the prediction is not beneath the score");
@@ -167,27 +167,38 @@ test("D2 · My Picks shows controls only on the open row, and never after lock",
   assert.ok(!s.picksView().includes("score-picker"), "a locked row offered controls");
 });
 
-test("D2 · after lock My Picks states the saved prediction plainly", () => {
+test("D2 · after lock the row still states the saved prediction", () => {
+  // The repeated per-card status sentence is gone (Adam's rider, item 6), so
+  // the pick is on the row as data and in the row's spoken name.
   const s = box({ ids: [LOCKED.id], picks: { [LOCKED.id]: { p1: 3, p2: 0 } } });
-  assert.match(s.picksView(), /Locked · your pick 3-0/);
+  const html = s.picksView();
+  assert.match(html, /class="pick-row-score">3-0</);
+  assert.match(html, /aria-label="[^"]*your prediction 3-0, locked"/);
   const none = box({ ids: [LOCKED.id] });
-  assert.match(none.picksView(), /Locked · no pick made/);
+  assert.match(none.picksView(), /aria-label="[^"]*no prediction yet, locked"/);
+  // The state is said once, in the header — never on every card.
+  const list = html.slice(html.indexOf("pick-list"));
+  assert.ok(!/Locked · /.test(list), "a per-card status line survives");
+  assert.ok(!/pick-row-status/.test(html), "the repeated status element survives");
+  assert.equal((html.match(/Locked · /g) || []).length, 1, "the state is said more than once");
 });
 
 // --- D3 · one at a time -----------------------------------------------------
 
-test("D3 · only one row can be expanded on each surface", () => {
+test("D3 · only one row can be expanded, and there is only one surface", () => {
   const s = box();
-  s.evalIn(`expandedFixtureId = ${JSON.stringify(OPEN.id)}; expandedPickId = ${JSON.stringify(OPEN.id)};`);
-  assert.equal((s.matchweekView().match(/data-match-card=/g) || []).length, 1);
+  s.evalIn(`expandedPickId = ${JSON.stringify(OPEN.id)};`);
+  // One expanded body, whatever the rows are made of.
   assert.equal((s.picksView().match(/data-picker=/g) || []).length, 1);
+  assert.equal((s.picksView().match(/aria-expanded="true"/g) || []).length, 1);
   // The state is a single id, not a set — the shape makes two impossible.
   assert.match(sourceOf("expandPick"), /const wanted = expandedPickId === String\(id\) \? null : String\(id\);/);
-  assert.match(sourceOf("expandFixture"), /const wanted = expandedFixtureId === String\(id\) \? null : String\(id\);/);
+  // And there is no second expansion state to disagree with it.
+  assert.ok(!APP.includes("expandedFixtureId"), "a second expansion state survives");
 });
 
 test("D3 · expanding never re-renders, so scroll is preserved", () => {
-  for (const fn of ["expandPick", "expandFixture", "togglePickReveal"]) {
+  for (const fn of ["expandPick", "togglePickReveal"]) {
     const body = sourceOf(fn);
     assert.ok(!/\brender\(/.test(body), `${fn} re-renders the view`);
   }
@@ -195,15 +206,22 @@ test("D3 · expanding never re-renders, so scroll is preserved", () => {
 
 // --- D4 · privacy before authorisation --------------------------------------
 
-test("D4 · My Picks carries no mates section at all (B10)", () => {
+test("D4 · the mates section is behind the disclosure, never on the closed row", () => {
+  // Adam's ruling folded Matchweek into My Picks, so the mates ARE here now —
+  // but only once the viewer asks, and never on a fixture still open.
   const s = box({ ids: [SETTLED.id], picks: { [SETTLED.id]: { p1: 2, p2: 1 } } });
-  const mine = s.picksView();
-  assert.ok(!mine.includes("MATES"), "the personal surface drew the mates section");
-  assert.ok(!mine.includes("fixture-reveal"), "the personal surface drew a reveal");
-  assert.match(mine, /pick-social-link/, "and it does not say where the social view is");
-  // Matchweek still has it.
-  s.evalIn(`expandedFixtureId = ${JSON.stringify(SETTLED.id)};`);
-  assert.match(s.matchweekView(), /data-match-card=/);
+  const closed = s.picksView();
+  assert.ok(!closed.includes("MATES"), "a closed row drew the mates section");
+  assert.match(closed, /data-expand-pick="[^"]+"/, "no disclosure to open");
+  s.evalIn(`expandedPickId = ${JSON.stringify(SETTLED.id)};`);
+  const open = s.picksView();
+  assert.ok(open.includes("MATES"), "the disclosure does not hold the mates section");
+  // An OPEN fixture's disclosure holds the score controls and nothing social.
+  const still = box({ ids: [OPEN.id] });
+  still.evalIn(`expandedPickId = ${JSON.stringify(OPEN.id)};`);
+  const editing = still.picksView();
+  assert.match(editing, /data-picker=/, "the open row lost its score controls");
+  assert.ok(!editing.includes("MATES"), "an open fixture leaked the mates section");
 });
 
 test("D4 · a pre-lock card exposes no mate values, by construction", () => {
@@ -234,7 +252,7 @@ test("D5 · overlapping fixtures across leagues never blend", () => {
       ...BASE, fixtures: ALL, picks: {}, activeLeague: active,
       leagueState: state, leagueStates: { AAA: aaa, BBB: bbb }, leagueCodes: ["AAA", "BBB"],
     });
-    assert.deepEqual(rows(s.matchweekView()), expected, `${active} Matchweek blended`);
+    assert.deepEqual(rows(s.picksView()), expected, `${active} Matchweek blended`);
     assert.deepEqual(rows(s.picksView()), expected, `${active} My Picks blended`);
   }
 });
@@ -247,7 +265,7 @@ test("D5 · rapid switching lands on the final selection, on both surfaces", () 
       ...BASE, fixtures: ALL, picks: {}, activeLeague: "BBB",
       leagueState: stale, leagueStates: { AAA: aaa, BBB: bbb }, leagueCodes: ["AAA", "BBB"],
     });
-    assert.deepEqual(rows(s.matchweekView()), [SETTLED.id], "a stale global won on Matchweek");
+    assert.deepEqual(rows(s.picksView()), [SETTLED.id], "a stale global won on Matchweek");
     assert.deepEqual(rows(s.picksView()), [SETTLED.id], "a stale global won on My Picks");
     assert.ok(!s.picksView().includes("Sunday Six"));
   }
@@ -255,14 +273,14 @@ test("D5 · rapid switching lands on the final selection, on both surfaces", () 
 
 test("D5 · a switch closes both open rows", () => {
   const fn = sourceOf("setActiveLeague");
-  assert.match(fn, /expandedFixtureId = null;/);
+  assert.match(fn, /expandedPickId = null;/);
   assert.match(fn, /expandedPickId = null;/);
 });
 
 // --- D6 · the exports -------------------------------------------------------
 
 const SHARE_NAMES = ["weeklyTerminalCount", "weeklyShareStatus", "seasonShareFreshness",
-  "shareIconButton", "shareCardState", "weeklySharePublished", "seasonCardModel", "podiumCounts",
+  "shareSurface", "shareRound", "sharePeriod", "normaliseView", "LEGACY_VIEWS", "shareIconButton", "shareCardState", "weeklySharePublished", "seasonCardModel", "podiumCounts",
   "finalScore", "isVoidFixture", "isPostponed", "VOID_STATUSES",
   "noteWeeklyFinalMismatch", "weeklyFinalMismatchLines"];
 
@@ -272,6 +290,7 @@ function shareBox(overrides = {}) {
     fixtures: ALL,
     activeLeague: "AAA",
     leagueTab: "matchday",
+    currentView: "league",
     selectedPeriod: "7",
     roundState: null,
     leagueState: leagueState({ ids: [] }),
@@ -425,7 +444,7 @@ test("D8 · the worst supported shape stays inside the synchronous budget", () =
     ...BASE, fixtures, picks, activeLeague: "AAA",
     leagueState: leagueState({ ids }), leagueStates: {}, leagueCodes: ["AAA"],
   });
-  for (const [label, fn] of [["Matchweek", () => s.matchweekView()], ["My Picks", () => s.picksView()]]) {
+  for (const [label, fn] of [["Matchweek", () => s.picksView()], ["My Picks", () => s.picksView()]]) {
     fn();
     const times = [];
     for (let i = 0; i < 21; i++) { const t = performance.now(); fn(); times.push(performance.now() - t); }

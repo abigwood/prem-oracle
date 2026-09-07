@@ -20,6 +20,10 @@ const NAMES = [
   "noteMatchweekCountMismatch", "matchweekMismatchLines",
   // The REAL row builder, so the measurement is of work that ships.
   "fixtureRow", "shortKickoff",
+  // ...and the row-state contract Slice B put behind it.
+  "matchweekRowState", "matchweekRowMark", "MATCHWEEK_ROW_LINE",
+  "isPostponed", "isVoidFixture", "VOID_STATUSES", "finalScore", "matchOpen",
+  "closedStatus",
 ];
 
 /** A full mixed-competition season — the board the old surface had to walk. */

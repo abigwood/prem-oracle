@@ -1612,17 +1612,16 @@ class WeekPickerTests(unittest.TestCase):
     def test_the_total_and_to_pick_boxes_are_gone(self):
         picks = self.app[self.app.index("function picksView()"):]
         picks = picks[:picks.index("function leagueSwitcher")]
-        # The count now reflects VISIBLE picks, since a dropped fixture's pick
-        # is filtered from the view (never deleted).
-        self.assertIn("<b>${visible.length}</b><span>Picks made</span>", picks)
-        # Removed outright, with nothing put in their place.
+        # v1.7 Slice B: the standalone stat box is replaced by the header's own
+        # dynamic progress line (B3). What must stay gone is what it replaced.
+        self.assertIn("${progress.complete} of ${progress.total} complete", picks)
         self.assertNotIn("Total fixtures", self.app)
         self.assertNotIn("To pick", self.app)
         self.assertNotIn("fixtures.length - picked.length", self.app)
-        self.assertEqual(picks.count('class="stat"'), 1)
+        self.assertEqual(picks.count('class="stat"'), 0)
         # The lone box does not stretch across the old three columns.
-        self.assertIn("stats-grid-single", picks)
-        self.assertIn(".stats-grid-single { grid-template-columns: minmax(0, 200px); }", self.css)
+        # The single-stat grid went with the stat box it existed to lay out.
+        self.assertNotIn("stats-grid-single", picks)
 
 
 class AmendBeforeKickoffTests(unittest.TestCase):
@@ -1780,11 +1779,17 @@ class MyPredictionsTests(unittest.TestCase):
         for destructive in ("delete picks[", "picks = {}", "removeItem(STORAGE.picks"):
             self.assertNotIn(destructive, view, destructive)
 
-    def test_the_count_reflects_visible_picks(self):
+    def test_the_count_is_n_of_m_over_the_published_slate(self):
+        # v1.7 Slice B: N of M, where M is the host's published slot count and
+        # N is how many of them this player has scored (B3).
         view = self.app[self.app.index("function picksView()"):]
         view = view[:view.index("function leagueSwitcher")]
-        self.assertIn("<b>${visible.length}</b><span>Picks made</span>", view)
-        self.assertIn("const visible = visiblePickedFixtures(hidden);", view)
+        self.assertIn("const progress = pickProgress(slots);", view)
+        self.assertIn("${progress.complete} of ${progress.total} complete", view)
+        counter = self.app[self.app.index("function pickProgress(slots)"):]
+        counter = counter[:counter.index("\n}")]
+        self.assertIn("const total = slots.length;", counter)
+        self.assertIn("slots.filter((slot) => slot.fixture && picks[slot.fixture.id]).length", counter)
 
     def test_the_dropped_set_comes_from_the_version_deltas(self):
         # The app cannot derive 'dropped' from a slate's latest state; the
@@ -1798,18 +1803,21 @@ class MyPredictionsTests(unittest.TestCase):
 
     # --- B. the sectioned layout ------------------------------------------
 
-    def test_one_section_per_league_then_the_rest(self):
+    def test_my_picks_is_one_league_and_one_published_slate(self):
+        # v1.7 Slice B supersedes the per-league sectioned layout: My Picks is
+        # the SELECTED league's current published slate and nothing else (B1),
+        # resolved by the very same functions Matchweek uses so the two screens
+        # cannot disagree about which fixtures this week contains.
         view = self.app[self.app.index("function picksView()"):]
         view = view[:view.index("function leagueSwitcher")]
-        # A section per league, over that league's own line-up.
-        self.assertIn("const mine = visible.filter((fixture) => league.lineup.has(String(fixture.id)));", view)
-        self.assertIn("pickWeekGroups(mine, mixed)", view)
-        # Then everything not claimed by a league.
-        self.assertIn("const others = visible.filter((fixture) => !claimed.has(String(fixture.id)));", view)
-        self.assertIn('pickSection("Your other predictions"', view)
-        # A league-less viewer keeps the plain list.
-        self.assertIn("if (!contexts.length) {", view)
-        self.assertIn("groupedMatchdays(visible)", view)
+        self.assertIn("const state = matchweekLeagueState();", view)
+        self.assertIn("const plan = matchweekSlate(state);", view)
+        self.assertIn("const slots = matchweekSlots(plan);", view)
+        # No sections, no week folding, and above all no competition calendar.
+        for gone in ("pickSection(", "pickWeekGroups(", "groupedMatchdays(", "leaguePickContexts("):
+            self.assertNotIn(gone, view, gone)
+        # An unpublished slate gets the non-negotiable empty state, not a list.
+        self.assertIn("matchweekEmpty()", view)
 
     def test_sections_are_week_grouped_by_that_leagues_own_shape(self):
         fn = self.app[self.app.index("function pickWeekGroups(list, mixed)"):]

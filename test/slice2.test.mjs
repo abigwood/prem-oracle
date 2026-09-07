@@ -125,12 +125,14 @@ test("R1 · the result card drops every pre-match element", () => {
 
 test("R1 · all three named surfaces route through the one result-first path", () => {
   // My Picks, expanded Schedule rows, and the Weekly fixture rows.
-  // My Picks also hands the card the section it was drawn in, so its reveal
-  // can answer for that league and week rather than the active one.
-  assert.match(sourceOf("pickEntry"), /matchCard\(fixture, \{ resultFirst: true, reveal \}\)/);
+  // v1.7 Slice B: My Picks builds its own compact rows and draws the settled
+  // ones through resultCard with social:false (B10) — the personal surface no
+  // longer carries the mates section. pickEntry belongs to the retained,
+  // unreached v1.6.6 layout.
+  assert.match(sourceOf("pickRow"), /resultCard\(match, null, \{ social: false \}\)/);
   assert.match(sourceOf("fixtureRow"), /matchCard\(fixture, \{ resultFirst: true \}\)/);
   assert.match(sourceOf("expandFixture"), /matchCard\(fixture, \{ resultFirst: true \}\)/);
-  assert.match(sourceOf("matchCard"), /if \(resultFirst && isSettledCard\(match\)\) return resultCard\(match, reveal\);/);
+  assert.match(sourceOf("matchCard"), /if \(resultFirst && isSettledCard\(match\)\) return resultCard\(match, reveal, \{ social \}\);/);
 });
 
 test("R1 · D3 has exactly two surfaces, and Weekly is not one of them", () => {
@@ -190,7 +192,7 @@ test("R3 · the mates' reveal stays reachable on a settled card", () => {
   // Both branches: the Schedule's current-round reveal, and My Picks' own
   // league-and-week one. A settled card is never left without either.
   assert.match(sourceOf("resultCard"),
-    /\$\{reveal \? pickRevealSection\(match, reveal\) : fixtureRevealSection\(match\)\}/);
+    /\$\{!social \? "" : reveal \? pickRevealSection\(match, reveal\) : fixtureRevealSection\(match\)\}/);
   const withContext = load(D3, {
     fixtureRevealSection: () => "<section class=\"fixture-reveal\">CURRENT</section>",
     pickRevealSection: () => "<section class=\"fixture-reveal pick-reveal\">OWN</section>",

@@ -1153,10 +1153,11 @@ function setActiveLeague(code, refresh = true) {
   // you are already on survives.
   if (next !== activeLeague) {
     clearFlash();
-    // Matchweek expands one card at a time. Two leagues can publish the very
-    // same fixture, so an id left open under the old league would silently
-    // reopen under the new one's name.
+    // Matchweek and My Picks each expand one card at a time. Two leagues can
+    // publish the very same fixture, so an id left open under the old league
+    // would silently reopen under the new one's name.
     expandedFixtureId = null;
+    expandedPickId = null;
   }
   activeLeague = next;
   selectedPeriod = null;
@@ -1488,7 +1489,12 @@ function resultPickLine(match, state, pick) {
  * no score picker. The reveal section stays, because seeing what everybody else
  * said is the reason to open a settled card at all (D3, R3).
  */
-function resultCard(match, reveal = null) {
+/**
+ * `social: false` suppresses the mates section entirely. My Picks is the
+ * personal surface (B10): it answers "what did I predict and what did it
+ * score", and the comparison belongs on Matchweek.
+ */
+function resultCard(match, reveal = null, { social = true } = {}) {
   const pick = picks[match.id];
   const state = resultState(match, pick);
   const actual = finalScore(match);
@@ -1509,7 +1515,7 @@ function resultCard(match, reveal = null) {
       <div class="result-team">${teamBadge(match.player2)}<span class="player-name">${escapeHTML(match.player2)}</span></div>
     </div>
     ${resultPickLine(match, state, pick)}
-    ${reveal ? pickRevealSection(match, reveal) : fixtureRevealSection(match)}
+    ${!social ? "" : reveal ? pickRevealSection(match, reveal) : fixtureRevealSection(match)}
   </article>`;
 }
 
@@ -1725,8 +1731,8 @@ function scorePicker(match, open) {
   </div>`;
 }
 
-function matchCard(match, { resultFirst = false, reveal = null } = {}) {
-  if (resultFirst && isSettledCard(match)) return resultCard(match, reveal);
+function matchCard(match, { resultFirst = false, reveal = null, social = true } = {}) {
+  if (resultFirst && isSettledCard(match)) return resultCard(match, reveal, { social });
   const pick = picks[match.id];
   const open = matchOpen(match);
   const calendar = calendarLink(match);
@@ -1749,7 +1755,7 @@ function matchCard(match, { resultFirst = false, reveal = null } = {}) {
       ${pick ? pickStatus(match, pick, open) : ""}
       ${scorePicker(match, open)}
     </div>
-    ${reveal ? pickRevealSection(match, reveal) : fixtureRevealSection(match)}
+    ${!social ? "" : reveal ? pickRevealSection(match, reveal) : fixtureRevealSection(match)}
   </article>`;
 }
 
@@ -2063,18 +2069,53 @@ function dayBody(period, matches, open) {
  * the tab unusable. It is built when somebody asks for that fixture, and only
  * for that fixture.
  */
+/**
+ * The five states a Matchweek row can be in, and the ONE line each of them is
+ * allowed to say. They come from the fixture and the server's own result — the
+ * client never decides that something has finished, and never scores a game
+ * that has not settled (B6, B9).
+ */
+function matchweekRowState(fixture) {
+  if (isPostponed(fixture)) return "postponed";
+  if (isVoidFixture(fixture)) return "void";
+  if (finalScore(fixture)) return "settled";
+  if (fixture.startAt && Date.now() >= Date.parse(fixture.startAt)) return "in-progress";
+  return matchOpen(fixture) ? "open" : "locked";
+}
+
+const MATCHWEEK_ROW_LINE = {
+  open: "Open · edit until kick-off",
+  locked: "Locked · mates revealed at kick-off",
+  // Never a provisional score of our own: the round is running, and only the
+  // server may award points, once it settles.
+  "in-progress": "In progress · points pending settlement",
+  settled: "Final",
+  void: "Void — no points",
+  postponed: "Postponed — no points",
+};
+
+function matchweekRowMark(fixture, state) {
+  const actual = finalScore(fixture);
+  if (state === "settled" && actual) {
+    return `<span class="fixture-row-final">${actual[0]}<span class="result-sep">–</span>${actual[1]}</span>`;
+  }
+  const picked = picks[String(fixture.id)];
+  return `<span class="fixture-row-mark">${picked ? `${picked.p1}-${picked.p2}` : ""}</span>`;
+}
+
 function fixtureRow(fixture) {
   const id = String(fixture.id);
   const open = expandedFixtureId === id;
   const kickoff = fixture.startAt ? shortKickoff(fixture.startAt) : "";
-  const picked = picks[id];
-  return `<div class="fixture-row${open ? " is-open" : ""}" data-fixture-row="${escapeHTML(id)}">
+  const state = matchweekRowState(fixture);
+  return `<div class="fixture-row fixture-row-${state}${open ? " is-open" : ""}" data-fixture-row="${escapeHTML(id)}" data-row-state="${state}">
     <button type="button" class="fixture-row-head" data-expand-fixture="${escapeHTML(id)}"
       aria-expanded="${open ? "true" : "false"}" aria-controls="fx-${escapeHTML(id)}">
       <span class="fixture-row-when">${escapeHTML(kickoff)}</span>
       <span class="fixture-row-teams">${escapeHTML(fixture.player1)} v ${escapeHTML(fixture.player2)}</span>
-      <span class="fixture-row-mark">${picked ? `${picked.p1}-${picked.p2}` : ""}</span>
+      ${matchweekRowMark(fixture, state)}
     </button>
+    <p class="fixture-row-state">${escapeHTML(MATCHWEEK_ROW_LINE[state])}</p>
     <div class="fixture-row-body" id="fx-${escapeHTML(id)}">${open ? matchCard(fixture, { resultFirst: true }) : ""}</div>
   </div>`;
 }
@@ -2889,37 +2930,144 @@ function pickSection(title, subtitle, groups, contexts, code) {
   </details>`;
 }
 
-function picksView() {
-  const contexts = leaguePickContexts();
-  const hidden = hiddenPickIds(contexts);
-  const visible = visiblePickedFixtures(hidden);
-  const head = `<div class="section-head"><div><span class="eyebrow">${playerName || "Your profile"}</span><h2>My predictions</h2><p>Synced securely when online; cached on this device</p></div></div>
-    <div class="stats-grid stats-grid-single">
-      <div class="stat"><b>${visible.length}</b><span>Picks made</span></div>
-    </div>`;
-  const empty = `<div class="empty"><strong>No picks yet</strong><p>Choose a scoreline on any fixture before kick-off.</p></div>`;
+// --- v1.7 Slice B: My Picks, stripped to one personal job -------------------
+//
+// My Picks used to be a second fixture browser: every league the viewer plays,
+// grouped into foldable weeks, over the union of their line-ups. It answered
+// "what have I ever predicted?" when the only question it is for is "have I
+// predicted this week's games yet?".
+//
+// So it shows the selected league's current published slate and nothing else,
+// in the host's order, one editable row at a time. It shares Matchweek's slate
+// resolution exactly — the same functions, not a second copy — because two
+// screens disagreeing about which fixtures this week contains would be worse
+// than either being wrong on its own.
 
-  // No leagues: the plain week-grouped list, exactly as before.
-  if (!contexts.length) {
-    return `${head}${visible.length ? groupedMatchdays(visible) : empty}`;
+/** Which fixture My Picks has open for editing. One at a time (B5). */
+let expandedPickId = null;
+
+/** N of M complete, where M is the published slot count and N has a score. */
+function pickProgress(slots) {
+  const total = slots.length;
+  const complete = slots.filter((slot) => slot.fixture && picks[slot.fixture.id]).length;
+  return { complete, total };
+}
+
+/**
+ * The lock deadline for the slate, from the fixtures themselves: the earliest
+ * kick-off still ahead. Named honestly — a week whose first game has started is
+ * not "locking soon", it is part-locked.
+ */
+function pickDeadlineLine(slots) {
+  const now = Date.now();
+  const upcoming = slots
+    .map((slot) => slot.fixture)
+    .filter((fixture) => fixture && Date.parse(fixture.startAt || "") > now)
+    .sort((a, b) => Date.parse(a.startAt) - Date.parse(b.startAt))[0];
+  if (!upcoming) return "";
+  return `Locks ${shortKickoff(upcoming.startAt)}`;
+}
+
+/**
+ * One compact row. Closed it is a line; open it is the same line with the score
+ * controls under it — and only while the fixture is still open. After lock the
+ * controls are gone entirely rather than disabled, because a disabled stepper
+ * still reads as something you might be able to press.
+ */
+function pickRow(slot, { expanded }) {
+  if (!slot.fixture) return matchweekUnavailable(slot.id);
+  const match = slot.fixture;
+  const id = String(match.id);
+  const pick = picks[id];
+  const state = resultState(match, pick);
+  const open = matchOpen(match);
+  const settled = state === "completed" || state === "completed-no-pick";
+
+  // A settled row is a result first: the score is the hero and the prediction
+  // and its points sit underneath it (B8).
+  if (settled || state === "void" || state === "started-unsettled") {
+    return `<div class="pick-row pick-row-result" data-pick-row="${escapeHTML(id)}" data-result-state="${state}">
+      ${resultCard(match, null, { social: false })}
+    </div>`;
   }
 
-  const claimed = new Set();
-  const sections = contexts.map((league) => {
-    const mine = visible.filter((fixture) => league.lineup.has(String(fixture.id)));
-    mine.forEach((fixture) => claimed.add(String(fixture.id)));
-    const state = leagueState?.code === league.code ? leagueState : leagueStates[league.code];
-    const mixed = (state?.competitions || []).length > 1;
-    return pickSection(league.name, null, pickWeekGroups(mine, mixed), contexts, league.code);
-  }).join("");
+  const mark = pick
+    ? `<span class="pick-row-score">${pick.p1}-${pick.p2}</span>`
+    : `<span class="pick-row-score pick-row-needed">—</span>`;
+  const status = pick ? "Prediction saved" : "Prediction needed";
+  return `<div class="pick-row${expanded ? " is-open" : ""}${pick ? "" : " is-needed"}" data-pick-row="${escapeHTML(id)}">
+    <button type="button" class="pick-row-head" data-expand-pick="${escapeHTML(id)}"
+      aria-expanded="${expanded ? "true" : "false"}" aria-controls="pk-${escapeHTML(id)}">
+      <span class="pick-row-when">${escapeHTML(match.startAt ? shortKickoff(match.startAt) : "")}</span>
+      <span class="pick-row-teams">${escapeHTML(match.player1)} v ${escapeHTML(match.player2)}</span>
+      ${mark}
+    </button>
+    <p class="pick-row-status">${open ? escapeHTML(status) : `Locked · ${escapeHTML(pick ? `your pick ${pick.p1}-${pick.p2}` : "no pick made")}`}</p>
+    <div class="pick-row-body" id="pk-${escapeHTML(id)}">${
+      expanded && open ? scorePicker(match, open) : ""}</div>
+  </div>`;
+}
 
-  // Anything predicted outside every current line-up — solo play lives here.
-  const others = visible.filter((fixture) => !claimed.has(String(fixture.id)));
-  const otherSection = pickSection("Your other predictions",
-    "Not in any of your leagues' line-ups", pickWeekGroups(others, isMixedActive()), contexts, null);
+/**
+ * Mounts one row's score controls and unmounts whichever was open, against the
+ * live DOM. A re-render would rebuild the list and lose the viewer's place on a
+ * screen that exists to be worked down.
+ */
+function expandPick(id) {
+  const wanted = expandedPickId === String(id) ? null : String(id);
+  for (const row of document.querySelectorAll("[data-pick-row]")) {
+    const rowId = row.dataset.pickRow;
+    const head = row.querySelector("[data-expand-pick]");
+    const body = row.querySelector(".pick-row-body");
+    if (!head || !body) continue;
+    if (rowId === wanted) {
+      const fixture = fixtureById(rowId);
+      body.innerHTML = fixture && matchOpen(fixture) ? scorePicker(fixture, true) : "";
+      row.classList.add("is-open");
+      head.setAttribute("aria-expanded", "true");
+    } else if (body.innerHTML) {
+      body.innerHTML = "";
+      row.classList.remove("is-open");
+      head.setAttribute("aria-expanded", "false");
+    }
+  }
+  expandedPickId = wanted;
+}
 
-  const body = `${sections}${otherSection}`;
-  return `${head}${body.trim() ? body : empty}`;
+function picksView() {
+  const head = (name, progress, deadline) =>
+    `<div class="section-head"><div>
+      <span class="eyebrow">${escapeHTML(name || playerName || "Your predictions")}</span>
+      <h2>My Picks</h2>
+      ${progress ? `<p>${progress.complete} of ${progress.total} complete${
+        deadline ? ` · ${escapeHTML(deadline)}` : ""}</p>` : ""}
+    </div></div>`;
+
+  if (!leagueCodes.length) return onboardingState();
+
+  const state = matchweekLeagueState();
+  if (!state) {
+    return `${head(matchweekLeagueName(), null, "")}
+      ${matchweekContext(null)}
+      ${pulsingStatus("Loading your picks…")}`;
+  }
+
+  const plan = matchweekSlate(state);
+  if (!plan) {
+    return `${head(state.name, null, "")}
+      ${matchweekContext(state)}
+      ${matchweekEmpty()}`;
+  }
+
+  const slots = matchweekSlots(plan);
+  const progress = pickProgress(slots);
+  return `${head(state.name, progress, pickDeadlineLine(slots))}
+    ${matchweekContext(state)}
+    <div class="pick-list" data-pick-list>${
+      slots.map((slot) => pickRow(slot, { expanded: expandedPickId === String(slot.id) })).join("")
+    }</div>
+    <p class="pick-social-link">Comparing with your mates happens on
+      <button class="link-quiet" type="button" data-view="schedule">Matchweek</button>.</p>`;
 }
 
 function leagueSwitcher() {
@@ -6023,6 +6171,13 @@ document.addEventListener("click", async (event) => {
   const expand = event.target.closest("[data-expand-fixture]");
   if (expand) {
     expandFixture(expand.dataset.expandFixture);
+    return;
+  }
+  // My Picks opens one editable row at a time, as a DOM edit rather than a
+  // re-render, so working down the list never loses your place.
+  const pickRowHead = event.target.closest("[data-expand-pick]");
+  if (pickRowHead) {
+    expandPick(pickRowHead.dataset.expandPick);
     return;
   }
   // A settled My Picks card's mates. NOT awaited: everything the viewer sees

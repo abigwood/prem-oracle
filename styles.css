@@ -2099,3 +2099,45 @@ body.picker-open { overflow: hidden; }
 }
 .fixture-row-unavailable strong { font-size: .88rem; font-weight: 800; color: var(--ink); }
 .fixture-row-unavailable span { font-size: .8rem; }
+
+/* --- v1.7 Slice B: My Picks, compact and personal -------------------------- */
+.pick-list { display: flex; flex-direction: column; gap: 8px; }
+.pick-row {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--white);
+  overflow: hidden;
+}
+.pick-row.is-needed { border-color: var(--purple); }
+.pick-row-head {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 44px;
+  padding: 10px 12px 4px;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.pick-row-when { font-size: .74rem; font-weight: 800; color: var(--muted); }
+.pick-row-teams { min-width: 0; font-size: .88rem; font-weight: 900; overflow-wrap: anywhere; }
+.pick-row-score { font-size: 1rem; font-weight: 900; color: var(--purple); }
+.pick-row-score.pick-row-needed { color: var(--muted); }
+.pick-row-status { margin: 0; padding: 0 12px 10px; font-size: .76rem; color: var(--muted); }
+.pick-row-body:empty { display: none; }
+.pick-row-body { padding: 0 12px 12px; }
+.pick-row-result { border: 0; background: none; }
+.pick-social-link { margin-top: 14px; font-size: .82rem; color: var(--muted); text-align: center; }
+
+/* --- v1.7 Slice B: Matchweek row states ----------------------------------- */
+.fixture-row-state { margin: 0; padding: 0 12px 10px; font-size: .74rem; font-weight: 800; color: var(--muted); }
+.fixture-row-settled .fixture-row-state { color: var(--green); }
+.fixture-row-void .fixture-row-state,
+.fixture-row-postponed .fixture-row-state { color: var(--danger); }
+.fixture-row-final { font-size: 1.05rem; font-weight: 900; color: var(--ink); }
+.fixture-row-final .result-sep { padding: 0 3px; color: var(--muted); }

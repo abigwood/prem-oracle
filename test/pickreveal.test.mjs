@@ -315,16 +315,16 @@ test("B · a zero-mate settled card still discloses, and explains itself", () =>
 
 // --- B · the wiring that carries the context ------------------------------
 
-test("B · My Picks threads the section's league and week into every card", () => {
+test("B · the settled-card reveal is Matchweek's, and its context still threads", () => {
   // The defect was not in the reveal alone: the card was never told which
   // section it was in, so it could only ever ask about the active league.
-  assert.match(APP, /function pickEntry\(fixture, note, reveal = null\)/);
-  assert.match(APP, /matchCard\(fixture, \{ resultFirst: true, reveal \}\)/);
-  assert.match(APP, /function resultCard\(match, reveal = null\)/);
-  assert.match(APP, /reveal \? pickRevealSection\(match, reveal\) : fixtureRevealSection\(match\)/);
-  // Both places that build pick cards pass it: the open week and the folded one.
-  assert.equal(APP.split("code ? { code, period: group.period } : null").length - 1, 1);
-  assert.equal(APP.split("code ? { code, period } : null").length - 1, 1);
+  // v1.7 Slice B moved the social view off My Picks entirely (B10): the
+  // personal surface draws settled cards with social:false, and the
+  // league-and-week reveal now serves Matchweek. The threading it proved is
+  // unchanged where it still applies.
+  assert.match(APP, /function resultCard\(match, reveal = null, \{ social = true \} = \{\}\)/);
+  assert.match(APP, /!social \? "" : reveal \? pickRevealSection\(match, reveal\) : fixtureRevealSection\(match\)/);
+  assert.match(APP, /resultCard\(match, null, \{ social: false \}\)/);
   // And the tap is handled rather than falling through to nothing.
   assert.match(APP, /const pickReveal = event\.target\.closest\("\[data-pick-reveal\]"\);/);
   assert.match(APP, /^\s*togglePickReveal\(pickReveal\);$/m);

@@ -33,7 +33,11 @@ const NAMES = ["matchweekLeagueState", "matchweekLeagueName", "matchweekSlate", 
   "resultCard", "resultState", "resultPickLine", "resultBadge", "isSettledCard",
   "scorePickLocal", "RESULT_FIRST_STATES",
   "weeklyTerminalCount", "weeklyShareStatus", "seasonShareFreshness", "shareIconButton",
-  "shareCardState", "seasonCardModel", "podiumCounts"];
+  "shareCardState", "seasonCardModel", "weeklyCardModel", "weeklyCardCaption", "podiumCounts",
+  "CARD_SIDE", "CARD_W", "CARD_HEAD_H", "CARD_HERO_H", "CARD_TABLE_HEAD_H", "CARD_ROW_H",
+  "CARD_SEASON_ROW_H", "CARD_FOOT_H", "CARD_GAP", "CARD_PODIUM_H", "CARD_PODIUM_STACK",
+  "cardRowMetrics", "cardCanvas", "podiumHeight", "podiumStackDepth", "winnerNames", "CARD",
+  "weeklyRanks", "sharedRankByUid", "cardDate", "noteWeeklyFinalMismatch", "weeklyFinalMismatchLines"];
 
 const leagueState = (ids) => ({
   code: "AAA", name: "Sunday Six", currentPeriod: "7",
@@ -58,6 +62,12 @@ const BASE = {
   leagueTab: "matchday", selectedPeriod: "7", roundState: null,
   seasonRounds: () => 38, currentPeriodKey: () => "7",
   leagueSupportsRounds: () => true, inviteLinkFor: (c) => "https://x/" + c,
+  weeklyFinalMismatches: new Map(),
+  leagueCompetitionNames: () => "Premier League",
+  PLACE_EMOJI: { gold: "G", silver: "S", bronze: "B" },
+  document: { createElement: () => ({ width: 0, height: 0,
+    getContext: () => new Proxy({}, { get: () => () => ({ width: 0, addColorStop() {} }), set: () => true }),
+    toDataURL: () => "data:image/png;base64,AA" }) },
 };
 
 /** Markup reduced to its readable text, one line per element. */
@@ -154,3 +164,24 @@ console.log("\n" + "=".repeat(74));
 console.log("  SHARE CONTROL MARKUP");
 console.log("=".repeat(74));
 console.log(world({ roundState: round(3, six(6), true) }).shareIconButton({ code: "AAA" }).trim());
+
+
+// --- the SQUARE cards, as geometry ------------------------------------------
+console.log("\n" + "=".repeat(74));
+console.log("  SQUARE EXPORT GEOMETRY - every size, both cards");
+console.log("=".repeat(74));
+const g = world();
+const seasonChrome = g.CARD_HEAD_H + g.CARD_GAP + g.CARD_TABLE_HEAD_H + g.CARD_GAP + g.CARD_FOOT_H;
+console.log("     members  rowH  name  honours   content   canvas      scale  fits");
+for (const n of [1, 3, 6, 8, 12, 16, 20, 25, 30]) {
+  const m = g.cardRowMetrics(n, { chrome: seasonChrome, base: g.CARD_SEASON_ROW_H });
+  const { canvas, scale } = g.cardCanvas(m.contentHeight);
+  const drawn = m.contentHeight * scale;
+  console.log("     " + String(n).padStart(7) + "  " + String(Math.round(m.rowH)).padStart(4)
+    + "  " + String(m.name).padStart(4) + "  " + String(m.honours).padStart(7)
+    + "   " + String(Math.round(m.contentHeight)).padStart(7)
+    + "   " + (canvas.width + "x" + canvas.height).padStart(9)
+    + "  " + scale.toFixed(3).padStart(5)
+    + "  " + (drawn <= canvas.height + 0.5 && canvas.width === canvas.height ? "yes" : "NO"));
+}
+console.log("\n     Every canvas is square and every row is drawn: the table is never cut.");

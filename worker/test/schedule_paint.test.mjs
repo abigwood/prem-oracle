@@ -421,6 +421,8 @@ function island({ buildMs = 0 } = {}) {
     // model: the season length, the period label and the fixture lookup.
     const seasonRounds = () => 38;
     const fixtureById = () => null;
+    const weeklyFinalMismatches = new Map();
+    const noteWeeklyFinalMismatch = () => {};
     // v1.7 Slice C: the card models and the control now state how far through
     // the week they are, so the harness lifts that contract too.
     ${lift("function weeklyTerminalCount(round)")}

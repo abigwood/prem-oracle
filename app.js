@@ -4306,14 +4306,56 @@ function drawFitted(ctx, text, x, y, maxWidth, { weight = 900, max = 48, min = 2
   ctx.textAlign = "left";
 }
 
-function cardCanvas(height) {
+/**
+ * Both exports are SQUARE. A group chat crops and previews a square cleanly;
+ * the tall portrait the row-count used to produce was cropped to its middle,
+ * which is the part of a league table nobody needs.
+ *
+ * The design is still drawn in 1080-wide units. What changes is that the canvas
+ * is 1080x1080 whatever the table holds, and the drawing is scaled to fit into
+ * it — after the row height has already been reduced for the member count, so
+ * the scale is a small correction rather than the whole adaptation.
+ */
+const CARD_SIDE = 1080;
+
+/**
+ * The row height and type sizes a table of `rows` can have inside the square.
+ *
+ * The complete table always fits: rows shrink, then type shrinks with them, and
+ * the honours sub-line drops out when a row is too short to carry it. Nothing
+ * is ever dropped from the table itself — a truncated league table is not a
+ * smaller version of the card, it is a different and dishonest one.
+ */
+function cardRowMetrics(rows, { chrome, base, min = 26 }) {
+  const available = Math.max(0, CARD_SIDE - chrome);
+  const fitted = rows > 0 ? available / rows : base;
+  const rowH = Math.max(min, Math.min(base, fitted));
+  const scale = Math.min(1, rowH / base);
+  return {
+    rowH,
+    contentHeight: chrome + rows * rowH,
+    name: Math.max(15, Math.round(34 * Math.max(scale, 0.45))),
+    number: Math.max(14, Math.round(30 * Math.max(scale, 0.45))),
+    points: Math.max(15, Math.round(34 * Math.max(scale, 0.45))),
+    // The honours line needs a second baseline inside the row.
+    honours: rowH >= 62,
+  };
+}
+
+function cardCanvas(contentHeight) {
   const canvas = document.createElement("canvas");
-  canvas.width = CARD_W;
-  canvas.height = height;
+  canvas.width = CARD_SIDE;
+  canvas.height = CARD_SIDE;
   const ctx = canvas.getContext("2d");
   ctx.fillStyle = CARD.bg;
-  ctx.fillRect(0, 0, CARD_W, height);
-  return { canvas, ctx };
+  ctx.fillRect(0, 0, CARD_SIDE, CARD_SIDE);
+  // Fit the 1080-wide design into the square and centre it. k is 1 for anything
+  // that already fits, so the common shapes are drawn exactly as designed.
+  const k = Math.min(1, CARD_SIDE / Math.max(contentHeight, 1));
+  if (ctx.setTransform) {
+    ctx.setTransform(k, 0, 0, k, (CARD_SIDE - CARD_W * k) / 2, (CARD_SIDE - contentHeight * k) / 2);
+  }
+  return { canvas, ctx, scale: k };
 }
 
 function drawCardHeader(ctx, league, line) {
@@ -4476,16 +4518,27 @@ function weeklyCardModel(state, round) {
   const pts = champions[0]?.pts ?? (round.table || [])[0]?.pts ?? 0;
   const status = weeklyShareStatus(round);
   const final = status.final;
-  const leader = (round.table || [])[0] || null;
+  // "Started" means something has actually settled. Until then there are no
+  // settled points to lead on.
+  const started = status.terminal > 0;
+  const leader = started ? ((round.table || [])[0] || null) : null;
   return {
     league: state.name,
     // The honest state, not a claim of finality (M9).
     headline: `${weeklyShareStatus(round).label} · ${cardDate()}`,
+    // Three states, three claims. Crowning the first zero-point row "leading"
+    // before a ball has settled is not a smaller lie than crowning a champion:
+    // the order at 0-0-0 is alphabetical, and the card would be inventing a
+    // story out of a tie-break.
     heroEyebrow: final
       ? (champions.length > 1 ? "JOINT MATCHWEEK CHAMPIONS" : "MATCHWEEK CHAMPION")
-      : "LEADING SO FAR",
-    heroName: (final ? names : leader?.nick) || "Nobody",
-    heroLine: final ? `${week} champion · ${pts} pts` : `${status.label} · ${leader?.pts ?? 0} pts`,
+      : started ? "LEADING ON SETTLED POINTS" : "NOT STARTED",
+    heroName: final ? (names || "Nobody") : started ? (leader?.nick || "Nobody") : "",
+    heroLine: final
+      ? `${week} champion · ${pts} pts`
+      : started
+        ? `${status.label} · ${leader?.pts ?? 0} pts`
+        : status.label,
     podium: groups,
     rows: (round.table || []).map((row, index) => ({
       // The same weekly rank the table draws — a shared card that disagreed
@@ -4504,9 +4557,10 @@ function weeklyCardModel(state, round) {
 function drawWeeklyResultCard(state, round) {
   const model = weeklyCardModel(state, round);
   const podiumH = model.podium.length ? podiumHeight(model.podium) + CARD_GAP : 0;
-  const height = CARD_HEAD_H + CARD_GAP + CARD_HERO_H + CARD_GAP + podiumH
-    + CARD_TABLE_HEAD_H + model.rows.length * CARD_ROW_H + CARD_GAP + CARD_FOOT_H;
-  const { canvas, ctx } = cardCanvas(height);
+  const chrome = CARD_HEAD_H + CARD_GAP + CARD_HERO_H + CARD_GAP + podiumH
+    + CARD_TABLE_HEAD_H + CARD_GAP + CARD_FOOT_H;
+  const m = cardRowMetrics(model.rows.length, { chrome, base: CARD_ROW_H });
+  const { canvas, ctx } = cardCanvas(m.contentHeight);
   drawCardHeader(ctx, model.league, model.headline);
   let y = CARD_HEAD_H + CARD_GAP;
   drawCardHero(ctx, y, model);
@@ -4518,32 +4572,34 @@ function drawWeeklyResultCard(state, round) {
   drawCardTableHead(ctx, y);
   y += CARD_TABLE_HEAD_H;
   model.rows.forEach((row, index) => {
-    const top = y + index * CARD_ROW_H;
-    const mid = top + (CARD_ROW_H - 10) / 2;
-    drawCardRowPlate(ctx, top, CARD_ROW_H, index, row.place);
+    const top = y + index * m.rowH;
+    const mid = top + (m.rowH - 10) / 2;
+    const baseline = mid + m.points / 3;
+    drawCardRowPlate(ctx, top, m.rowH, index, row.place);
     ctx.textAlign = "center";
     ctx.fillStyle = row.place ? CARD.gold : CARD.muted;
-    ctx.font = cardFont(900, 30);
-    ctx.fillText(String(row.rank), CARD_COL.rank, mid + 11);
+    ctx.font = cardFont(900, m.number);
+    ctx.fillText(String(row.rank), CARD_COL.rank, baseline);
     ctx.textAlign = "left";
-    drawFitted(ctx, row.nick, CARD_COL.name, mid + 12, 500, { max: 34, min: 24 });
+    drawFitted(ctx, row.nick, CARD_COL.name, baseline, 500,
+      { max: m.name, min: Math.min(24, m.name) });
     ctx.textAlign = "right";
     ctx.fillStyle = CARD.muted;
-    ctx.font = cardFont(800, 30);
-    ctx.fillText(String(row.exact), CARD_COL.exact, mid + 11);
+    ctx.font = cardFont(800, m.number);
+    ctx.fillText(String(row.exact), CARD_COL.exact, baseline);
     ctx.fillStyle = CARD.ink;
-    ctx.font = cardFont(900, 34);
-    ctx.fillText(String(row.pts), CARD_COL.pts, mid + 12);
+    ctx.font = cardFont(900, m.points);
+    ctx.fillText(String(row.pts), CARD_COL.pts, baseline);
     ctx.textAlign = "center";
     // The medal sits at the right edge, so the three that matter are findable
     // down one side without reading a single name.
     if (row.place) {
-      ctx.font = cardFont(900, 34);
-      ctx.fillText(PLACE_EMOJI[row.place], CARD_COL.medal, mid + 12);
+      ctx.font = cardFont(900, m.points);
+      ctx.fillText(PLACE_EMOJI[row.place], CARD_COL.medal, baseline);
     }
     ctx.textAlign = "left";
   });
-  y += model.rows.length * CARD_ROW_H + CARD_GAP;
+  y += model.rows.length * m.rowH + CARD_GAP;
   drawCardFooter(ctx, y, model);
   return canvas;
 }
@@ -4570,34 +4626,35 @@ function seasonCardModel(state) {
 
 function drawSeasonTableCard(state) {
   const model = seasonCardModel(state);
-  const height = CARD_HEAD_H + CARD_GAP + CARD_TABLE_HEAD_H
-    + model.rows.length * CARD_SEASON_ROW_H + CARD_GAP + CARD_FOOT_H;
-  const { canvas, ctx } = cardCanvas(height);
+  const chrome = CARD_HEAD_H + CARD_GAP + CARD_TABLE_HEAD_H + CARD_GAP + CARD_FOOT_H;
+  const m = cardRowMetrics(model.rows.length, { chrome, base: CARD_SEASON_ROW_H });
+  const { canvas, ctx } = cardCanvas(m.contentHeight);
   drawCardHeader(ctx, model.league, model.headline);
   let y = CARD_HEAD_H + CARD_GAP;
   drawCardTableHead(ctx, y);
   y += CARD_TABLE_HEAD_H;
   model.rows.forEach((row, index) => {
-    const top = y + index * CARD_SEASON_ROW_H;
-    const mid = top + (CARD_SEASON_ROW_H - 10) / 2;
-    drawCardRowPlate(ctx, top, CARD_SEASON_ROW_H, index, null);
+    const top = y + index * m.rowH;
+    const mid = top + (m.rowH - 10) / 2;
+    drawCardRowPlate(ctx, top, m.rowH, index, null);
     ctx.textAlign = "center";
     ctx.fillStyle = CARD.muted;
-    ctx.font = cardFont(900, 30);
-    ctx.fillText(String(row.rank), CARD_COL.rank, mid + 4);
+    ctx.font = cardFont(900, m.number);
+    ctx.fillText(String(row.rank), CARD_COL.rank, mid + (m.honours ? 4 : m.number / 3));
     ctx.textAlign = "left";
-    drawFitted(ctx, row.nick, CARD_COL.name, mid - 4, 500, { max: 34, min: 24 });
-    drawCardHonours(ctx, CARD_COL.name, mid + 30, row.honours);
+    drawFitted(ctx, row.nick, CARD_COL.name, mid + (m.honours ? -4 : m.name / 3), 500,
+      { max: m.name, min: Math.min(24, m.name) });
+    if (m.honours) drawCardHonours(ctx, CARD_COL.name, mid + 30, row.honours);
     ctx.textAlign = "right";
     ctx.fillStyle = CARD.muted;
-    ctx.font = cardFont(800, 30);
-    ctx.fillText(String(row.exact), CARD_COL.exact, mid + 4);
+    ctx.font = cardFont(800, m.number);
+    ctx.fillText(String(row.exact), CARD_COL.exact, mid + (m.honours ? 4 : m.number / 3));
     ctx.fillStyle = CARD.ink;
-    ctx.font = cardFont(900, 34);
-    ctx.fillText(String(row.pts), CARD_COL.pts, mid + 5);
+    ctx.font = cardFont(900, m.points);
+    ctx.fillText(String(row.pts), CARD_COL.pts, mid + (m.honours ? 5 : m.points / 3));
     ctx.textAlign = "left";
   });
-  y += model.rows.length * CARD_SEASON_ROW_H + CARD_GAP;
+  y += model.rows.length * m.rowH + CARD_GAP;
   drawCardFooter(ctx, y, model);
   return canvas;
 }
@@ -4608,14 +4665,16 @@ function weeklyCardCaption(state, round) {
   const competition = leagueCompetitionNames(state);
   const week = round.matchday != null ? `Matchweek ${round.matchday}` : periodLabel(round.period);
   const status = weeklyShareStatus(round);
-  // A week that is still running has no winner to name, and saying otherwise
-  // in the shared text would be the one place the card told a story the table
-  // underneath it does not support.
+  const leader = (round.table || [])[0] || null;
+  // Nothing settled is not the same as something settled, and neither is the
+  // same as finished. Saying "nothing settled yet" after two results is as
+  // wrong as naming a winner before any.
   const lead = status.final
     ? `won by ${winnerNames(round) || "nobody"}`
-    : `${status.label.toLowerCase()} — nothing settled yet`;
-  const leading = status.final ? "" : ` Leading: ${(round.table || [])[0]?.nick || "nobody"}.`;
-  return `🏆 ${competition} ${week}: ${lead}.${leading} Think you can call it? Join ${state.name} with code ${state.code}: ${inviteLinkFor(state.code)}`;
+    : status.terminal === 0
+      ? `published — nothing settled yet`
+      : `${status.terminal} of ${status.total} settled${leader ? `, ${leader.nick} leading on ${leader.pts}` : ""}`;
+  return `🏆 ${competition} ${week}: ${lead}. Think you can call it? Join ${state.name} with code ${state.code}: ${inviteLinkFor(state.code)}`;
 }
 
 function leagueTableShareText(state) {
@@ -4736,8 +4795,12 @@ function weeklyTerminalCount(round) {
   for (const id of ids) {
     const entry = entries.get(id);
     const fixture = fixtureById(id);
+    // A POSTPONED fixture is not terminal. It moves to a rescheduled window and
+    // will still be played, so counting it as done would let a week call itself
+    // Final while a game everybody predicted is yet to kick off. It counts only
+    // if the authoritative payload separately marks it void.
     const settled = entry?.settled === true || (!!fixture && !!finalScore(fixture));
-    const voided = entry?.voided === true || (!!fixture && (isVoidFixture(fixture) || isPostponed(fixture)));
+    const voided = entry?.voided === true || (!!fixture && isVoidFixture(fixture));
     if (settled || voided) terminal += 1;
   }
   return { terminal, total: ids.length };
@@ -4750,21 +4813,52 @@ function weeklyTerminalCount(round) {
  */
 function weeklyShareStatus(round) {
   const week = round?.matchday != null ? `Week ${round.matchday}` : periodLabel(round?.period ?? "");
-  const counted = weeklyTerminalCount(round);
-  // `complete` is the SERVER saying the round is done, and it is the authority.
-  // Re-deriving finality from what the client happens to hold would make the
-  // card disagree with the table above it the moment a fixture is missing from
-  // this device — which is exactly when a card gets shared.
-  if (round?.complete === true) {
-    const total = counted.total || counted.terminal;
-    return { label: `${week} · Final`, terminal: total, total, final: true };
+  const { terminal, total } = weeklyTerminalCount(round);
+  // Final FAILS CLOSED. `complete` is the server's summary and the terminal
+  // count is the evidence; when they disagree the card takes the weaker claim,
+  // because labelling a week Final while a published slot could still score is
+  // the one error a shared graphic cannot take back. The disagreement is
+  // recorded rather than swallowed — it means one of the two is wrong.
+  const claimsComplete = round?.complete === true;
+  const evidenceComplete = total > 0 && terminal === total;
+  if (claimsComplete !== evidenceComplete) {
+    noteWeeklyFinalMismatch({
+      period: String(round?.period ?? round?.matchday ?? ""),
+      complete: claimsComplete, terminal, total,
+    });
   }
-  const { terminal, total } = counted;
-  if (!total) return { label: `${week} · not started · 0 of 0 fixtures`, terminal, total, final: false };
+  if (claimsComplete && evidenceComplete) {
+    return { label: `${week} · Final`, terminal, total, final: true };
+  }
+  // No slot information at all — an older worker, or a payload without the
+  // reveal array. "0 of 0 fixtures" would be a count we cannot support, so the
+  // card claims neither a count nor a finish and simply names the week.
+  if (!total) return { label: week, terminal, total, final: false, unknown: true };
   if (terminal === 0) return { label: `${week} · not started · 0 of ${total} fixtures`, terminal, total, final: false };
-  if (terminal < total) return { label: `${week} · in progress · after ${terminal} of ${total}`, terminal, total, final: false };
-  return { label: `${week} · Final`, terminal, total, final: true };
+  // Every slot terminal but the server has not said so: honest progress, not
+  // Final. The two agree or the card waits.
+  return {
+    label: `${week} · in progress · after ${terminal} of ${total}`,
+    terminal, total, final: false,
+  };
 }
+
+/**
+ * A round whose `complete` flag and terminal count disagree. Bounded, and
+ * carried out in the diagnostics the profile dialog already copies — the same
+ * treatment the slate-count mismatch gets.
+ */
+let weeklyFinalMismatches = new Map();
+function noteWeeklyFinalMismatch(mismatch) {
+  const key = `${mismatch.period}|${mismatch.complete}|${mismatch.terminal}/${mismatch.total}`;
+  if (weeklyFinalMismatches.has(key)) return;
+  weeklyFinalMismatches.set(key, mismatch);
+  if (weeklyFinalMismatches.size > 20) {
+    weeklyFinalMismatches.delete(weeklyFinalMismatches.keys().next().value);
+  }
+}
+const weeklyFinalMismatchLines = () => [...weeklyFinalMismatches.values()].map((m) =>
+  `weekly Final mismatch period ${m.period}: complete=${m.complete}, terminal ${m.terminal}/${m.total}`);
 
 /** "Updated through Matchweek N" — the freshness M9 asks a season card to carry. */
 function seasonShareFreshness(state) {
@@ -4830,14 +4924,38 @@ function shareCardState() {
  * The share, start to finish, inside the tap that asked for it. Drawing is
  * synchronous and so is the PNG, so nothing is awaited before the sheet.
  */
+/**
+ * The share path, traced stage by stage.
+ *
+ * Every stage here is SYNCHRONOUS and on the main thread: building the model,
+ * drawing the canvas, and encoding the PNG. Timing only the model — which is
+ * the cheap one — measured the wrong thing; the encode of a 1080x1080 bitmap is
+ * the stage that can actually be felt. These land in the same tap trace the
+ * profile dialog copies, so a slow share on a real phone can be read rather
+ * than guessed at.
+ */
 function shareCardNow() {
   const state = leagueState;
   if (!state || state.error || !shareCardState().ready) return;
   const weekly = leagueTab === "matchday" && leagueSupportsRounds(state);
-  const png = weekly
-    ? cardPng(drawWeeklyResultCard(state, roundState), "prem-oracle-matchweek.png")
-    : cardPng(drawSeasonTableCard(state), "prem-oracle-season-table.png");
-  const title = weekly ? `${state.name} matchweek result` : `${state.name} season table`;
+  const at = () => (typeof performance !== "undefined" ? performance.now() : Date.now());
+  const t0 = at();
+  const model = weekly ? weeklyCardModel(state, roundState) : seasonCardModel(state);
+  const rows = model.rows?.length ?? 0;
+  const t1 = at();
+  traceTap("share-model", { card: weekly ? "weekly" : "season", rows, ms: Math.round(t1 - t0) });
+  const canvas = weekly ? drawWeeklyResultCard(state, roundState) : drawSeasonTableCard(state);
+  const t2 = at();
+  traceTap("share-draw", { rows, side: canvas.width, ms: Math.round(t2 - t1) });
+  const png = cardPng(canvas, weekly ? "prem-oracle-matchweek.png" : "prem-oracle-season-table.png");
+  const t3 = at();
+  traceTap("share-encode", { rows, bytes: png.base64.length, ms: Math.round(t3 - t2) });
+  traceTap("share-handoff", { rows, ms: Math.round(at() - t3), total: Math.round(at() - t0) });
+  // Not "result" until there is one: the title travels with the file into a
+  // chat, where it is read before the picture loads.
+  const title = weekly
+    ? `${state.name} ${weeklyShareStatus(roundState).final ? "matchweek result" : "matchweek standings"}`
+    : `${state.name} season table`;
   const text = weekly ? weeklyCardCaption(state, roundState) : leagueTableShareText(state);
   shareCardFile(png, { title, text });
 }
@@ -6101,6 +6219,7 @@ function diagnosticsText() {
     `innerWidth ${report.innerWidth}  screenWidth ${report.screenWidth}  dpr ${report.dpr}`,
     `rootFont ${report.rootFontPx}px  native ${report.native}`,
     ...matchweekMismatchLines(),
+    ...weeklyFinalMismatchLines(),
   ];
   // Times are milliseconds from the physical pointerdown, which is where a slow
   // tap actually begins — not where a handler eventually hears about it.

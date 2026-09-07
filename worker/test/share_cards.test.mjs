@@ -34,6 +34,10 @@ function liftConst(name) {
 function recorder() {
   const calls = { text: [], fills: [], strokes: [], fonts: [] };
   const ctx = {
+    // v1.7 Slice C: the card is drawn in 1080-wide DESIGN units and fitted
+    // into a square canvas. Recording the transform lets a bounds check ask
+    // the only question that matters: where the text lands on the graphic.
+    setTransform(a, b, c, d, e, f) { calls.transform = { a, b, c, d, e, f }; },
     set font(value) { calls.fonts.push(value); this._font = value; },
     get font() { return this._font; },
     fillStyle: "", strokeStyle: "", lineWidth: 0, textAlign: "left", textBaseline: "",
@@ -111,7 +115,9 @@ function cards({ native = false } = {}) {
     ${lift("function fitText(ctx, text, maxWidth, fontFactory, maxSize, minSize)")}
     ${lift("function ellipsise(ctx, text, maxWidth)")}
     ${lift("function drawFitted(ctx, text, x, y, maxWidth,")}
-    ${lift("function cardCanvas(height)")}
+    ${liftConst("CARD_SIDE")}
+    ${lift("function cardRowMetrics(rows, { chrome, base, min = 26 })")}
+    ${lift("function cardCanvas(contentHeight)")}
     ${lift("function drawCardHeader(ctx, league, line)")}
     ${lift("function drawCardHero(ctx, y, model)")}
     ${liftConst("podiumStackDepth")}
@@ -124,6 +130,8 @@ function cards({ native = false } = {}) {
     ${liftConst("weeklyRanks")}
     // The harness already stubs seasonRounds/periodLabel above.
     const fixtureById = () => null;
+    const weeklyFinalMismatches = new Map();
+    const noteWeeklyFinalMismatch = () => {};
     // v1.7 Slice C: the card models and the control now state how far through
     // the week they are, so the harness lifts that contract too.
     ${lift("function weeklyTerminalCount(round)")}
@@ -193,6 +201,12 @@ const SETTLED_WEEK = {
   period: "3",
   matchday: 3,
   complete: true,
+  // Final needs the slots as well as the flag now that it fails closed.
+  slate: { period: "3", fixtureIds: ["m1", "m2", "m3", "m4", "m5", "m6"], count: 6 },
+  reveal: [
+    { id: "m1", settled: true }, { id: "m2", settled: true }, { id: "m3", settled: true },
+    { id: "m4", settled: true }, { id: "m5", settled: true }, { id: "m6", settled: true },
+  ],
   status: "complete",
   winners: ["u1"],
   podium: [
@@ -394,10 +408,17 @@ test("a weekly card from an old worker draws no podium it was never sent", () =>
   app.drawWeekly();
   const drawn = texts(app.recorded()[0]);
   assert.equal(drawn.filter((text) => text === "🥈" || text === "🥉").length, 0);
-  // And the card is shorter by exactly the rostrum it did not draw.
-  const full = build(LEAGUE, SETTLED_WEEK, "matchday");
-  full.drawWeekly();
-  assert.ok(app.canvases()[0].height < full.canvases()[0].height);
+    // v1.7 Slice C: every export is the same square, so a card with less in it
+    // is no longer SHORTER — it is less compressed. The rostrum it did not draw
+    // is space the rest of the card gets back.
+    const full = build(LEAGUE, SETTLED_WEEK, "matchday");
+    full.drawWeekly();
+    const lean = app.canvases()[0];
+    const whole = full.canvases()[0];
+    assert.equal(lean.width, lean.height, "the export is not square");
+    assert.equal(lean.height, whole.height, "two exports came out different sizes");
+    assert.ok((app.recorded()[0].transform?.a ?? 1) > (full.recorded()[0].transform?.a ?? 1),
+      "the podium-less card was squeezed as hard as the one with a rostrum");
 });
 
 // --- what a card costs -----------------------------------------------------
@@ -468,14 +489,18 @@ test("nothing is drawn off the edge of either card", () => {
   for (const [round, tab, draw] of [[SETTLED_WEEK, "matchday", "drawWeekly"], [null, "season", "drawSeason"]]) {
     const app = build(wide, round, tab);
     app[draw]();
-    const { height } = app.canvases()[0];
+    const { width, height } = app.canvases()[0];
+    assert.equal(width, height, "the export is not square");
+    const k = app.recorded()[0].transform?.a ?? 1;
     for (const entry of app.recorded()[0].text) {
-      assert.ok(entry.y > 0 && entry.y < height, `"${entry.text}" sits at y=${entry.y} on a ${height}px card`);
-      assert.ok(entry.x >= 0 && entry.x <= 1080, `"${entry.text}" sits at x=${entry.x}`);
+      assert.ok(entry.y * k > 0 && entry.y * k <= height,
+        `"${entry.text}" lands at y=${(entry.y * k).toFixed(0)} on a ${height}px card`);
+      assert.ok(entry.x * k >= 0 && entry.x * k <= width,
+        `"${entry.text}" lands at x=${(entry.x * k).toFixed(0)} on a ${width}px card`);
     }
     for (const fill of app.recorded()[0].fills) {
       if (fill.path) continue;
-      assert.ok(fill.y + fill.h <= height, `a block runs past the bottom of the card`);
+      assert.ok((fill.y + fill.h) * k <= height + 1, `a block runs past the bottom of the card`);
     }
   }
 });

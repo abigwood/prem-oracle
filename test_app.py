@@ -2075,8 +2075,17 @@ class LeagueSwitchAndShareTests(unittest.TestCase):
         self.assertIn("${week} · not started · 0 of ${total} fixtures", status)
         self.assertIn("${week} · in progress · after ${terminal} of ${total}", status)
         self.assertIn("${week} · Final", status)
-        # Final only when EVERY published slot is terminal.
-        self.assertIn("if (terminal < total)", status)
+        # Final FAILS CLOSED: the server's completion and the terminal count
+        # must agree, and a disagreement is recorded rather than blessed.
+        self.assertIn("const claimsComplete = round?.complete === true;", status)
+        self.assertIn("const evidenceComplete = total > 0 && terminal === total;", status)
+        self.assertIn("if (claimsComplete && evidenceComplete)", status)
+        self.assertIn("noteWeeklyFinalMismatch({", status)
+        # A postponed fixture is not terminal merely for being postponed.
+        counter = self.app[self.app.index("function weeklyTerminalCount(round)"):]
+        counter = counter[:counter.index("\n}")]
+        self.assertNotIn("isPostponed", counter)
+        self.assertIn("entry?.voided === true || (!!fixture && isVoidFixture(fixture))", counter)
 
     def test_a_share_card_reads_only_what_the_panel_already_holds(self):
         # The KV-read lesson: a card must never cost a request.

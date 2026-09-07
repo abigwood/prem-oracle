@@ -263,7 +263,8 @@ test("D5 · a switch closes both open rows", () => {
 
 const SHARE_NAMES = ["weeklyTerminalCount", "weeklyShareStatus", "seasonShareFreshness",
   "shareIconButton", "shareCardState", "seasonCardModel", "podiumCounts",
-  "finalScore", "isVoidFixture", "isPostponed", "VOID_STATUSES"];
+  "finalScore", "isVoidFixture", "isPostponed", "VOID_STATUSES",
+  "noteWeeklyFinalMismatch", "weeklyFinalMismatchLines"];
 
 function shareBox(overrides = {}) {
   return load(SHARE_NAMES, {
@@ -278,6 +279,7 @@ function shareBox(overrides = {}) {
     leagueCodes: ["AAA"],
     seasonRounds: () => 38,
     currentPeriodKey: () => "7",
+    weeklyFinalMismatches: new Map(),
     leagueSupportsRounds: () => true,
     inviteLinkFor: (code) => `https://x/${code}`,
     ...overrides,
@@ -301,18 +303,13 @@ test("D6 · weekly export states 0 of M, X of M and Final", () => {
   assert.equal(s.weeklyShareStatus(round(3, six(2))).label, "Week 3 · in progress · after 2 of 6");
   // A VOID advances the count and contributes no points.
   assert.equal(s.weeklyShareStatus(round(3, six(2, 1))).label, "Week 3 · in progress · after 3 of 6");
-  assert.equal(s.weeklyShareStatus(round(3, six(6))).label, "Week 3 · Final");
-  assert.equal(s.weeklyShareStatus(round(3, six(4, 2))).label, "Week 3 · Final");
+  // Final needs the server's completion too, now that it fails closed.
+  assert.equal(s.weeklyShareStatus(round(3, six(6), { complete: true })).label, "Week 3 · Final");
+  assert.equal(s.weeklyShareStatus(round(3, six(4, 2), { complete: true })).label, "Week 3 · Final");
+  // Terminal everywhere but unconfirmed is honest progress, not Final.
+  assert.equal(s.weeklyShareStatus(round(3, six(6))).label, "Week 3 · in progress · after 6 of 6");
   // Final only when EVERY slot is terminal.
   assert.equal(s.weeklyShareStatus(round(3, six(5))).final, false);
-});
-
-test("D6 · the server's own completion is the authority for Final", () => {
-  const s = shareBox();
-  const partial = round(3, [{ id: "a", settled: true }, { id: "b" }], { complete: true });
-  assert.equal(s.weeklyShareStatus(partial).final, true,
-    "a round the server calls complete was not Final");
-  assert.match(sourceOf("weeklyShareStatus"), /round\?\.complete === true/);
 });
 
 test("D6 · a void is terminal but scores nothing", () => {
@@ -448,4 +445,277 @@ test("D8 · a 30-member season card is built without truncation", () => {
   console.log(`    season card model, 30 members: ${ms.toFixed(2)}ms`);
   assert.equal(model.rows.length, 30);
   assert.ok(ms < 50);
+});
+
+// --- Sol's Slice C corrections, executed ------------------------------------
+
+const CARD_NAMES = ["CARD_SIDE", "CARD_W", "CARD_HEAD_H", "CARD_HERO_H", "CARD_TABLE_HEAD_H",
+  "CARD_ROW_H", "CARD_SEASON_ROW_H", "CARD_FOOT_H", "CARD_GAP", "CARD_PODIUM_H",
+  "CARD_PODIUM_STACK", "cardRowMetrics", "cardCanvas", "podiumHeight", "podiumStackDepth",
+  "seasonCardModel", "weeklyCardModel", "weeklyShareStatus", "weeklyTerminalCount",
+  "weeklyFinalMismatchLines", "noteWeeklyFinalMismatch", "seasonShareFreshness",
+  "weeklyCardCaption", "podiumCounts", "weeklyRanks", "sharedRankByUid", "winnerNames",
+  "finalScore", "isVoidFixture", "isPostponed", "VOID_STATUSES",
+  "CARD", "CARD_PAD", "CARD_BLOCK", "CARD_PODIUM", "cardFont", "cardDate", "sentenceCase",
+  "CARD_COL", "drawSeasonTableCard", "drawWeeklyResultCard"];
+
+/** A canvas that records only what a geometry check needs. */
+function stubCanvas() {
+  const calls = [];
+  const ctx = new Proxy({
+    setTransform: (...a) => calls.push(["setTransform", ...a]),
+    fillRect: () => {}, fillText: (t) => calls.push(["text", String(t)]),
+    measureText: (t) => ({ width: String(t).length * 12 }),
+    save: () => {}, restore: () => {}, beginPath: () => {}, closePath: () => {},
+    moveTo: () => {}, lineTo: () => {}, arcTo: () => {}, arc: () => {}, fill: () => {},
+    stroke: () => {}, clip: () => {}, rect: () => {}, translate: () => {}, scale: () => {},
+    createLinearGradient: () => ({ addColorStop: () => {} }),
+  }, { get: (t, k) => (k in t ? t[k] : undefined), set: (t, k, v) => { t[k] = v; return true; } });
+  const canvas = { width: 0, height: 0, getContext: () => ctx, toDataURL: () => "data:image/png;base64,AAAA" };
+  return { canvas, ctx, calls };
+}
+
+function cardBox(overrides = {}) {
+  const made = [];
+  return load(CARD_NAMES, {
+    ...BASE,
+    fixtures: ALL,
+    activeLeague: "AAA",
+    leagueState: leagueState({ ids: [] }),
+    leagueStates: {},
+    leagueCodes: ["AAA"],
+    weeklyFinalMismatches: new Map(),
+    seasonRounds: () => 38,
+    currentPeriodKey: () => "7",
+    inviteLinkFor: (c) => `https://x/${c}`,
+    leagueCompetitionNames: () => "Premier League",
+    PLACE_EMOJI: { gold: "1", silver: "2", bronze: "3" },
+    fitText: (ctx, text, max, font) => { ctx.font = font(30); },
+    roundedRect: () => {},
+    drawCardHeader: () => {}, drawCardHero: () => {}, drawCardPodium: () => {},
+    drawCardTableHead: () => {}, drawCardRowPlate: () => {}, drawCardHonours: () => {},
+    drawCardFooter: () => {}, drawFitted: (ctx, t) => { made.push(String(t)); },
+    ellipsise: (ctx, t) => t,
+    document: { createElement: () => { const c = stubCanvas(); made.push(c); return c.canvas; } },
+    __made: made,
+    ...overrides,
+  });
+}
+
+const table = (n) => Array.from({ length: n }, (_, i) => ({
+  uid: `u${i}`, rank: i + 1, nick: `Player ${i + 1}`, pts: 200 - i * 3, exact: i % 4,
+  podiums: { gold: i === 0 ? 1 : 0, silver: 0, bronze: 0 },
+}));
+
+// --- A · both exports are square, complete and adaptive ---------------------
+
+test("C-A · every supported table size produces a SQUARE canvas", () => {
+  for (const n of [1, 3, 6, 12, 20, 30]) {
+    const s = cardBox();
+    const state = { code: "AAA", name: "Sunday Six", table: table(n), currentMatchday: 9, currentMatchdayHasResults: true };
+    const season = s.drawSeasonTableCard ? s.drawSeasonTableCard(state) : null;
+    void season;
+    const m = s.cardRowMetrics(n, { chrome: s.CARD_HEAD_H + s.CARD_GAP + s.CARD_TABLE_HEAD_H + s.CARD_GAP + s.CARD_FOOT_H, base: s.CARD_SEASON_ROW_H });
+    const { canvas } = s.cardCanvas(m.contentHeight);
+    assert.equal(canvas.width, canvas.height, `${n} rows produced ${canvas.width}x${canvas.height}`);
+    assert.equal(canvas.width, s.CARD_SIDE);
+  }
+});
+
+test("C-A · the complete table always fits inside the square", () => {
+  const s = cardBox();
+  const chrome = s.CARD_HEAD_H + s.CARD_GAP + s.CARD_TABLE_HEAD_H + s.CARD_GAP + s.CARD_FOOT_H;
+  for (const n of [1, 6, 12, 20, 30]) {
+    const m = s.cardRowMetrics(n, { chrome, base: s.CARD_SEASON_ROW_H });
+    const { scale } = s.cardCanvas(m.contentHeight);
+    const drawn = m.contentHeight * scale;
+    assert.ok(drawn <= s.CARD_SIDE + 0.5, `${n} rows need ${drawn.toFixed(0)} of ${s.CARD_SIDE}`);
+    // Rows shrink; they never vanish.
+    assert.ok(m.rowH >= 26, `${n} rows fell below the readable floor at ${m.rowH}`);
+    assert.ok(m.rowH <= s.CARD_SEASON_ROW_H);
+  }
+});
+
+test("C-A · typography adapts with the row, and honours drop when they cannot fit", () => {
+  const s = cardBox();
+  const chrome = s.CARD_HEAD_H + s.CARD_GAP + s.CARD_TABLE_HEAD_H + s.CARD_GAP + s.CARD_FOOT_H;
+  const small = s.cardRowMetrics(6, { chrome, base: s.CARD_SEASON_ROW_H });
+  const large = s.cardRowMetrics(30, { chrome, base: s.CARD_SEASON_ROW_H });
+  assert.ok(large.rowH < small.rowH, "a bigger table did not compress");
+  assert.ok(large.name <= small.name, "type did not adapt with the row");
+  assert.ok(large.name >= 15, "type fell below a readable floor");
+  assert.equal(small.honours, true, "a roomy row lost its honours line");
+  assert.equal(large.honours, false, "a compressed row still tried to draw honours");
+});
+
+test("C-A · neither model truncates, at any size", () => {
+  const s = cardBox();
+  for (const n of [12, 20, 30]) {
+    const model = s.seasonCardModel({ code: "AAA", name: "L", table: table(n), currentMatchday: 9, currentMatchdayHasResults: true });
+    assert.equal(model.rows.length, n, `season truncated at ${n}`);
+  }
+  for (const src of ["seasonCardModel", "weeklyCardModel"]) {
+    assert.ok(!/\.slice\(0,\s*\d+\)/.test(sourceOf(src)), `${src} slices the table`);
+  }
+});
+
+// --- B · honest weekly copy -------------------------------------------------
+
+const wround = (n, entries, complete = false, rows = 3) => ({
+  matchday: n, period: String(n), complete,
+  slate: { period: String(n), fixtureIds: entries.map((e) => e.id), count: entries.length },
+  reveal: entries,
+  podium: complete ? [{ uid: "u0", nick: "Player 1", pts: 23, place: "gold" }] : [],
+  winners: complete ? ["u0"] : [],
+  table: table(rows).map((r, i) => ({ ...r, pts: complete || i > 0 ? r.pts : r.pts })),
+});
+const slots = (settled, voided = 0, total = 6) => Array.from({ length: total }, (_, i) => ({
+  id: `w${i}`,
+  ...(i < settled ? { settled: true } : i < settled + voided ? { voided: true } : {}),
+}));
+
+test("C-B · a not-started week crowns nobody and leads nobody", () => {
+  const s = cardBox();
+  const round = wround(3, slots(0));
+  const model = s.weeklyCardModel({ code: "AAA", name: "Sunday Six" }, round);
+  assert.equal(model.heroEyebrow, "NOT STARTED");
+  assert.equal(model.heroName, "", "a zero-point row was named as leading");
+  assert.ok(!/champion/i.test(model.heroLine), "a not-started card mentions a champion");
+  assert.ok(!/leading/i.test(model.heroEyebrow + model.heroLine));
+  assert.match(model.headline, /Week 3 · not started · 0 of 6 fixtures/);
+});
+
+test("C-B · an in-progress week may name a leader, on settled points", () => {
+  const s = cardBox();
+  const model = s.weeklyCardModel({ code: "AAA", name: "Sunday Six" }, wround(3, slots(2)));
+  assert.equal(model.heroEyebrow, "LEADING ON SETTLED POINTS");
+  assert.equal(model.heroName, "Player 1");
+  assert.match(model.heroLine, /in progress · after 2 of 6/);
+  assert.ok(!/champion/i.test(model.heroEyebrow + model.heroLine));
+});
+
+test("C-B · only a Final week names a champion", () => {
+  const s = cardBox();
+  const model = s.weeklyCardModel({ code: "AAA", name: "Sunday Six" }, wround(3, slots(6), true));
+  assert.match(model.heroEyebrow, /CHAMPION/);
+  assert.match(model.heroLine, /champion/);
+  assert.match(model.headline, /Week 3 · Final/);
+});
+
+test("C-B · the caption says nothing-settled ONLY at 0 of M", () => {
+  const s = cardBox();
+  const league = { code: "AAA", name: "Sunday Six" };
+  const none = s.weeklyCardCaption(league, wround(3, slots(0)));
+  assert.match(none, /nothing settled yet/);
+  assert.ok(!/leading/i.test(none), "a not-started caption named a leader");
+
+  const some = s.weeklyCardCaption(league, wround(3, slots(2)));
+  assert.ok(!/nothing settled yet/.test(some), "a part-settled week claimed nothing was settled");
+  assert.match(some, /2 of 6 settled/);
+  assert.match(some, /Player 1 leading on/);
+
+  const done = s.weeklyCardCaption(league, wround(3, slots(6), true));
+  assert.match(done, /won by/);
+  assert.ok(!/nothing settled yet/.test(done));
+});
+
+test("C-B · the share TITLE is state-neutral before settlement", () => {
+  const title = sourceOf("shareCardNow");
+  assert.match(title, /weeklyShareStatus\(roundState\)\.final \? "matchweek result" : "matchweek standings"/);
+});
+
+// --- C · postponed is not terminal ------------------------------------------
+
+test("C-C · a postponed fixture is NOT terminal", () => {
+  const s = cardBox({ fixtures: [{ id: "p1", status: "postponed", startAt: new Date().toISOString() }] });
+  const counted = s.weeklyTerminalCount({
+    slate: { fixtureIds: ["p1", "p2"] },
+    reveal: [{ id: "p1" }, { id: "p2", settled: true }],
+  });
+  assert.deepEqual({ ...counted }, { terminal: 1, total: 2 },
+    "a postponed fixture was counted as done");
+  assert.ok(!/isPostponed/.test(sourceOf("weeklyTerminalCount")),
+    "the terminal count still consults postponement");
+});
+
+test("C-C · a postponed fixture counts only when the payload marks it void", () => {
+  const s = cardBox({ fixtures: [{ id: "p1", status: "postponed", startAt: new Date().toISOString() }] });
+  const counted = s.weeklyTerminalCount({
+    slate: { fixtureIds: ["p1"] },
+    reveal: [{ id: "p1", voided: true }],
+  });
+  assert.equal(counted.terminal, 1, "an authoritatively voided fixture was not counted");
+});
+
+test("C-C · a week holding a postponed fixture cannot be Final", () => {
+  const s = cardBox({ fixtures: [{ id: "w5", status: "postponed", startAt: new Date().toISOString() }] });
+  const round = { matchday: 3, period: "3", complete: true,
+    slate: { fixtureIds: [...slots(5, 0, 5).map((e) => e.id), "w5"] },
+    reveal: [...slots(5, 0, 5), { id: "w5" }], table: table(3) };
+  const status = s.weeklyShareStatus(round);
+  assert.equal(status.final, false, "a postponed fixture was allowed into a Final");
+  assert.match(status.label, /in progress · after 5 of 6/);
+});
+
+// --- D · Final fails closed --------------------------------------------------
+
+test("C-D · complete:true with a non-terminal slot is NOT Final", () => {
+  const s = cardBox();
+  const status = s.weeklyShareStatus(wround(3, slots(4), true));
+  assert.equal(status.final, false, "an inconsistent payload was blessed as Final");
+  assert.match(status.label, /in progress · after 4 of 6/);
+  assert.deepEqual([...s.weeklyFinalMismatchLines()],
+    ["weekly Final mismatch period 3: complete=true, terminal 4/6"]);
+});
+
+test("C-D · every slot terminal but complete:false is NOT Final either", () => {
+  const s = cardBox();
+  const status = s.weeklyShareStatus(wround(3, slots(6), false));
+  assert.equal(status.final, false, "the client called a week Final on its own");
+  assert.match(status.label, /in progress · after 6 of 6/);
+  assert.deepEqual([...s.weeklyFinalMismatchLines()],
+    ["weekly Final mismatch period 3: complete=false, terminal 6/6"]);
+});
+
+test("C-D · Final needs BOTH, and records nothing when they agree", () => {
+  const s = cardBox();
+  const status = s.weeklyShareStatus(wround(3, slots(6), true));
+  assert.equal(status.final, true);
+  assert.deepEqual([...s.weeklyFinalMismatchLines()], [], "an agreeing week logged a mismatch");
+});
+
+test("C-D · the mismatch reaches the diagnostics the dialog copies", () => {
+  assert.match(APP, /\.\.\.weeklyFinalMismatchLines\(\),/);
+});
+
+// --- E · the real share path, staged ----------------------------------------
+
+test("C-E · every synchronous stage of the share path is traced", () => {
+  const fn = sourceOf("shareCardNow");
+  for (const stage of ["share-model", "share-draw", "share-encode", "share-handoff"]) {
+    assert.ok(fn.includes(stage), `${stage} is not traced`);
+  }
+  // Timed around the real work, not around the model alone.
+  assert.match(fn, /const canvas = weekly \? drawWeeklyResultCard/);
+  assert.match(fn, /const png = cardPng\(canvas/);
+  assert.match(fn, /side: canvas\.width/);
+});
+
+test("C-E · model and draw are measured at common and maximum tables", () => {
+  const s = cardBox();
+  const median = (fn) => {
+    const t = [];
+    for (let i = 0; i < 15; i++) { const a = performance.now(); fn(); t.push(performance.now() - a); }
+    return t.sort((x, y) => x - y)[7];
+  };
+  for (const n of [6, 12, 30]) {
+    const state = { code: "AAA", name: "Sunday Six", table: table(n), currentMatchday: 9, currentMatchdayHasResults: true };
+    const model = median(() => s.seasonCardModel(state));
+    const draw = median(() => s.drawSeasonTableCard(state));
+    console.log(`    season, ${String(n).padStart(2)} members: model ${model.toFixed(3)}ms  draw ${draw.toFixed(2)}ms`);
+    assert.ok(model < 50 && draw < 50, `${n} members exceeded the synchronous budget`);
+  }
+  // PNG encoding cannot be measured here: node has no canvas encoder, so the
+  // stub returns instantly. It is traced in production instead, which is why
+  // the trace points above exist and why device timing is still mandatory.
 });

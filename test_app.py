@@ -853,6 +853,33 @@ class CustomMixTests(unittest.TestCase):
         # "All" is a stored intent on the worker too, never inferred.
         self.assertIn("FIXTURE_MODES.includes(requestedMode)", self.worker)
 
+    def test_a_selection_tap_updates_in_place_and_never_renders(self):
+        # v1.7 UX rider B: the tap used to call render(), which rebuilds
+        # #pickerLayer and throws the host back to the top of the week.
+        handler = self.app[self.app.index("async function handlePickerClick(event)"):]
+        handler = handler[:handler.index("\ndocument.addEventListener")]
+        branch = handler[handler.index('closest("[data-picker-fixture]")'):]
+        self.assertIn("togglePickerFixture(row.dataset.pickerFixture);", branch)
+        self.assertNotIn("render();", branch)
+        # The targeted update touches one row, the count and the publish gate.
+        toggle = self.app[self.app.index("function togglePickerFixture(id)"):]
+        toggle = toggle[:toggle.index("\n}")]
+        self.assertIn("markPickerRow(key);", toggle)
+        self.assertIn("syncPickerCounter();", toggle)
+        self.assertNotIn("render", toggle)
+        mark = self.app[self.app.index("function markPickerRow(id)"):]
+        mark = mark[:mark.index("\n}")]
+        self.assertIn('row.classList.toggle("is-selected", selected);', mark)
+        self.assertIn('row.setAttribute("aria-pressed", selected ? "true" : "false");', mark)
+        # Nothing in the targeted path rebuilds markup or moves a scroller.
+        for name in ("function togglePickerFixture(id)", "function markPickerRow(id)",
+                     "function syncPickerCounter()"):
+            block = self.app[self.app.index(name):]
+            block = block[:block.index("\n}")]
+            self.assertNotIn("innerHTML", block, name)
+            self.assertNotIn("scroll", block, name)
+            self.assertNotIn("replaceChildren", block, name)
+
     def test_no_six_to_ten_framing_survives(self):
         for source in (self.app, (ROOT / "index.html").read_text()):
             self.assertNotIn("6–10", source)
@@ -863,7 +890,10 @@ class CustomMixTests(unittest.TestCase):
     def test_picker_opens_on_the_default_but_the_week_is_the_hosts(self):
         # The configured count is a rule of thumb, not a cap.
         self.assertIn("Select ${bounds.min}–${bounds.max} · ${count} selected", self.app)
-        self.assertIn("const ready = count >= bounds.min && count <= bounds.max;", self.app)
+        # The bounds check lives in one place now, because the live update and
+        # the printed view both read it (v1.7 UX rider B).
+        self.assertIn("const pickerReady = (bounds, count) => count >= bounds.min && count <= bounds.max;", self.app)
+        self.assertIn("const ready = pickerReady(bounds, count);", self.app)
         self.assertIn("take more or fewer this week if you like", self.app)
         self.assertIn("~${rule.count} random fixtures/week", self.app)
         self.assertIn("data-picker-surprise", self.app)

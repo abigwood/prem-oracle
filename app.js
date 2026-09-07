@@ -5299,6 +5299,60 @@ function renderPickerLayer() {
   document.body.classList.toggle("picker-open", pickerOpen);
 }
 
+/**
+ * The counter and the publish gate, in one place each.
+ *
+ * A tap now updates these in the DOM instead of rebuilding the overlay, and two
+ * copies of the same arithmetic is how the printed count and the live one drift
+ * apart. The gate is the maximum-selection validation: over or under, the
+ * publish button is not available.
+ */
+const pickerCounterLabel = (bounds, count) => (bounds.min === bounds.max
+  ? `Select ${bounds.max} · ${count} selected`
+  : `Select ${bounds.min}–${bounds.max} · ${count} selected`);
+
+const pickerReady = (bounds, count) => count >= bounds.min && count <= bounds.max;
+
+/**
+ * One fixture in or out, against the DOM that is already on screen.
+ *
+ * The tap used to call render(), which rebuilds #pickerLayer from scratch —
+ * a new .picker-list, a new scroller, and the host thrown back to the top of
+ * the week after every single tap. Picking six fixtures meant six trips back
+ * down the list.
+ *
+ * So nothing is rebuilt and nothing is reordered: the row that was tapped
+ * changes state, and the counter and the publish gate are brought up to date.
+ * The scroller is never touched, so it stays exactly where the finger left it.
+ */
+function togglePickerFixture(id) {
+  const key = String(id);
+  if (pickerSelection.has(key)) pickerSelection.delete(key);
+  else pickerSelection.add(key);
+  pickerMode = "custom";
+  markPickerRow(key);
+  syncPickerCounter();
+}
+
+/** The tapped row's own selected state — the green circle and its label. */
+function markPickerRow(id) {
+  const row = document.querySelector(`[data-picker-fixture="${CSS.escape(String(id))}"]`);
+  if (!row) return;
+  const selected = pickerSelection.has(String(id));
+  row.classList.toggle("is-selected", selected);
+  row.setAttribute("aria-pressed", selected ? "true" : "false");
+}
+
+/** The count, and whether the league can be published with it. */
+function syncPickerCounter() {
+  const bounds = pickerBounds(pickerFixtures().length);
+  const count = pickerSelection.size;
+  const counter = document.querySelector(".picker-counter strong");
+  if (counter) counter.textContent = pickerCounterLabel(bounds, count);
+  const publish = document.querySelector("[data-picker-set]");
+  if (publish) publish.disabled = !pickerReady(bounds, count);
+}
+
 function fixturePickerView() {
   if (!pickerOpen) return "";
   const list = pickerFixtures();
@@ -5307,10 +5361,8 @@ function fixturePickerView() {
   const leagueName = leagueState?.name || "your league";
   const mixed = isMixedActive();
   // The default is a suggestion for this week, not a requirement.
-  const counter = bounds.min === bounds.max
-    ? `Select ${bounds.max} · ${count} selected`
-    : `Select ${bounds.min}–${bounds.max} · ${count} selected`;
-  const ready = count >= bounds.min && count <= bounds.max;
+  const counter = pickerCounterLabel(bounds, count);
+  const ready = pickerReady(bounds, count);
 
   // Grouped under competition headers when the pool spans more than one.
   const present = [...new Set(list.map((fixture) => competitionOfFixture(fixture.id) || DEFAULT_COMPETITION))];
@@ -6559,11 +6611,7 @@ async function handlePickerClick(event) {
   }
   const row = event.target.closest("[data-picker-fixture]");
   if (row) {
-    const id = row.dataset.pickerFixture;
-    if (pickerSelection.has(id)) pickerSelection.delete(id);
-    else pickerSelection.add(id);
-    pickerMode = "custom";
-    render();
+    togglePickerFixture(row.dataset.pickerFixture);
     return true;
   }
   return !!event.target.closest(".picker-overlay");

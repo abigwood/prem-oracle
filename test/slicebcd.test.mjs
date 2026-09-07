@@ -475,10 +475,8 @@ const CARD_NAMES = ["CARD_SIDE", "CARD_W", "CARD_HEAD_H", "CARD_HERO_H", "CARD_T
   "weeklyCardCaption", "podiumCounts", "weeklyRanks", "sharedRankByUid", "winnerNames",
   "finalScore", "isVoidFixture", "isPostponed", "VOID_STATUSES",
   "CARD", "CARD_PAD", "cardFont", "cardDate", "sentenceCase",
-  "CARD_TYPE_FLOOR", "CARD_SECOND_FLOOR", "CARD_MIN_ROW", "CARD_MIN_NAME",
-  "CARD_MAX_COLUMNS", "CARD_COL_GAP", "cardColumnBox", "cardColumnCols", "cardSlot",
-  "drawCardTableColumns", "cardHonoursWidth", "cardHonoursFit", 
-  "CARD_COL", "drawSeasonTableCard", "drawWeeklyResultCard"];
+  "CARD_TYPE_FLOOR", "CARD_SECOND_FLOOR", "CARD_MIN_ROW", "cardHonoursWidth", "cardHonoursFit", 
+  "CARD_COL", "CARD_MIN_NAME", "cardPageRows", "cardPageLabel", "drawSeasonTableCard", "drawWeeklyResultCard"];
 
 /** A canvas that records only what a geometry check needs. */
 function stubCanvas() {
@@ -722,9 +720,12 @@ test("C-E · every synchronous stage of the share path is traced", () => {
     assert.ok(fn.includes(stage), `${stage} is not traced`);
   }
   // Timed around the real work, not around the model alone.
-  assert.match(fn, /const canvas = weekly \? drawWeeklyResultCard/);
-  assert.match(fn, /const png = cardPng\(canvas/);
-  assert.match(fn, /side: canvas\.width/);
+  assert.match(fn, /const canvases = weekly \? drawWeeklyResultCard/);
+  assert.match(fn, /cardPng\(canvas,/);
+  assert.match(fn, /side: canvases\[0\]\?\.width/);
+  // And the trace says how many squares left the app, because one table
+  // arriving as three pictures is the thing a reader needs explained.
+  assert.match(fn, /pages: pages\.length/);
 });
 
 test("C-E · model and draw are measured at common and maximum tables", () => {

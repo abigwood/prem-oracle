@@ -116,16 +116,12 @@ function cards({ native = false } = {}) {
     ${lift("function ellipsise(ctx, text, maxWidth)")}
     ${lift("function drawFitted(ctx, text, x, y, maxWidth,")}
     ${liftConst("CARD_SIDE")}
-    ${lift("function cardRowMetrics(rows, { chrome, base, min = CARD_MIN_ROW, maxColumns = CARD_MAX_COLUMNS })")}
-    ${lift("function cardColumnBox(index, columns)")}
-    ${lift("function cardColumnCols(box, columns)")}
-    ${lift("function cardSlot(index, m)")}
+    ${lift("function cardRowMetrics(rows, { chrome, base, min = CARD_MIN_ROW })")}
     ${lift("function cardCanvas(contentHeight)")}
-    ${lift("function drawCardHeader(ctx, league, line)")}
+    ${lift("function drawCardHeader(ctx, league, line, page = \"\")")}
     ${lift("function drawCardHero(ctx, y, model)")}
-    ${lift("function drawCardTableColumns(ctx, y, m, rows)")}
-    ${lift("function drawCardTableHead(ctx, y, cols = CARD_COL, box = { x: CARD_PAD, width: CARD_W - CARD_PAD * 2 })")}
-    ${lift("function drawCardRowPlate(ctx, y, height, index, place, box = { x: CARD_PAD, width: CARD_W - CARD_PAD * 2 })")}
+    ${lift("function drawCardTableHead(ctx, y)")}
+    ${lift("function drawCardRowPlate(ctx, y, height, index, place)")}
     ${lift("function cardHonoursWidth(ctx, counts, size)")}
     ${lift("function cardHonoursFit(ctx, cols, counts, m)")}
     ${lift("function drawCardHonours(ctx, x, y, counts, { size = 24 } = {})")}
@@ -143,6 +139,8 @@ function cards({ native = false } = {}) {
     ${lift("function weeklyShareStatus(round)")}
     ${lift("function seasonShareFreshness(state)")}
     ${lift("function weeklyCardModel(state, round)")}
+    ${liftConst("cardPageRows")}
+    ${liftConst("cardPageLabel")}
     ${lift("function drawWeeklyResultCard(state, round)")}
     ${lift("function seasonCardModel(state)")}
     ${lift("function drawSeasonTableCard(state)")}
@@ -165,8 +163,10 @@ function cards({ native = false } = {}) {
     return {
       weeklyModel: () => weeklyCardModel(leagueState, roundState),
       seasonModel: () => seasonCardModel(leagueState),
-      drawWeekly: () => drawWeeklyResultCard(leagueState, roundState),
-      drawSeason: () => drawSeasonTableCard(leagueState),
+      drawWeekly: () => drawWeeklyResultCard(leagueState, roundState)[0],
+      drawWeeklyPages: () => drawWeeklyResultCard(leagueState, roundState),
+      drawSeason: () => drawSeasonTableCard(leagueState)[0],
+      drawSeasonPages: () => drawSeasonTableCard(leagueState),
       shareState: () => shareCardState(),
       ready: () => weeklyCardReady(),
       captions: () => ({ weekly: roundState ? weeklyCardCaption(leagueState, roundState) : null, season: leagueTableShareText(leagueState) }),
@@ -521,12 +521,15 @@ function delivery({ native = false, canShareFiles = true, plugins = ["Filesystem
 
     ${lift("function cardPng(canvas, filename)")}
     ${lift("function downloadCard(png)")}
-    ${lift("async function shareCardNatively(png, { title, text })")}
-    ${lift("function shareCardFile(png, { title, text })")}
+    ${lift("async function shareCardNatively(pages, { title, text })")}
+    ${lift("function shareCardFile(pages, { title, text })")}
 
     return {
       png: () => cardPng(canvas, "prem-oracle-matchweek.png"),
-      send: () => shareCardFile(cardPng(canvas, "prem-oracle-matchweek.png"), { title: "Sunday Six", text: "join us" }),
+      send: () => shareCardFile([cardPng(canvas, "prem-oracle-matchweek.png")], { title: "Sunday Six", text: "join us" }),
+      sendPages: (n) => shareCardFile(
+        Array.from({ length: n }, (_, i) => cardPng(canvas, "prem-oracle-season-table-" + (i + 1) + "-of-" + n + ".png")),
+        { title: "Sunday Six", text: "join us" }),
       log: () => log,
     };
   `);

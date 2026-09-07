@@ -38,8 +38,7 @@ const NAMES = ["matchweekLeagueState", "matchweekLeagueName", "matchweekSlate", 
   "CARD_SIDE", "CARD_W", "CARD_HEAD_H", "CARD_HERO_H", "CARD_TABLE_HEAD_H", "CARD_ROW_H",
   "CARD_SEASON_ROW_H", "CARD_FOOT_H", "CARD_GAP",
   "cardRowMetrics", "cardCanvas", "winnerNames", "CARD", "CARD_PAD", "CARD_COL",
-  "CARD_TYPE_FLOOR", "CARD_SECOND_FLOOR", "CARD_MIN_ROW", "CARD_MIN_NAME",
-  "CARD_MAX_COLUMNS", "CARD_COL_GAP", "cardColumnBox", "cardColumnCols", "cardSlot",
+  "CARD_TYPE_FLOOR", "CARD_SECOND_FLOOR", "CARD_MIN_ROW",
   "weeklyRanks", "sharedRankByUid", "cardDate", "noteWeeklyFinalMismatch", "weeklyFinalMismatchLines"];
 
 const leagueState = (ids) => ({

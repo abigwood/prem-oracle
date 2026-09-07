@@ -37,12 +37,11 @@ const NAMES = ["drawSeasonTableCard", "drawWeeklyResultCard", "drawCardHeader", 
   "drawFitted", "fitText", "ellipsise", "roundedRect", "cardCanvas", "cardRowMetrics", "cardFont",
   "cardDate", "sentenceCase", "seasonCardModel",
   "weeklyCardModel", "weeklyCardCaption", "weeklyShareStatus", "weeklyTerminalCount",
-  "shareSurface", "shareRound", "sharePeriod", "normaliseView", "LEGACY_VIEWS", "weeklySharePublished", "shareCardState", "seasonShareFreshness", "shareIconButton",
+  "shareSurface", "shareRound", "sharePeriod", "normaliseView", "LEGACY_VIEWS",
+  "cardPageRows", "cardPageLabel", "CARD_MIN_NAME", "weeklySharePublished", "shareCardState", "seasonShareFreshness", "shareIconButton",
   "podiumCounts", "weeklyRanks", "sharedRankByUid", "winnerNames", "noteWeeklyFinalMismatch",
   "weeklyFinalMismatchLines", "finalScore", "isVoidFixture", "isPostponed", "VOID_STATUSES",
-  "CARD_TYPE_FLOOR", "CARD_SECOND_FLOOR", "CARD_MIN_ROW", "CARD_MIN_NAME",
-  "CARD_MAX_COLUMNS", "CARD_COL_GAP", "cardColumnBox", "cardColumnCols", "cardSlot",
-  "drawCardTableColumns", "cardHonoursWidth", "cardHonoursFit", 
+  "CARD_TYPE_FLOOR", "CARD_SECOND_FLOOR", "CARD_MIN_ROW", "cardHonoursWidth", "cardHonoursFit", 
   "CARD", "CARD_W", "CARD_SIDE", "CARD_PAD", "CARD_COL", "CARD_HEAD_H", "CARD_HERO_H",
   "CARD_TABLE_HEAD_H", "CARD_ROW_H", "CARD_SEASON_ROW_H", "CARD_FOOT_H", "CARD_GAP", "PLACE_NUMBER"];
 
@@ -169,8 +168,8 @@ for (const [label, members] of [["common", 8], ["maximum", 30]]) {
   test(`B · every honours value reaches the canvas at the ${label} size (${members} members)`, () => {
     const box = paintBox({ leagueTab: "season" });
     const state = seasonState(members);
-    box.drawSeasonTableCard(state);
-    const drawn = texts(box);
+    const pages = box.drawSeasonTableCard(state).length;
+    const drawn = box.__made.slice(-pages).flatMap((made) => made.marks.map((mark) => mark.text));
     const model = box.seasonCardModel(state);
     assert.equal(model.rows.length, members, "every member is exported");
     for (const row of model.rows) {
@@ -195,8 +194,8 @@ test("B · honours are on the row, whichever way the row is laid out", () => {
   assert.ok(tight.honoursSize >= 13, "the compact tally is still a readable size");
   // Laid out beside the name rather than under it, and never over it.
   const box2 = paintBox({ leagueTab: "season" });
-  box2.drawSeasonTableCard(seasonState(30));
-  const marks = painted(box2);
+  const pages = box2.drawSeasonTableCard(seasonState(30)).length;
+  const marks = box2.__made.slice(-pages).flatMap((made) => made.marks);
   const tally = marks.find((m) => /^🏆 \d+$/.test(m.text));
   const name = marks.find((m) => m.text === "Player 1");
   assert.ok(tally && name, "both the name and the tally are drawn");
@@ -332,15 +331,17 @@ for (const weekly of [true, false]) {
   });
 }
 
-test("floors · a table takes a column only when it needs one", () => {
+test("pages · a table takes a second page only when it needs one", () => {
   const box = paintBox();
-  // The accepted sizes stay in one column and keep their generous rows.
-  assert.equal(layoutOf(box, 6, true).m.columns, 1, "a six-member week");
-  assert.equal(layoutOf(box, 8, false).m.columns, 1, "the common season table");
-  // The sizes the ruling named take a second.
-  assert.equal(layoutOf(box, 20, true).m.columns, 2, "a twenty-member week");
-  assert.equal(layoutOf(box, 20, false).m.columns, 2, "a twenty-member season");
-  assert.equal(layoutOf(box, 30, false).m.columns, 2, "a thirty-member season");
+  // Adam's ruling: one linear vertical list, never side-by-side columns.
+  assert.equal(layoutOf(box, 6, true).m.pages, 1, "a six-member week");
+  assert.equal(layoutOf(box, 8, false).m.pages, 1, "the common season table");
+  assert.equal(layoutOf(box, 11, false).m.pages, 1, "an eleven-member league fits one square");
+  // The sizes the ruling named take more.
+  assert.equal(layoutOf(box, 20, true).m.pages, 2, "a twenty-member week");
+  assert.equal(layoutOf(box, 20, false).m.pages, 2, "a twenty-member season");
+  assert.equal(layoutOf(box, 30, false).m.pages, 2, "a thirty-member season");
+  assert.equal(layoutOf(box, 40, false).m.pages, 3, "a forty-member season");
   // And the row never drops below the height an 18px line needs.
   for (const members of SIZES) {
     for (const weekly of [true, false]) {
@@ -350,78 +351,82 @@ test("floors · a table takes a column only when it needs one", () => {
   }
 });
 
-test("columns · the ranking continues into the next column, in order", () => {
-  const box = paintBox();
-  const { m } = layoutOf(box, 20, false);
-  assert.equal(m.columns, 2);
-  assert.equal(m.perColumn, 10);
-  const slots = Array.from({ length: 20 }, (_, i) => box.cardSlot(i, m));
-  // Column 0 holds ranks 1..10 top to bottom; column 1 holds 11..20.
-  slots.forEach((slot, index) => {
-    assert.equal(slot.column, Math.floor(index / 10), `member ${index + 1} is in the wrong column`);
-    assert.equal(slot.row, index % 10, `member ${index + 1} is on the wrong line`);
-  });
-  // Left to right: the second column starts to the right of the first, and the
-  // two never overlap.
-  const left = box.cardColumnBox(0, 2), right = box.cardColumnBox(1, 2);
-  assert.ok(right.x >= left.x + left.width, "the columns overlap");
-  assert.ok(right.x + right.width <= box.CARD_W - box.CARD_PAD + 0.001, "a column runs off the card");
-});
-
-test("columns · every member is drawn, in rank order, at every size", () => {
-  for (const members of [8, 20, 30]) {
-    const box = paintBox({ leagueTab: "season" });
-    const state = seasonState(members);
-    box.drawSeasonTableCard(state);
-    const marks = painted(box);
-    const model = box.seasonCardModel(state);
-    assert.equal(model.rows.length, members, "the model dropped a member");
-    for (const row of model.rows) {
-      assert.ok(marks.some((mark) => mark.text === row.nick), `${row.nick} was never drawn`);
-      assert.ok(marks.some((mark) => mark.text === String(row.rank)), `rank ${row.rank} was never drawn`);
-      assert.ok(marks.some((mark) => mark.text === String(row.pts)), `${row.nick}'s points never drawn`);
-      assert.ok(marks.some((mark) => mark.text === String(row.exact)), `${row.nick}'s exact count never drawn`);
-    }
-    // Reading each column top to bottom gives 1..N with nothing missing.
-    const { m } = layoutOf(box, members, false);
-    const order = model.rows.map((row, index) => ({ ...box.cardSlot(index, m), rank: row.rank }));
-    const byColumn = new Map();
-    for (const entry of order) {
-      if (!byColumn.has(entry.column)) byColumn.set(entry.column, []);
-      byColumn.get(entry.column).push(entry.rank);
-    }
-    const readOut = [...byColumn.keys()].sort((a, b) => a - b).flatMap((c) => byColumn.get(c));
-    assert.deepEqual(readOut, model.rows.map((row) => row.rank),
-      `${members} members read out of order`);
+test("pages · there is no column machinery left to fall back to", () => {
+  for (const gone of ["cardColumnBox", "cardColumnCols", "cardSlot", "drawCardTableColumns",
+    "CARD_MAX_COLUMNS", "CARD_COL_GAP", "m.columns", "perColumn"]) {
+    assert.ok(!APP.includes(gone), `${gone} survives the single-list ruling`);
   }
 });
 
-test("columns · a continued table repeats its headings", () => {
+test("pages · every member appears exactly once, in rank order, across the pages", () => {
   const box = paintBox({ leagueTab: "season" });
-  box.drawSeasonTableCard(seasonState(20));
-  const heads = texts(box).filter((text) => text === "PLAYER");
-  assert.equal(heads.length, 2, "the second column has no heading of its own");
-  const one = paintBox({ leagueTab: "season" });
-  one.drawSeasonTableCard(seasonState(8));
-  assert.equal(texts(one).filter((text) => text === "PLAYER").length, 1,
-    "a single column grew a heading it does not need");
+  for (const members of [1, 11, 20, 30, 40]) {
+    const state = seasonState(members);
+    const model = box.seasonCardModel(state);
+    const { m } = layoutOf(box, members, false);
+    const paged = Array.from({ length: m.pages }, (_, page) => box.cardPageRows(model.rows, page, m));
+    const flat = paged.flat();
+    assert.equal(flat.length, members, `${members}: a member was lost or duplicated`);
+    assert.deepEqual(flat.map((row) => row.rank), model.rows.map((row) => row.rank),
+      `${members}: the ranking was reordered across pages`);
+    assert.equal(new Set(flat.map((row) => row.nick)).size, members, `${members}: a member appears twice`);
+    // Each page is a contiguous run of the ranking, top to bottom.
+    for (const page of paged) {
+      assert.ok(page.length > 0, `${members}: an empty page was generated`);
+      assert.deepEqual(page.map((row) => row.rank),
+        page.map((_, i) => page[0].rank + i), `${members}: a page is not contiguous`);
+    }
+  }
 });
 
-test("columns · an inline tally never runs into the exact column", () => {
+test("pages · every page is a square, and carries the table's own headings", () => {
+  for (const members of [11, 20, 30, 40]) {
+    const box = paintBox({ leagueTab: "season" });
+    const canvases = box.drawSeasonTableCard(seasonState(members));
+    const { m } = layoutOf(box, members, false);
+    assert.equal(canvases.length, m.pages, `${members}: wrong number of pages`);
+    for (const canvas of canvases) {
+      assert.equal(canvas.width, 1080);
+      assert.equal(canvas.height, 1080);
+    }
+    // One recorder per page: each drew its own PLAYER/EXACT/PTS headings.
+    const drawnPages = box.__made.slice(-m.pages).map((made) => made.marks.map((mark) => mark.text));
+    for (const drawn of drawnPages) {
+      assert.ok(drawn.includes("PLAYER"), `${members}: a page lost its headings`);
+      assert.ok(drawn.includes("EXACT"));
+      assert.ok(drawn.includes("PTS"));
+      assert.ok(drawn.includes("Sunday Six"), `${members}: a page lost the league name`);
+    }
+  }
+});
+
+test("pages · a multi-page export marks its pages, a single one does not", () => {
+  const box = paintBox({ leagueTab: "season" });
+  assert.equal(box.cardPageLabel(0, 1), "", "a single card claimed to be a page");
+  assert.equal(box.cardPageLabel(0, 3), "Page 1 of 3");
+  assert.equal(box.cardPageLabel(2, 3), "Page 3 of 3");
+  box.drawSeasonTableCard(seasonState(30));
+  const { m } = layoutOf(box, 30, false);
+  const marks = box.__made.slice(-m.pages).map((made) => made.marks.map((mark) => mark.text));
+  assert.deepEqual(marks.map((drawn) => drawn.find((text) => /^Page \d+ of \d+$/.test(text))),
+    ["Page 1 of 2", "Page 2 of 2"]);
+  // An eleven-member league is one square and says nothing about pages.
+  const one = paintBox({ leagueTab: "season" });
+  one.drawSeasonTableCard(seasonState(11));
+  assert.ok(!texts(one).some((text) => /^Page /.test(text)), "a single square was marked as a page");
+});
+
+test("pages · an inline tally never runs into the exact column", () => {
   const box = paintBox({ leagueTab: "season" });
   const { m } = layoutOf(box, 30, false);
   assert.equal(m.honoursLine, false, "this size is the inline case");
   const ctx = { font: "", measureText: (t) => ({ width: String(t).length * 12 }) };
   // Two-digit honours are a real season: 38 matchweeks, three places.
-  for (const columns of [1, 2]) {
-    const cols = box.cardColumnCols(box.cardColumnBox(0, columns), columns);
-    const counts = { gold: 12, silver: 34, bronze: 56 };
-    const fit = box.cardHonoursFit(ctx, cols, counts, m);
-    assert.ok(fit.x + fit.width <= cols.exact - m.second,
-      `${columns} column(s): the tally reached the exact figure`);
-    assert.ok(fit.size >= box.CARD_SECOND_FLOOR, `${columns} column(s): the tally fell below the floor`);
-    assert.ok(fit.x - cols.name >= 24, `${columns} column(s): the name lost every character`);
-  }
+  const counts = { gold: 12, silver: 34, bronze: 56 };
+  const fit = box.cardHonoursFit(ctx, box.CARD_COL, counts, m);
+  assert.ok(fit.x + fit.width <= box.CARD_COL.exact - m.second, "the tally reached the exact figure");
+  assert.ok(fit.size >= box.CARD_SECOND_FLOOR, "the tally fell below the floor");
+  assert.ok(fit.x - box.CARD_COL.name >= 24, "the name lost every character");
 });
 
 // --- the exported card carries no rostrum ----------------------------------
@@ -467,37 +472,19 @@ test("podium · dropping the rostrum is what buys the table its size", () => {
   assert.ok(m.name >= 22, `and names at ${m.name}px`);
 });
 
-test("columns · a narrow column takes the short heading, not two words run together", () => {
-  const box = paintBox({ leagueTab: "season" });
-  box.drawSeasonTableCard(seasonState(40));
-  const drawn = texts(box);
-  const { m } = layoutOf(box, 40, false);
-  assert.equal(m.columns, 3, "forty members take a third column");
-  assert.equal(drawn.filter((text) => text === "EX").length, 3, "each narrow column is headed EX");
-  assert.equal(drawn.filter((text) => text === "EXACT").length, 0,
-    "the long heading collided with PLAYER");
-  // A column wide enough keeps the word.
-  const wide = paintBox({ leagueTab: "season" });
-  wide.drawSeasonTableCard(seasonState(20));
-  assert.equal(texts(wide).filter((text) => text === "EXACT").length, 2);
-  assert.equal(texts(wide).filter((text) => text === "EX").length, 0);
-});
-
-test("columns · forty members still hold every floor", () => {
+test("pages · forty members hold every floor, across three squares", () => {
   const box = paintBox({ leagueTab: "season" });
   const state = seasonState(40);
-  box.drawSeasonTableCard(state);
+  const canvases = box.drawSeasonTableCard(state);
+  assert.equal(canvases.length, 3);
   const model = box.seasonCardModel(state);
   assert.equal(model.rows.length, 40);
-  const marks = painted(box);
+  const drawn = box.__made.slice(-3).flatMap((made) => made.marks.map((mark) => mark.text));
   for (const row of model.rows) {
-    assert.ok(marks.some((mark) => mark.text === row.nick), `${row.nick} was never drawn`);
+    assert.ok(drawn.includes(row.nick), `${row.nick} was never drawn`);
   }
   const { m, k } = layoutOf(box, 40, false);
   assert.equal(k, 1);
   assert.ok(Math.min(m.name, m.number, m.points) * k >= box.CARD_TYPE_FLOOR);
   assert.ok(Math.min(m.second, m.honoursSize) * k >= box.CARD_SECOND_FLOOR);
-  // At three columns the tally cannot sit beside the name, so it takes its
-  // own baseline rather than being dropped or run through the figures.
-  assert.equal(m.honoursLine, true, "a narrow column tried to inline its tally");
 });

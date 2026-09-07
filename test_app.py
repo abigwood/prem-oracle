@@ -795,7 +795,7 @@ class CompetitionAppTests(unittest.TestCase):
         # into eleven pixels. The on-screen podium is untouched.
         card = self.app[self.app.index("function drawWeeklyResultCard(state, round)"):]
         card = card[:card.index("\n}")]
-        self.assertLess(card.index("drawCardHero"), card.index("drawCardTableColumns"))
+        self.assertLess(card.index("drawCardHero"), card.index("drawCardTableHead"))
         self.assertNotIn("drawCardPodium", card)
         self.assertNotIn("drawCardPodium", self.app)
         self.assertNotIn("CARD_PODIUM", self.app)
@@ -2079,7 +2079,7 @@ class LeagueSwitchAndShareTests(unittest.TestCase):
         # Build 19 had to wait on toBlob before it could share, which on iOS
         # ends the tap and loses the sheet. Nothing on this path awaits.
         for name in ("function shareCardNow(surface = shareSurface())", "function cardPng(canvas, filename)",
-                     "function shareCardFile(png, { title, text })"):
+                     "function shareCardFile(pages, { title, text })"):
             fn = self.app[self.app.index(name):]
             fn = fn[:fn.index("\n}")]
             self.assertNotIn("await", fn, name)
@@ -2090,10 +2090,12 @@ class LeagueSwitchAndShareTests(unittest.TestCase):
         self.assertNotIn(".toBlob(", self.app, "toBlob is asynchronous and would end the tap")
         # The one thing that must wait is the native write, and it waits after
         # the tap on its own promise rather than in front of the share.
-        native = self.app[self.app.index("async function shareCardNatively(png, { title, text })"):]
+        native = self.app[self.app.index("async function shareCardNatively(pages, { title, text })"):]
         native = native[:native.index("\n}")]
         self.assertIn('directory: "CACHE"', native)
-        self.assertIn("files: [uri]", native)
+        # Every page in one sheet: a paged table is one action, not three.
+        self.assertIn("files: uris", native)
+        self.assertIn("uris.push(uri);", native)
 
     def test_the_weekly_card_is_available_from_publication(self):
         # v1.7 Slice C / M9 reverses the settlement gate deliberately: a week in

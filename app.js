@@ -4212,8 +4212,6 @@ const CARD_SECOND_FLOOR = 15;
 const CARD_MIN_ROW = 32;
 // A name column narrower than this is not a name, it is an initial.
 const CARD_MIN_NAME = 104;
-const CARD_MAX_COLUMNS = 4;
-const CARD_COL_GAP = 28;
 // The season row carries an honours line under the name, so it is taller.
 const CARD_SEASON_ROW_H = 92;
 const CARD_FOOT_H = 200;
@@ -4264,38 +4262,33 @@ const CARD_SIDE = 1080;
  * smaller version of the card, it is a different and dishonest one.
  */
 /**
- * How a table fits inside the square: how many columns it needs, how tall its
+ * How a table fits inside the square: how many PAGES it needs, how tall its
  * rows are, and how big its type is.
  *
- * Shrinking the whole card until it fits is not a layout — it is a smaller
- * picture of an unreadable table, which is exactly what the 30-member export
- * was. So the LAYOUT solves the fit: when one column cannot hold a readable
- * row, the ranking continues into a second column, and a third if it must.
- * Scale is then 1 and the floors hold by construction.
+ * One linear vertical list, always. Side-by-side columns fitted more members
+ * into a square, but a league table read down two columns is not a league
+ * table — it is two, and the reader has to work out that the right-hand list
+ * continues the left. So when the members will not fit one readable square,
+ * the export becomes several squares, in rank order, each a complete page of
+ * one list. Nothing is truncated and nothing is shrunk below the floors.
  */
-function cardRowMetrics(rows, { chrome, base, min = CARD_MIN_ROW, maxColumns = CARD_MAX_COLUMNS }) {
+function cardRowMetrics(rows, { chrome, base, min = CARD_MIN_ROW }) {
   const available = Math.max(0, CARD_SIDE - chrome);
-  let columns = 1;
-  while (columns < maxColumns && rows > 0 && available / Math.ceil(rows / columns) < min) columns += 1;
-  const perColumn = rows > 0 ? Math.ceil(rows / columns) : 0;
-  const fitted = perColumn > 0 ? available / perColumn : base;
+  const perPage = Math.max(1, Math.floor(available / min));
+  const pages = rows > 0 ? Math.ceil(rows / perPage) : 1;
+  // Evened out, so a two-page export is not seventeen rows and one.
+  const rowsPerPage = rows > 0 ? Math.ceil(rows / pages) : 0;
+  const fitted = rowsPerPage > 0 ? available / rowsPerPage : base;
   const rowH = Math.max(min, Math.min(base, fitted));
   const scale = Math.min(1, rowH / base);
   // A roomy row still carries honours on their own baseline; a compressed one
   // carries a compact tally beside a narrowed name. Neither ever drops them.
-  // Two columns buy the height back, so the second baseline survives further.
-  // An inline tally needs a name beside it AND clear air before the exact
-  // column. Where the column cannot hold all three, honours take their own
-  // baseline instead of being pushed through the figures next to them.
-  const box = cardColumnBox(0, columns);
-  const inlineRoom = cardColumnCols(box, columns).exact - cardColumnCols(box, columns).name;
-  const honoursLine = rowH >= (columns > 1 ? 46 : 62)
-    || inlineRoom < CARD_MIN_NAME + 12 + CARD_SECOND_FLOOR * 9 + CARD_SECOND_FLOOR * 2;
+  const honoursLine = rowH >= 62;
   return {
-    columns,
-    perColumn,
+    pages,
+    rowsPerPage,
     rowH,
-    contentHeight: chrome + perColumn * rowH,
+    contentHeight: chrome + rowsPerPage * rowH,
     name: Math.max(CARD_TYPE_FLOOR, Math.round(34 * scale)),
     number: Math.max(CARD_TYPE_FLOOR, Math.round(30 * scale)),
     points: Math.max(CARD_TYPE_FLOOR, Math.round(34 * scale)),
@@ -4310,30 +4303,14 @@ function cardRowMetrics(rows, { chrome, base, min = CARD_MIN_ROW, maxColumns = C
   };
 }
 
-/** One column's slot in the 1080 design, gaps included. */
-function cardColumnBox(index, columns) {
-  const usable = CARD_W - CARD_PAD * 2 - CARD_COL_GAP * (columns - 1);
-  const width = usable / columns;
-  return { x: CARD_PAD + index * (width + CARD_COL_GAP), width };
-}
+/** The members on one page, in rank order, each appearing on exactly one. */
+const cardPageRows = (rows, page, m) => rows.slice(page * m.rowsPerPage, (page + 1) * m.rowsPerPage);
 
-/**
- * Where a row's figures sit inside its column. One column keeps the accepted
- * full-width positions exactly; more than one packs them against the column's
- * own edges so every figure keeps its place relative to its own heading.
- */
-function cardColumnCols(box, columns) {
-  if (columns === 1) return CARD_COL;
-  const right = box.x + box.width;
-  return { rank: box.x + 26, name: box.x + 58, exact: right - 104, pts: right - 46, medal: right - 16 };
-}
+/** "Page 2 of 3" — only when there is more than one, so a single card is silent. */
+const cardPageLabel = (page, pages) => (pages > 1 ? `Page ${page + 1} of ${pages}` : "");
 
-/** Which column and which row of it the nth member belongs in. */
-function cardSlot(index, m) {
-  const column = m.perColumn > 0 ? Math.floor(index / m.perColumn) : 0;
-  const box = cardColumnBox(column, m.columns);
-  return { column, row: index - column * m.perColumn, box, cols: cardColumnCols(box, m.columns) };
-}
+
+
 
 function cardCanvas(contentHeight) {
   const canvas = document.createElement("canvas");
@@ -4351,7 +4328,7 @@ function cardCanvas(contentHeight) {
   return { canvas, ctx, scale: k };
 }
 
-function drawCardHeader(ctx, league, line) {
+function drawCardHeader(ctx, league, line, page = "") {
   ctx.fillStyle = CARD.brand;
   ctx.fillRect(0, 0, CARD_W, CARD_HEAD_H - 8);
   ctx.fillStyle = CARD.green;
@@ -4363,6 +4340,15 @@ function drawCardHeader(ctx, league, line) {
   ctx.fillStyle = CARD.muted;
   ctx.font = cardFont(800, 28);
   ctx.fillText(line, CARD_PAD, 166);
+  // A page of a multi-page export says so, on the page itself — a reader who
+  // is sent three squares needs to know they are three of one thing.
+  if (page) {
+    ctx.textAlign = "right";
+    ctx.fillStyle = CARD.green;
+    ctx.font = cardFont(900, 26);
+    ctx.fillText(page, CARD_W - CARD_PAD, 166);
+    ctx.textAlign = "left";
+  }
 }
 
 // The winner, once, in gold — the one thing a mate should read from across the
@@ -4400,23 +4386,20 @@ function drawCardHero(ctx, y, model) {
 
 const CARD_COL = { rank: 112, name: 168, exact: 730, pts: 880, medal: 962 };
 
-function drawCardTableHead(ctx, y, cols = CARD_COL, box = { x: CARD_PAD, width: CARD_W - CARD_PAD * 2 }) {
-  const tight = box.width < 400;
+function drawCardTableHead(ctx, y) {
   ctx.fillStyle = CARD.muted;
-  ctx.font = cardFont(800, box.width < 500 ? 19 : 22);
-  ctx.fillText("PLAYER", cols.name, y + 36);
+  ctx.font = cardFont(800, 22);
+  ctx.fillText("PLAYER", CARD_COL.name, y + 36);
   ctx.textAlign = "right";
-  // A narrow column takes the short form rather than letting two headings meet
-  // in the middle and read as one word.
-  ctx.fillText(tight ? "EX" : "EXACT", cols.exact, y + 36);
-  ctx.fillText("PTS", cols.pts, y + 36);
+  ctx.fillText("EXACT", CARD_COL.exact, y + 36);
+  ctx.fillText("PTS", CARD_COL.pts, y + 36);
   ctx.textAlign = "left";
   ctx.fillStyle = CARD.line;
-  ctx.fillRect(box.x, y + CARD_TABLE_HEAD_H - 10, box.width, 2);
+  ctx.fillRect(CARD_PAD, y + CARD_TABLE_HEAD_H - 10, CARD_W - CARD_PAD * 2, 2);
 }
 
-function drawCardRowPlate(ctx, y, height, index, place, box = { x: CARD_PAD, width: CARD_W - CARD_PAD * 2 }) {
-  roundedRect(ctx, box.x, y, box.width, height - 10, 16);
+function drawCardRowPlate(ctx, y, height, index, place) {
+  roundedRect(ctx, CARD_PAD, y, CARD_W - CARD_PAD * 2, height - 10, 16);
   ctx.fillStyle = place ? CARD.goldWash : index % 2 ? CARD.rowAlt : CARD.row;
   ctx.fill();
   if (!place) return;
@@ -4460,22 +4443,6 @@ function drawCardHonours(ctx, x, y, counts, { size = 24 } = {}) {
     ctx.fillText(" · ", cursor, y);
     cursor += ctx.measureText(" · ").width;
   });
-}
-
-/**
- * A heading over every column, and a hairline between them. A table that
- * continues into a second column has to say so: the reader needs to know the
- * right-hand list is ranks 11 to 20, not a different table.
- */
-function drawCardTableColumns(ctx, y, m, rows) {
-  for (let column = 0; column < m.columns; column += 1) {
-    if (column * m.perColumn >= rows) break;
-    const box = cardColumnBox(column, m.columns);
-    drawCardTableHead(ctx, y, cardColumnCols(box, m.columns), box);
-    if (!column) continue;
-    ctx.fillStyle = CARD.line;
-    ctx.fillRect(box.x - CARD_COL_GAP / 2 - 1, y + 8, 2, CARD_TABLE_HEAD_H - 18 + m.perColumn * m.rowH);
-  }
 }
 
 function drawCardFooter(ctx, y, model) {
@@ -4561,44 +4528,44 @@ function drawWeeklyResultCard(state, round) {
   const chrome = CARD_HEAD_H + CARD_GAP + CARD_HERO_H + CARD_GAP
     + CARD_TABLE_HEAD_H + CARD_GAP + CARD_FOOT_H;
   const m = cardRowMetrics(model.rows.length, { chrome, base: CARD_ROW_H });
-  const { canvas, ctx } = cardCanvas(m.contentHeight);
-  drawCardHeader(ctx, model.league, model.headline);
-  const y = CARD_HEAD_H + CARD_GAP + CARD_HERO_H + CARD_GAP;
-  const top = y + CARD_TABLE_HEAD_H;
-  drawCardHero(ctx, CARD_HEAD_H + CARD_GAP, model);
-  drawCardTableColumns(ctx, y, m, model.rows.length);
-  model.rows.forEach((row, index) => {
-    const slot = cardSlot(index, m);
-    const rowTop = top + slot.row * m.rowH;
-    const mid = rowTop + (m.rowH - 10) / 2;
-    const baseline = mid + m.points / 3;
-    drawCardRowPlate(ctx, rowTop, m.rowH, slot.row, row.place, slot.box);
-    ctx.textAlign = "center";
-    ctx.fillStyle = row.place ? CARD.gold : CARD.muted;
-    ctx.font = cardFont(900, m.number);
-    ctx.fillText(String(row.rank), slot.cols.rank, baseline);
-    ctx.textAlign = "left";
-    const room = slot.cols.exact - slot.cols.name - (row.place ? 20 : 16);
-    drawFitted(ctx, row.nick, slot.cols.name, baseline, room,
-      { max: m.name, min: Math.min(CARD_TYPE_FLOOR, m.name) });
-    ctx.textAlign = "right";
-    ctx.fillStyle = CARD.muted;
-    ctx.font = cardFont(800, m.second);
-    ctx.fillText(String(row.exact), slot.cols.exact, baseline);
-    ctx.fillStyle = CARD.ink;
-    ctx.font = cardFont(900, m.points);
-    ctx.fillText(String(row.pts), slot.cols.pts, baseline);
-    ctx.textAlign = "center";
-    // The medal sits at the right edge of its own column, so the three that
-    // matter are findable down one side without reading a single name.
-    if (row.place) {
-      ctx.font = cardFont(900, m.second);
-      ctx.fillText(PLACE_EMOJI[row.place], slot.cols.medal, baseline);
-    }
-    ctx.textAlign = "left";
+  return Array.from({ length: m.pages }, (_, page) => {
+    const { canvas, ctx } = cardCanvas(m.contentHeight);
+    drawCardHeader(ctx, model.league, model.headline, cardPageLabel(page, m.pages));
+    const y = CARD_HEAD_H + CARD_GAP + CARD_HERO_H + CARD_GAP;
+    const top = y + CARD_TABLE_HEAD_H;
+    drawCardHero(ctx, CARD_HEAD_H + CARD_GAP, model);
+    drawCardTableHead(ctx, y);
+    cardPageRows(model.rows, page, m).forEach((row, index) => {
+      const rowTop = top + index * m.rowH;
+      const mid = rowTop + (m.rowH - 10) / 2;
+      const baseline = mid + m.points / 3;
+      drawCardRowPlate(ctx, rowTop, m.rowH, index, row.place);
+      ctx.textAlign = "center";
+      ctx.fillStyle = row.place ? CARD.gold : CARD.muted;
+      ctx.font = cardFont(900, m.number);
+      ctx.fillText(String(row.rank), CARD_COL.rank, baseline);
+      ctx.textAlign = "left";
+      drawFitted(ctx, row.nick, CARD_COL.name, baseline, CARD_COL.exact - CARD_COL.name - 20,
+        { max: m.name, min: Math.min(CARD_TYPE_FLOOR, m.name) });
+      ctx.textAlign = "right";
+      ctx.fillStyle = CARD.muted;
+      ctx.font = cardFont(800, m.second);
+      ctx.fillText(String(row.exact), CARD_COL.exact, baseline);
+      ctx.fillStyle = CARD.ink;
+      ctx.font = cardFont(900, m.points);
+      ctx.fillText(String(row.pts), CARD_COL.pts, baseline);
+      ctx.textAlign = "center";
+      // The medal sits at the right edge, so the three that matter are
+      // findable down one side without reading a single name.
+      if (row.place) {
+        ctx.font = cardFont(900, m.second);
+        ctx.fillText(PLACE_EMOJI[row.place], CARD_COL.medal, baseline);
+      }
+      ctx.textAlign = "left";
+    });
+    drawCardFooter(ctx, top + m.rowsPerPage * m.rowH + CARD_GAP, model);
+    return canvas;
   });
-  drawCardFooter(ctx, top + m.perColumn * m.rowH + CARD_GAP, model);
-  return canvas;
 }
 
 /**
@@ -4647,45 +4614,48 @@ function drawSeasonTableCard(state) {
   const model = seasonCardModel(state);
   const chrome = CARD_HEAD_H + CARD_GAP + CARD_TABLE_HEAD_H + CARD_GAP + CARD_FOOT_H;
   const m = cardRowMetrics(model.rows.length, { chrome, base: CARD_SEASON_ROW_H });
-  const { canvas, ctx } = cardCanvas(m.contentHeight);
-  drawCardHeader(ctx, model.league, model.headline);
-  const y = CARD_HEAD_H + CARD_GAP;
-  const top = y + CARD_TABLE_HEAD_H;
-  drawCardTableColumns(ctx, y, m, model.rows.length);
-  model.rows.forEach((row, index) => {
-    const slot = cardSlot(index, m);
-    const rowTop = top + slot.row * m.rowH;
-    const mid = rowTop + (m.rowH - 10) / 2;
-    drawCardRowPlate(ctx, rowTop, m.rowH, slot.row, null, slot.box);
-    ctx.textAlign = "center";
-    ctx.fillStyle = CARD.muted;
-    ctx.font = cardFont(900, m.number);
-    ctx.fillText(String(row.rank), slot.cols.rank, mid + (m.honoursLine ? 4 : m.number / 3));
-    ctx.textAlign = "left";
-    // Present at every size: a second line when the row is tall enough, an
-    // inline tally beside the name when it is not. Sharing a baseline means
-    // the tally is MEASURED and placed clear of the exact column — running a
-    // bronze count into an exact count reads as a single wrong number.
-    const fit = m.honoursLine ? null : cardHonoursFit(ctx, slot.cols, row.honours, m);
-    const nameWidth = fit ? fit.x - slot.cols.name - 12 : slot.cols.exact - slot.cols.name - 16;
-    drawFitted(ctx, row.nick, slot.cols.name, mid + (m.honoursLine ? m.nameDy : m.name / 3), nameWidth,
-      { max: m.name, min: Math.min(CARD_TYPE_FLOOR, m.name) });
-    if (fit) {
-      drawCardHonours(ctx, fit.x, mid + m.name / 3, row.honours, { size: fit.size });
-    } else {
-      drawCardHonours(ctx, slot.cols.name, mid + m.honoursDy, row.honours, { size: m.honoursSize });
-    }
-    ctx.textAlign = "right";
-    ctx.fillStyle = CARD.muted;
-    ctx.font = cardFont(800, m.second);
-    ctx.fillText(String(row.exact), slot.cols.exact, mid + (m.honoursLine ? 4 : m.second / 3));
-    ctx.fillStyle = CARD.ink;
-    ctx.font = cardFont(900, m.points);
-    ctx.fillText(String(row.pts), slot.cols.pts, mid + (m.honoursLine ? 5 : m.points / 3));
-    ctx.textAlign = "left";
+  return Array.from({ length: m.pages }, (_, page) => {
+    const { canvas, ctx } = cardCanvas(m.contentHeight);
+    drawCardHeader(ctx, model.league, model.headline, cardPageLabel(page, m.pages));
+    const y = CARD_HEAD_H + CARD_GAP;
+    const top = y + CARD_TABLE_HEAD_H;
+    // The headings are repeated on every page, so a page read on its own is
+    // still a table rather than a list of numbers.
+    drawCardTableHead(ctx, y);
+    cardPageRows(model.rows, page, m).forEach((row, index) => {
+      const rowTop = top + index * m.rowH;
+      const mid = rowTop + (m.rowH - 10) / 2;
+      drawCardRowPlate(ctx, rowTop, m.rowH, index, null);
+      ctx.textAlign = "center";
+      ctx.fillStyle = CARD.muted;
+      ctx.font = cardFont(900, m.number);
+      ctx.fillText(String(row.rank), CARD_COL.rank, mid + (m.honoursLine ? 4 : m.number / 3));
+      ctx.textAlign = "left";
+      // Present at every size: a second line when the row is tall enough, an
+      // inline tally beside the name when it is not. Sharing a baseline means
+      // the tally is MEASURED and placed clear of the exact column — running a
+      // bronze count into an exact count reads as a single wrong number.
+      const fit = m.honoursLine ? null : cardHonoursFit(ctx, CARD_COL, row.honours, m);
+      const nameWidth = fit ? fit.x - CARD_COL.name - 12 : CARD_COL.exact - CARD_COL.name - 16;
+      drawFitted(ctx, row.nick, CARD_COL.name, mid + (m.honoursLine ? m.nameDy : m.name / 3), nameWidth,
+        { max: m.name, min: Math.min(CARD_TYPE_FLOOR, m.name) });
+      if (fit) {
+        drawCardHonours(ctx, fit.x, mid + m.name / 3, row.honours, { size: fit.size });
+      } else {
+        drawCardHonours(ctx, CARD_COL.name, mid + m.honoursDy, row.honours, { size: m.honoursSize });
+      }
+      ctx.textAlign = "right";
+      ctx.fillStyle = CARD.muted;
+      ctx.font = cardFont(800, m.second);
+      ctx.fillText(String(row.exact), CARD_COL.exact, mid + (m.honoursLine ? 4 : m.second / 3));
+      ctx.fillStyle = CARD.ink;
+      ctx.font = cardFont(900, m.points);
+      ctx.fillText(String(row.pts), CARD_COL.pts, mid + (m.honoursLine ? 5 : m.points / 3));
+      ctx.textAlign = "left";
+    });
+    drawCardFooter(ctx, top + m.rowsPerPage * m.rowH + CARD_GAP, model);
+    return canvas;
   });
-  drawCardFooter(ctx, top + m.perColumn * m.rowH + CARD_GAP, model);
-  return canvas;
 }
 
 // The caption that travels with the image. WhatsApp shows a picture with no
@@ -4747,7 +4717,7 @@ function downloadCard(png) {
  * reclaim it whenever it likes, and a shared card is finished with the moment
  * it has been sent.
  */
-async function shareCardNatively(png, { title, text }) {
+async function shareCardNatively(pages, { title, text }) {
   const plugins = window.Capacitor?.Plugins || {};
   const { Filesystem, Share } = plugins;
   if (!Filesystem || !Share) {
@@ -4755,9 +4725,15 @@ async function shareCardNatively(png, { title, text }) {
     return;
   }
   try {
-    await Filesystem.writeFile({ path: png.filename, data: png.base64, directory: "CACHE" });
-    const { uri } = await Filesystem.getUri({ path: png.filename, directory: "CACHE" });
-    await Share.share({ title, text, files: [uri], dialogTitle: title });
+    const uris = [];
+    for (const png of pages) {
+      await Filesystem.writeFile({ path: png.filename, data: png.base64, directory: "CACHE" });
+      const { uri } = await Filesystem.getUri({ path: png.filename, directory: "CACHE" });
+      uris.push(uri);
+    }
+    // Every page in one sheet. The plugin takes an array, so a three-page
+    // table is one action rather than three.
+    await Share.share({ title, text, files: uris, dialogTitle: title });
   } catch (error) {
     // Dismissing the sheet is an answer, not a failure.
     if (error?.name === "AbortError" || /cancel/i.test(error?.message || "")) return;
@@ -4772,19 +4748,26 @@ async function shareCardNatively(png, { title, text }) {
  * falls back to putting the PNG in the viewer's downloads, which is the only
  * thing a desktop browser without the Web Share API can honestly do with it.
  */
-function shareCardFile(png, { title, text }) {
+function shareCardFile(pages, { title, text }) {
+  const files = pages.map((png) => png.file);
   if (isNativeApp()) {
-    shareCardNatively(png, { title, text });
+    shareCardNatively(pages, { title, text });
     return;
   }
-  if (navigator.canShare?.({ files: [png.file] })) {
-    navigator.share({ files: [png.file], title, text }).catch((error) => {
+  // One action for all of them where the browser can take them all. Where it
+  // cannot, saying so is better than sending page one and calling it the
+  // table — a partial table read as a whole one is a wrong table.
+  if (navigator.canShare?.({ files })) {
+    navigator.share({ files, title, text }).catch((error) => {
       if (error?.name === "AbortError" || /cancel/i.test(error?.message || "")) return;
-      downloadCard(png);
+      pages.forEach(downloadCard);
     });
     return;
   }
-  downloadCard(png);
+  if (pages.length > 1 && navigator.canShare?.({ files: [files[0]] })) {
+    setFlash(`This table needs ${pages.length} images and this browser shares one at a time — saving all ${pages.length} instead.`);
+  }
+  pages.forEach(downloadCard);
 }
 
 /**
@@ -5042,20 +5025,23 @@ function shareCardNow(surface = shareSurface()) {
   const rows = model.rows?.length ?? 0;
   const t1 = at();
   traceTap("share-model", { card: weekly ? "weekly" : "season", rows, ms: Math.round(t1 - t0) });
-  const canvas = weekly ? drawWeeklyResultCard(state, roundState) : drawSeasonTableCard(state);
+  const canvases = weekly ? drawWeeklyResultCard(state, roundState) : drawSeasonTableCard(state);
   const t2 = at();
-  traceTap("share-draw", { rows, side: canvas.width, ms: Math.round(t2 - t1) });
-  const png = cardPng(canvas, weekly ? "prem-oracle-matchweek.png" : "prem-oracle-season-table.png");
+  traceTap("share-draw", { rows, pages: canvases.length, side: canvases[0]?.width, ms: Math.round(t2 - t1) });
+  const stem = weekly ? "prem-oracle-matchweek" : "prem-oracle-season-table";
+  const pages = canvases.map((canvas, index) => cardPng(canvas,
+    canvases.length > 1 ? `${stem}-${index + 1}-of-${canvases.length}.png` : `${stem}.png`));
   const t3 = at();
-  traceTap("share-encode", { rows, bytes: png.base64.length, ms: Math.round(t3 - t2) });
-  traceTap("share-handoff", { rows, ms: Math.round(at() - t3), total: Math.round(at() - t0) });
+  traceTap("share-encode", { rows, pages: pages.length,
+    bytes: pages.reduce((sum, png) => sum + png.base64.length, 0), ms: Math.round(t3 - t2) });
+  traceTap("share-handoff", { rows, pages: pages.length, ms: Math.round(at() - t3), total: Math.round(at() - t0) });
   // Not "result" until there is one: the title travels with the file into a
   // chat, where it is read before the picture loads.
   const title = weekly
     ? `${state.name} ${weeklyShareStatus(roundState).final ? "matchweek result" : "matchweek standings"}`
     : `${state.name} season table`;
   const text = weekly ? weeklyCardCaption(state, roundState) : leagueTableShareText(state);
-  shareCardFile(png, { title, text });
+  shareCardFile(pages, { title, text });
 }
 
 // --- Host Fixture Picker ---------------------------------------------------

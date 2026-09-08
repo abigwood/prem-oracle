@@ -3090,11 +3090,27 @@ function movementMark(value) {
   return { dir: "flat", magnitude: 0, glyph: "\u2013", label: "No change" };
 }
 
+/**
+ * The movement a season row has to show, or null when it has none.
+ *
+ * `previousRank` is the worker's own record of whether a comparison exists at
+ * all: it is null until a second window has completed, and null for a member
+ * who was not in the previous table. That is the difference the screen and the
+ * card both need. A zero WITH a previous rank is a real result — the player
+ * held position — and reads as a dash. A zero WITHOUT one is not a result, and
+ * reads as nothing at all: an empty cell says "no comparison yet", where a
+ * dash would claim a player had held a position nobody has measured.
+ *
+ * Read, never derived. Both renderers ask this and neither works it out.
+ */
+const seasonMovement = (row) => (row?.previousRank == null ? null : Number(row.movement || 0));
+
 function movementBadge(row) {
-  const value = Number(row.movement || 0);
-  if (value > 0) return `<span class="movement movement-up" aria-label="Up ${value} place${value === 1 ? "" : "s"}">▲</span>`;
-  if (value < 0) return `<span class="movement movement-down" aria-label="Down ${Math.abs(value)} place${Math.abs(value) === 1 ? "" : "s"}">▼</span>`;
-  return `<span class="movement movement-flat" aria-label="No position change">-</span>`;
+  const value = seasonMovement(row);
+  // Nothing to compare against yet: no marker, and no badge holding its place.
+  if (value == null) return "";
+  const mark = movementMark(value);
+  return `<span class="movement movement-${mark.dir}" role="img" aria-label="${mark.label}">${mark.glyph}</span>`;
 }
 
 /** Every competition a league plays, named. A mixed league is both, not the first. */
@@ -4868,10 +4884,9 @@ function seasonCardModel(state) {
       pts: row.pts,
       exact: row.exact,
       honours: podiumCounts(row),
-      // Taken from the row the screen renders, not recomputed. The season
-      // table's movement is settled by the worker and arrives in the snapshot;
-      // the card's job is to show it, not to have an opinion about it.
-      movement: Number(row.movement || 0),
+      // The same reader the on-screen badge uses, on the same row — including
+      // its null, which is how "no comparison yet" survives into the picture.
+      movement: seasonMovement(row),
     })),
     code: state.code,
     link: inviteLinkFor(state.code),

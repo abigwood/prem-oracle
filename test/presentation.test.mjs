@@ -38,7 +38,7 @@ function recorder() {
   return { canvas, ctx, marks, fills };
 }
 
-const NAMES = ["roundTableHtml", "medalLine", "weeklyMovementBadge", "movementBadge", "movementMark", "cardMovementText", "cardMovementWidth", "drawCardMovement", "slateIdsOf", "weeklyMovement", "settlementWindows", "windowPointsByUid", "seasonCardPages", "drawSeasonPage", "drawSeasonTableCard", "weeklyCardPages", "drawWeeklyPage", "drawWeeklyResultCard", "drawCardHeader", "drawCardHero", "drawCardTableHead", "drawCardCellSplit", "drawCardRowPlate", "drawWeeklyRowBand",
+const NAMES = ["roundTableHtml", "seasonTableHtml", "medalLine", "weeklyMovementBadge", "movementBadge", "seasonMovement", "movementMark", "cardMovementText", "cardMovementWidth", "drawCardMovement", "slateIdsOf", "weeklyMovement", "settlementWindows", "windowPointsByUid", "seasonCardPages", "drawSeasonPage", "drawSeasonTableCard", "weeklyCardPages", "drawWeeklyPage", "drawWeeklyResultCard", "drawCardHeader", "drawCardHero", "drawCardTableHead", "drawCardCellSplit", "drawCardRowPlate", "drawWeeklyRowBand",
   "drawCardRowRule", "weeklyCardGeometry", "drawCardHonours", "drawCardFooter",
   "drawFitted", "fitText", "ellipsise", "roundedRect", "cardCanvas", "cardRowMetrics", "cardFont",
   "cardDate", "sentenceCase", "seasonCardModel",
@@ -164,13 +164,20 @@ test("A · the hero frame is neutral until somebody is named", () => {
 
 // --- B · honours survive every compression of the season table --------------
 
+// Mixed states across every table: unchanged, up one, up two, down two, down
+// one — so no size is ever rendered with only one kind of marker. The cycle
+// starts at zero so that no player's PREVIOUS rank comes out below first.
+const seasonMove = (i) => ((i + 2) % 5) - 2;
 const seasonTable = (n) => Array.from({ length: n }, (_, i) => ({
   uid: `u${i}`, rank: i + 1, nick: `Player ${i + 1}`, pts: 200 - i * 3, exact: i % 4,
   podiums: { gold: i % 3, silver: (i + 1) % 3, bronze: (i + 2) % 3 },
-  // Mixed states across every table: down two, down one, unchanged, up one,
-  // up two — so no size is ever rendered with only one kind of marker.
-  movement: (i % 5) - 2,
+  // The worker sends both, and they agree: movement IS previousRank - rank.
+  movement: seasonMove(i),
+  previousRank: i + 1 + seasonMove(i),
 }));
+/** The same table before any second window completed: no comparison exists. */
+const seasonTableUnavailable = (n) => seasonTable(n)
+  .map((row) => ({ ...row, movement: 0, previousRank: null }));
 const seasonState = (n) => ({ code: "AAA", name: "Sunday Six", owner: "u1",
   table: seasonTable(n), currentMatchday: 8, currentMatchdayHasResults: true });
 
@@ -1044,7 +1051,7 @@ test("move · the season card takes the snapshot's own movement value", () => {
     assert.match(badge, new RegExp(`movement-${box.movementMark(row.movement).dir}`),
       `${row.nick}: the screen and the card disagree`);
   }
-  assert.match(sourceOf("seasonCardModel"), /movement: Number\(row\.movement \|\| 0\)/);
+  assert.match(sourceOf("seasonCardModel"), /movement: seasonMovement\(row\)/);
 });
 
 test("move · markers appear on every page of a paged table, once per row", () => {
@@ -1108,4 +1115,154 @@ test("move · nothing accepted moved to make room for the markers", () => {
   // The marker is a secondary figure and holds the secondary floor.
   const { m } = layoutOf(box, 20, false);
   assert.ok(m.second >= box.CARD_SECOND_FLOOR, "the marker fell below the secondary floor");
+});
+
+// --- unavailable is not zero (Adam's final semantic correction) ------------
+//
+// Two different facts that used to render identically: "nobody has measured
+// this yet" and "this player held their position". The worker has always told
+// them apart — `previousRank` is null until a second window completes — and
+// both surfaces now read that same field.
+
+/** The badge each row shows on screen, by name, or "" for no badge at all. */
+function screenBadges(box, table) {
+  const html = box.seasonTableHtml({ code: "AAA", name: "Sunday Six", owner: "u1", table },
+    false, true);
+  return table.map((row) => {
+    const cell = html.slice(html.indexOf(`. ${row.nick}<`));
+    const badge = /<span class="movement movement-(\w+)"[^>]*aria-label="([^"]+)"[^>]*>([^<]*)<\/span>/
+      .exec(cell.slice(0, cell.indexOf("</tr>")));
+    return badge ? { dir: badge[1], label: badge[2], glyph: badge[3] } : null;
+  });
+}
+
+/** The marker each row shows on the export, by name, or null for none. */
+function exportMarkers(box, table) {
+  const state = { code: "AAA", name: "Sunday Six", owner: "u1", table,
+    currentMatchday: 8, currentMatchdayHasResults: true };
+  const model = box.seasonCardModel(state);
+  const pages = box.drawSeasonTableCard(state).length;
+  // Page by page, not flattened: two pages put different players at the same
+  // y, so a flattened search hands row five of page one the marker belonging
+  // to row five of page two.
+  const made = box.__made.slice(-pages);
+  return model.rows.map((row) => {
+    const page = made.find((m) => m.marks.some((mark) => mark.text === row.nick));
+    const name = page.marks.find((m) => m.text === row.nick);
+    const mark = page.marks.find((m) => /^[▲▼–]/.test(m.text) && Math.abs(m.y - name.y) < 1);
+    return mark ? { text: mark.text, fill: mark.fill, value: row.movement } : null;
+  });
+}
+
+test("unavailable · 1 · no comparison yet means nothing, on screen and on the card", () => {
+  const box = paintBox({ leagueTab: "season" });
+  const table = seasonTableUnavailable(11);
+  // The screen draws no badge — not an empty disc holding a place.
+  assert.deepEqual(screenBadges(box, table), Array(11).fill(null),
+    "the screen reserved a badge for a comparison that does not exist");
+  const html = box.seasonTableHtml({ code: "AAA", name: "S", owner: "u1", table }, false, true);
+  assert.ok(!html.includes("movement-flat"), "an unmeasured row was given a dash");
+  assert.ok(!html.includes('class="movement'), "an empty badge was still rendered");
+  // And the export says exactly as much.
+  assert.deepEqual(exportMarkers(box, table), Array(11).fill(null),
+    "the card drew a marker with nothing to compare against");
+  const model = box.seasonCardModel({ code: "AAA", name: "S", owner: "u1", table,
+    currentMatchday: 8, currentMatchdayHasResults: true });
+  assert.ok(model.rows.every((row) => row.movement === null));
+});
+
+test("unavailable · 2 · a real comparison worth zero is a dash on both", () => {
+  const box = paintBox({ leagueTab: "season" });
+  // previousRank present and equal to rank: measured, and the player held.
+  const table = seasonTable(6).map((row) => ({ ...row, movement: 0, previousRank: row.rank }));
+  const screen = screenBadges(box, table);
+  assert.ok(screen.every((badge) => badge && badge.dir === "flat"),
+    "a measured hold lost its dash on screen");
+  assert.ok(screen.every((badge) => badge.label === "No change"));
+  const drawn = exportMarkers(box, table);
+  assert.ok(drawn.every((mark) => mark && mark.text === "–"), "a measured hold lost its dash on the card");
+  assert.ok(drawn.every((mark) => mark.value === 0), "a dash was drawn for a non-zero value");
+  assert.ok(drawn.every((mark) => mark.fill === box.CARD.muted), "the neutral marker is not neutral");
+  // The two facts are distinguishable, which is the whole point.
+  assert.notDeepEqual(screenBadges(box, seasonTableUnavailable(6)), screen);
+});
+
+test("unavailable · 3 · up and down match, glyph for glyph, across both", () => {
+  const box = paintBox({ leagueTab: "season" });
+  const table = seasonTable(11);
+  const screen = screenBadges(box, table);
+  const drawn = exportMarkers(box, table);
+  table.forEach((row, i) => {
+    const mark = box.movementMark(row.movement);
+    assert.ok(screen[i], `${row.nick}: no badge on screen`);
+    assert.equal(screen[i].dir, mark.dir, `${row.nick}: the screen shows a different direction`);
+    assert.equal(screen[i].glyph, mark.glyph, `${row.nick}: the screen shows a different glyph`);
+    assert.equal(drawn[i].text[0], mark.glyph, `${row.nick}: the card shows a different glyph`);
+    // Magnitude is visible on the card, and spoken on the screen.
+    if (mark.magnitude) {
+      assert.equal(drawn[i].text, mark.glyph + mark.magnitude, `${row.nick}: no magnitude`);
+      assert.match(screen[i].label, new RegExp(`${mark.magnitude} place`), `${row.nick}: no magnitude spoken`);
+    }
+    assert.equal(drawn[i].fill,
+      box.CARD[{ up: "rise", down: "fall", flat: "muted" }[mark.dir]], `${row.nick}: wrong colour`);
+  });
+  // Every state is present, so this is not three tests of one case.
+  assert.equal(new Set(screen.map((b) => b.dir)).size, 3, "the fixture does not cover all three states");
+});
+
+test("unavailable · 4 · mixed and multi-page season tables agree row for row", () => {
+  for (const [members, pages] of [[11, 1], [20, 1], [21, 2], [30, 2], [40, 2], [60, 3]]) {
+    const box = paintBox({ leagueTab: "season" });
+    // A mixture on purpose: most rows measured, every fifth with no comparison.
+    const table = seasonTable(members)
+      .map((row, i) => (i % 5 === 4 ? { ...row, movement: 0, previousRank: null } : row));
+    const screen = screenBadges(box, table);
+    const drawn = exportMarkers(box, table);
+    assert.equal(drawn.length, members, `${members}: a row lost its place`);
+    const state = { code: "AAA", name: "Sunday Six", owner: "u1", table,
+      currentMatchday: 8, currentMatchdayHasResults: true };
+    assert.equal(box.drawSeasonTableCard(state).length, pages, `${members}: pagination moved`);
+    table.forEach((row, i) => {
+      const value = box.seasonMovement(row);
+      if (value == null) {
+        assert.equal(screen[i], null, `${members}/${row.nick}: screen marked an unmeasured row`);
+        assert.equal(drawn[i], null, `${members}/${row.nick}: card marked an unmeasured row`);
+        return;
+      }
+      const mark = box.movementMark(value);
+      assert.equal(screen[i].dir, mark.dir, `${members}/${row.nick}: screen`);
+      assert.equal(drawn[i].text[0], mark.glyph, `${members}/${row.nick}: card`);
+    });
+    // Both surfaces suppressed exactly the same rows, and some but not all.
+    const blankScreen = screen.filter((b) => b === null).length;
+    const blankCard = drawn.filter((m) => m === null).length;
+    assert.equal(blankScreen, blankCard, `${members}: the surfaces suppressed different rows`);
+    assert.ok(blankCard > 0 && blankCard < members, `${members}: the fixture is not mixed`);
+  }
+});
+
+test("unavailable · 5 · nothing else moved: layout, paging, floors, or words", () => {
+  const box = paintBox({ leagueTab: "season" });
+  for (const [members, pages] of [[11, 1], [20, 1], [21, 2], [30, 2], [40, 2], [60, 3]]) {
+    const { m, k } = layoutOf(box, members, false);
+    assert.equal(m.pages, pages, `${members}: pagination moved`);
+    assert.ok(m.rowsPerPage <= box.CARD_SEASON_MAX_ROWS, `${members}: the cap moved`);
+    assert.equal(k, 1, `${members}: a page is being scaled`);
+    assert.ok(Math.min(m.name, m.number, m.points) >= box.CARD_TYPE_FLOOR, `${members}: type floor`);
+    assert.ok(Math.min(m.second, m.honoursSize) >= box.CARD_SECOND_FLOOR, `${members}: second floor`);
+  }
+  // The season table keeps its columns whether or not any badge is rendered.
+  const empty = box.seasonTableHtml({ code: "AAA", name: "S", owner: "u1",
+    table: seasonTableUnavailable(4) }, false, true);
+  const full = box.seasonTableHtml({ code: "AAA", name: "S", owner: "u1",
+    table: seasonTable(4) }, false, true);
+  const cells = (html) => (html.match(/<td/g) || []).length;
+  assert.equal(cells(empty), cells(full), "a suppressed badge took its column with it");
+  // Accessibility: every rendered badge still names itself in words.
+  for (const badge of screenBadges(box, seasonTable(11))) {
+    assert.ok(badge.label && /^(Up|Down|No change)/.test(badge.label), `bad label: ${badge.label}`);
+  }
+  // The weekly card is untouched by a season-only correction.
+  assert.ok(!sourceOf("weeklyCardModel").includes("seasonMovement"), "the weekly model changed");
+  assert.match(sourceOf("weeklyCardModel"), /movement\.has\(row\.uid\)/, "the weekly rule changed");
 });

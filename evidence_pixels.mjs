@@ -27,7 +27,7 @@ const FUNCTIONS = ["roundedRect", "fitText", "ellipsise", "drawFitted", "cardCan
   "weeklyShareStatus", "weeklyTerminalCount", "weeklySharePublished", "podiumCounts",
   "sharedRankByUid", "winnerNames", "seasonShareFreshness", "seasonCardPages", "drawSeasonPage", "drawSeasonTableCard",
   "weeklyCardPages", "drawWeeklyPage", "drawWeeklyResultCard", "finalScore", "weeklyCardCaption", "noteWeeklyFinalMismatch"];
-const CONSTS = ["slateIdsOf", "CARD_MOVE_COLOUR", "CARD_W", "CARD_W_PX", "CARD_H_PX", "CARD_PAD", "CARD", "CARD_COL",
+const CONSTS = ["slateIdsOf", "seasonMovement", "CARD_MOVE_COLOUR", "CARD_W", "CARD_W_PX", "CARD_H_PX", "CARD_PAD", "CARD", "CARD_COL",
   "CARD_HEAD_H", "CARD_HERO_H", "CARD_TABLE_HEAD_H", "CARD_ROW_H", "CARD_SEASON_ROW_H",
   "CARD_SEASON_MAX_ROWS", "CARD_ROW_TWO_LINE", "CARD_TABLE_LEAD", "CARD_MOVE_GAP",
   "CARD_FOOT_H", "CARD_GAP", "cardFont", "cardDate",
@@ -87,9 +87,12 @@ const players = (n) => Array.from({ length: n }, (_, i) => ({
     "Zed","Ash","Bo","Cleo","Dax","Eve","Finn","Gil","Hux","Iris","Jax","Kaya","Loz","Moss",
     "Nell"][i] || ("Player " + (i + 1)),
   pts: 92 - i * 3, exact: (i * 2) % 5,
-  // Down two, down one, unchanged, up one, up two — repeating, so no rendered
-  // season table is ever all one marker.
-  movement: (i % 5) - 2,
+  // Unchanged, up one, up two, down two, down one — repeating, so no rendered
+  // season table is ever all one marker. The cycle starts at zero so that no
+  // player's PREVIOUS rank comes out below first.
+  movement: ((i + 2) % 5) - 2,
+  // What tells a measured hold apart from a table nobody has measured yet.
+  previousRank: i + 1 + (((i + 2) % 5) - 2),
   podiums: HEAVY
     ? { gold: 12 - (i % 3), silver: 10 + (i % 4), bronze: 11 + (i % 2) }
     : { gold: i % 3, silver: (i + 1) % 3, bronze: (i + 2) % 3 },
@@ -111,6 +114,12 @@ const SCENE = {
   "weekly-final-30": () => drawWeeklyResultCard(league, week(3, windows(players(30)), FINAL(30))),
   "weekly-final-40": () => drawWeeklyResultCard(league, week(3, windows(players(40)), FINAL(40))),
   "season-6": () => drawSeasonTableCard(seasonState(6)),
+  // Before a second window completes there is no comparison, so the column is
+  // empty rather than a stack of dashes claiming everybody held position.
+  "season-11-no-comparison-yet": () => drawSeasonTableCard({
+    ...seasonState(11),
+    table: players(11).map((p) => ({ ...p, movement: 0, previousRank: null })),
+  }),
   "season-11": () => drawSeasonTableCard(seasonState(11)),
   "season-20": () => drawSeasonTableCard(seasonState(20)),
   "season-21-paged": () => drawSeasonTableCard(seasonState(21)),
@@ -129,7 +138,7 @@ const FINAL_MEMBERS = { "weekly-final-6": 6, "weekly-final-11": 11, "weekly-fina
 const WEEKLY_MEMBERS = { "weekly-not-started": 6, "weekly-in-progress-with-void": 6,
   "weekly-final-6": 6, "weekly-final-11": 11, "weekly-final-20": 20, "weekly-final-30": 30,
   "weekly-final-40": 40 };
-const SEASON_MEMBERS = { "season-6": 6, "season-11": 11, "season-20": 20, "season-21-paged": 21,
+const SEASON_MEMBERS = { "season-6": 6, "season-11": 11, "season-11-no-comparison-yet": 11, "season-20": 20, "season-21-paged": 21,
   "season-30-paged": 30, "season-40-paged": 40, "season-60-paged": 60,
   "season-30-two-digit-honours": 30 };
 const HEAVY_SCENES = new Set(["season-30-two-digit-honours"]);
@@ -548,7 +557,7 @@ try {
       hero: weekly ? (name === "weekly-not-started" ? "bare" : "trophy") : null,
       // Every season table carries mixed movement; the weekly ones do from the
       // moment a window has completed, which the not-started scene has not.
-      movers: !weekly || name.startsWith("weekly-final"),
+      movers: (!weekly && !name.includes("no-comparison")) || name.startsWith("weekly-final"),
       contentHeight: m.contentHeight,
       metrics: { m, k: place(m.contentHeight).k },
       podium: FINAL_MEMBERS[name] ? "none" : null,

@@ -130,6 +130,7 @@ function cards({ native = false } = {}) {
     ${lift("function drawCardRowRule(ctx, y)")}
     ${lift("function drawCardRowPlate(ctx, y, height, index, place)")}
     ${lift("function movementMark(value)")}
+    ${liftConst("seasonMovement")}
     ${liftConst("slateIdsOf")}
     ${liftConst("VOID_STATUSES")}
     ${liftConst("isVoidFixture")}

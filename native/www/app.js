@@ -1,6 +1,6 @@
 const SEASON_START = new Date("2026-08-21T20:00:00+01:00");
 const SEASON_START_DATE = "2026-08-21";
-const APP_BUILD = "20260908a";
+const APP_BUILD = "20260908b";
 const API = window.PREM_API || null;
 // Canonical public home of the web app. Inside the Capacitor shell the page is
 // served from premoracle://localhost, so location.origin can never be used to
@@ -4293,6 +4293,12 @@ const CARD = {
 };
 const CARD_HEAD_H = 190;
 const CARD_HERO_H = 220;
+// The hero compacts when the table needs the room, and no further: below this
+// the eyebrow, the champion and the state line stop being a hero and become a
+// caption. It is a floor on a calculation, not a cutoff at a member count.
+const CARD_HERO_MIN = 150;
+// One straight line under a row, the full width of the table.
+const CARD_RULE_H = 2;
 const CARD_TABLE_HEAD_H = 56;
 const CARD_ROW_H = 74;
 // The floors Sol set for an exported table, in post-transform pixels: names,
@@ -4396,6 +4402,33 @@ function cardRowMetrics(rows, { chrome, base, min = CARD_MIN_ROW }) {
   };
 }
 
+/**
+ * The weekly card's hero height and its table's shape, solved together.
+ *
+ * A weekly card carries a hero the season card does not, and that hero was a
+ * fixed 220px — which is why eleven members split into two attachments while
+ * the same eleven fitted one season square. The hero is generous when the
+ * table leaves room for it and compact when the table needs the room, down to
+ * a floor where it still reads.
+ *
+ * Nothing here is a member count. The hero is whatever is left after a table
+ * drawn at the row floor, bounded; the table is then measured against it; and
+ * a card that ends up paged re-sizes its hero for the rows ONE page actually
+ * carries rather than for the whole membership.
+ */
+function weeklyCardGeometry(rows) {
+  const fixed = CARD_HEAD_H + CARD_GAP + CARD_GAP + CARD_TABLE_HEAD_H + CARD_GAP + CARD_FOOT_H;
+  const heroFor = (count) => Math.max(CARD_HERO_MIN,
+    Math.min(CARD_HERO_H, CARD_SIDE - fixed - count * CARD_MIN_ROW));
+  let hero = heroFor(rows);
+  let m = cardRowMetrics(rows, { chrome: fixed + hero, base: CARD_ROW_H });
+  if (m.pages > 1) {
+    hero = heroFor(m.rowsPerPage);
+    m = cardRowMetrics(rows, { chrome: fixed + hero, base: CARD_ROW_H });
+  }
+  return { hero, chrome: fixed + hero, m };
+}
+
 /** The members on one page, in rank order, each appearing on exactly one. */
 const cardPageRows = (rows, page, m) => rows.slice(page * m.rowsPerPage, (page + 1) * m.rowsPerPage);
 
@@ -4446,10 +4479,14 @@ function drawCardHeader(ctx, league, line, page = "") {
 
 // The winner, once, in gold — the one thing a mate should read from across the
 // room before they read anything else.
-function drawCardHero(ctx, y, model) {
+function drawCardHero(ctx, y, model, height = CARD_HERO_H) {
   const centre = CARD_W / 2;
   const claimed = !!model.heroName;
-  roundedRect(ctx, CARD_PAD, y, CARD_W - CARD_PAD * 2, CARD_HERO_H, 26);
+  // Everything inside is placed as a proportion of the height it was given, so
+  // a compacted hero is the same hero, smaller — not a clipped one.
+  const at = (share) => y + Math.round(height * share);
+  const scale = height / CARD_HERO_H;
+  roundedRect(ctx, CARD_PAD, y, CARD_W - CARD_PAD * 2, height, 26);
   ctx.fillStyle = claimed ? CARD.goldWash : CARD.row;
   ctx.fill();
   ctx.strokeStyle = claimed ? CARD.goldEdge : CARD.line;
@@ -4457,22 +4494,22 @@ function drawCardHero(ctx, y, model) {
   ctx.stroke();
   ctx.textAlign = "center";
   ctx.fillStyle = CARD.muted;
-  ctx.font = cardFont(800, 26);
-  ctx.fillText(model.heroEyebrow, centre, y + 56);
+  ctx.font = cardFont(800, Math.max(20, Math.round(26 * scale)));
+  ctx.fillText(model.heroEyebrow, centre, at(0.2545));
   // A not-started week names nobody, so it draws nobody — and no trophy either.
   // A floating cup above an empty name is a winner claim made in a picture
   // instead of in words, which is the harder one to argue with.
   if (model.heroName) {
     ctx.textAlign = "left";
-    drawFitted(ctx, `🏆 ${model.heroName}`, centre, y + 134, CARD_W - CARD_PAD * 2 - 72,
-      { max: 72, min: 32, colour: CARD.gold, align: "center" });
+    drawFitted(ctx, `🏆 ${model.heroName}`, centre, at(0.609), CARD_W - CARD_PAD * 2 - 72,
+      { max: Math.max(40, Math.round(72 * scale)), min: 32, colour: CARD.gold, align: "center" });
   }
   ctx.textAlign = "center";
   ctx.fillStyle = CARD.ink;
-  ctx.font = cardFont(800, model.heroName ? 30 : 40);
+  ctx.font = cardFont(800, Math.max(22, Math.round((model.heroName ? 30 : 40) * scale)));
   // With no name the state line is the whole hero, so it sits where the name
   // would have been rather than under a gap.
-  ctx.fillText(model.heroLine, centre, y + (model.heroName ? 184 : 140));
+  ctx.fillText(model.heroLine, centre, at(model.heroName ? 0.836 : 0.636));
   ctx.textAlign = "left";
 }
 
@@ -4489,6 +4526,28 @@ function drawCardTableHead(ctx, y) {
   ctx.textAlign = "left";
   ctx.fillStyle = CARD.line;
   ctx.fillRect(CARD_PAD, y + CARD_TABLE_HEAD_H - 10, CARD_W - CARD_PAD * 2, 2);
+}
+
+/**
+ * A weekly row's background and its divider.
+ *
+ * The season card keeps its rounded plates. The weekly card does not: a
+ * rounded plate's edge CURVES where the name column is and runs straight
+ * across the points column, so the boundary between two rows reads as two
+ * different lines at two different heights. This draws one flat band and one
+ * straight rule, once, from the row itself — the same y, the same thickness
+ * and the same colour at every x from the table's left edge to its right.
+ */
+function drawWeeklyRowBand(ctx, y, height, place) {
+  if (!place) return;
+  ctx.fillStyle = CARD.goldWash;
+  ctx.fillRect(CARD_PAD, y, CARD_W - CARD_PAD * 2, height);
+}
+
+/** The divider. One rect, full table width, constant everywhere. */
+function drawCardRowRule(ctx, y) {
+  ctx.fillStyle = CARD.line;
+  ctx.fillRect(CARD_PAD, Math.round(y), CARD_W - CARD_PAD * 2, CARD_RULE_H);
 }
 
 function drawCardRowPlate(ctx, y, height, index, place) {
@@ -4618,21 +4677,20 @@ function drawWeeklyResultCard(state, round) {
   // hero's claim in a second, larger form and left the standings it was meant
   // to introduce at eleven pixels. The screen keeps its podium; the picture
   // keeps the table, and the medals still mark the three that matter.
-  const chrome = CARD_HEAD_H + CARD_GAP + CARD_HERO_H + CARD_GAP
-    + CARD_TABLE_HEAD_H + CARD_GAP + CARD_FOOT_H;
-  const m = cardRowMetrics(model.rows.length, { chrome, base: CARD_ROW_H });
+  const { hero, chrome, m } = weeklyCardGeometry(model.rows.length);
+  void chrome;
   return Array.from({ length: m.pages }, (_, page) => {
     const { canvas, ctx } = cardCanvas(m.contentHeight);
     drawCardHeader(ctx, model.league, model.headline, cardPageLabel(page, m.pages));
-    const y = CARD_HEAD_H + CARD_GAP + CARD_HERO_H + CARD_GAP;
+    const y = CARD_HEAD_H + CARD_GAP + hero + CARD_GAP;
     const top = y + CARD_TABLE_HEAD_H;
-    drawCardHero(ctx, CARD_HEAD_H + CARD_GAP, model);
+    drawCardHero(ctx, CARD_HEAD_H + CARD_GAP, model, hero);
     drawCardTableHead(ctx, y);
-    cardPageRows(model.rows, page, m).forEach((row, index) => {
+    const rows = cardPageRows(model.rows, page, m);
+    rows.forEach((row, index) => {
       const rowTop = top + index * m.rowH;
-      const mid = rowTop + (m.rowH - 10) / 2;
-      const baseline = mid + m.points / 3;
-      drawCardRowPlate(ctx, rowTop, m.rowH, index, row.place);
+      const baseline = rowTop + m.rowH / 2 + m.points / 3;
+      drawWeeklyRowBand(ctx, rowTop, m.rowH, row.place);
       ctx.textAlign = "center";
       ctx.fillStyle = row.place ? CARD.gold : CARD.muted;
       ctx.font = cardFont(900, m.number);
@@ -4655,6 +4713,9 @@ function drawWeeklyResultCard(state, round) {
         ctx.fillText(PLACE_EMOJI[row.place], CARD_COL.medal, baseline);
       }
       ctx.textAlign = "left";
+      // One divider per row, below its own text and above the next row's —
+      // and never under the last row, where it would be a line to nowhere.
+      if (index < rows.length - 1) drawCardRowRule(ctx, rowTop + m.rowH - CARD_RULE_H);
     });
     drawCardFooter(ctx, top + m.rowsPerPage * m.rowH + CARD_GAP, model);
     return canvas;

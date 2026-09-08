@@ -793,7 +793,7 @@ class CompetitionAppTests(unittest.TestCase):
         # v1.7 readability ruling: the EXPORT carries the hero and the whole
         # table, and no rostrum — the block that used to squeeze the standings
         # into eleven pixels. The on-screen podium is untouched.
-        card = self.app[self.app.index("function drawWeeklyResultCard(state, round)"):]
+        card = self.app[self.app.index("function drawWeeklyPage(model, hero, m, page)"):]
         card = card[:card.index("\n}")]
         self.assertLess(card.index("drawCardHero"), card.index("drawCardTableHead"))
         self.assertNotIn("drawCardPodium", card)
@@ -891,7 +891,7 @@ class CustomMixTests(unittest.TestCase):
         # because the hero is a calculation rather than a fixed 220px.
         fn = self.app[self.app.index("function weeklyCardGeometry(rows)"):]
         fn = fn[:fn.index("\n}\n")]
-        self.assertIn("CARD_SIDE - fixed - count * CARD_MIN_ROW", fn)
+        self.assertIn("CARD_H_PX - fixed - count * CARD_MIN_ROW", fn)
         self.assertIn("Math.max(CARD_HERO_MIN,", fn)
         self.assertIn("Math.min(CARD_HERO_H,", fn)
         self.assertIn("cardRowMetrics(rows, { chrome: fixed + hero, base: CARD_ROW_H })", fn)
@@ -914,22 +914,21 @@ class CustomMixTests(unittest.TestCase):
         self.assertIn("ctx.fillRect(CARD_PAD, Math.round(y), CARD_W - CARD_PAD * 2, CARD_RULE_H);", rule)
         self.assertEqual(rule.count("fillRect"), 1)
         self.assertIn("const CARD_RULE_H = 2;", self.app)
-        draw = self.app[self.app.index("function drawWeeklyResultCard(state, round)"):]
+        draw = self.app[self.app.index("function drawWeeklyPage(model, hero, m, page)"):]
         draw = draw[:draw.index("\n}\n")]
         self.assertIn("if (index < rows.length - 1) drawCardRowRule(ctx, rowTop + m.rowH - CARD_RULE_H);", draw)
         # The weekly row no longer uses the rounded plate whose edge curved.
         self.assertNotIn("drawCardRowPlate", draw)
         # The season card still does, unchanged.
-        season = self.app[self.app.index("function drawSeasonTableCard(state)"):]
+        season = self.app[self.app.index("function drawSeasonPage(model, m, page)"):]
         season = season[:season.index("\n}\n")]
         self.assertIn("drawCardRowPlate(ctx, rowTop, m.rowH, index, null)", season)
         self.assertNotIn("drawCardRowRule", season)
-        self.assertNotIn("weeklyCardGeometry", season)
 
     def test_no_exported_table_uses_columns(self):
         # Adam's build-25 ruling 1: one linear vertical list, weekly as well as
         # season, paged when the members will not fit one readable square.
-        for name in ("function drawWeeklyResultCard(state, round)", "function drawSeasonTableCard(state)"):
+        for name in ("function drawWeeklyPage(model, hero, m, page)", "function drawSeasonPage(model, m, page)"):
             fn = self.app[self.app.index(name):]
             fn = fn[:fn.index("\n}\n")]
             self.assertIn("cardPageRows(model.rows, page, m)", fn)

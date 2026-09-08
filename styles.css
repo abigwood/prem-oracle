@@ -2185,3 +2185,7 @@ body.picker-open { overflow: hidden; }
 }
 .share-icon:active { background: var(--purple-soft); }
 .share-icon:focus-visible { outline: 2px solid var(--purple); outline-offset: 2px; }
+/* Published, but the week's table is not in hand yet. The control keeps its
+   place so nothing moves under a finger when it arrives, and plainly cannot be
+   pressed — an icon that looks ready before it is would be worse than absent. */
+.share-icon[disabled] { color: var(--muted); cursor: default; opacity: .55; }

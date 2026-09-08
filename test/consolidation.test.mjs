@@ -181,6 +181,8 @@ test("N11 · the target is 44x44 and cannot wrap or collide", () => {
   // A fixed square cannot reflow with the text size, so a larger setting moves
   // the layout around it rather than through it.
   assert.ok(!/font-size/.test(icon), "the control is sized by text");
+  // The loading state keeps the same box, so nothing moves when it enables.
+  assert.match(CSS, /\.share-icon\[disabled\] \{[^}]*cursor: default/);
   for (const row of [".pick-share", ".season-share"]) {
     const block = CSS.slice(CSS.indexOf(`${row} {`), CSS.indexOf("}", CSS.indexOf(`${row} {`)));
     assert.match(block, /display: flex/);

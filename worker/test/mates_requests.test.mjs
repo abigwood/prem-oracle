@@ -73,6 +73,7 @@ function loaders({ delays = {}, cachedRounds = {}, horizon = null } = {}) {
     ${lift("function matesUsable(state)")}
     // v1.7 consolidation: a league change also closes the open pick row.
     let expandedPickId = null;
+    const forgetPicksRound = () => {};
     ${lift("function forgetMatesState()")}
     ${lift("function lockHorizonOf(state)")}
     ${lift("function cacheRoundState(code, period, state)")}
@@ -287,6 +288,7 @@ function switching({ seasonDelay = 0, roundDelay = 0, cachedRounds = {}, cachedL
     ${liftLine("const matesPeriod =")}
     ${lift("function matesUsable(state)")}
     ${lift("function currentRoundReveal()")}
+    const forgetPicksRound = () => {};
     ${lift("function forgetMatesState()")}
     ${lift("function hydrateMatesState()")}
     ${lift("function lockHorizonOf(state)")}

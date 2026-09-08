@@ -181,6 +181,7 @@ function makeDom() {
     set textContent(v) { this._text = String(v); this.children = []; }
     setAttribute(k, v) { this.attrs[k] = String(v); }
     getAttribute(k) { return this.attrs[k] ?? null; }
+    removeAttribute(k) { delete this.attrs[k]; }
     get firstElementChild() { return this.children[0] ?? null; }
     append(...nodes) { for (const n of nodes) { n.parent = this; this.children.push(n); } }
     replaceChildren(...nodes) {
@@ -554,7 +555,10 @@ test("the share label always matches the visible tab", () => {
   const fn = lift("function syncShareLabel()");
   assert.match(fn, /shareCardState\(button\.dataset\.shareSurface \|\| undefined\)/);
   // An icon-only control is hidden when it cannot act, rather than shown greyed.
-  assert.match(fn, /button\.hidden = !!hidden \|\| !ready;/);
+  assert.match(fn, /button\.hidden = !!hidden \|\| \(!ready && !loading\);/);
+  // The name and the ability to act change together.
+  assert.match(fn, /button\.disabled = !ready;/);
+  assert.match(fn, /button\.setAttribute\("aria-busy", "true"\)/);
   assert.match(fn, /button\.setAttribute\("aria-label", label\)/);
   const which = lift("function shareCardState(surface = shareSurface())");
   assert.match(which, /surface === "weekly"/);

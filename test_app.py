@@ -853,6 +853,52 @@ class CustomMixTests(unittest.TestCase):
         # "All" is a stored intent on the worker too, never inferred.
         self.assertIn("FIXTURE_MODES.includes(requestedMode)", self.worker)
 
+    def test_my_picks_shows_its_share_control_from_publication(self):
+        # Adam's build-25 ruling 2: once the host has published, the control is
+        # on My Picks whether or not this device has ever opened League.
+        state = self.app[self.app.index("function shareCardState(surface = shareSurface())"):]
+        state = state[:state.index("\n}")]
+        self.assertIn('if (normaliseView(currentView) === "picks" && matchweekSlate()) {', state)
+        self.assertIn("return { ready: false, loading: true,", state)
+        # Visible while loading, and honestly disabled.
+        button = self.app[self.app.index("function shareIconButton(state, surface = shareSurface())"):]
+        button = button[:button.index("\n}")]
+        self.assertIn("if (share.hidden || (!share.ready && !share.loading)) return \"\";", button)
+        self.assertIn("const busy = !share.ready;", button)
+        self.assertIn('busy ? \' disabled aria-disabled="true" aria-busy="true"\' : ""', button)
+
+    def test_my_picks_makes_at_most_one_coalesced_round_read(self):
+        fn = self.app[self.app.index("function ensurePicksRound()"):]
+        fn = fn[:fn.index("\n}\n")]
+        # Nothing is asked when this device already holds the week.
+        self.assertIn("if (held) {", fn)
+        # An entry that finds a read already running joins it.
+        self.assertIn("const flying = picksRoundFlights.get(key);", fn)
+        self.assertIn("if (flying) return flying;", fn)
+        self.assertIn("picksRoundFlights.set(key, flight);", fn)
+        # A response for a league or week we have left is cached and dropped.
+        self.assertIn('if (code !== activeLeague || String(period) !== String(picksPeriod())) return;', fn)
+        # The paint never waits for it.
+        nav = self.app[self.app.index("async function navigateToView(requested)"):]
+        nav = nav[:nav.index("\n}\n")]
+        self.assertIn("ensurePicksRound();", nav)
+        self.assertNotIn("await ensurePicksRound", nav)
+        # And a league change drops it at once.
+        self.assertIn("forgetPicksRound();", self.app[self.app.index("function forgetMatesState()"):])
+
+    def test_no_exported_table_uses_columns(self):
+        # Adam's build-25 ruling 1: one linear vertical list, weekly as well as
+        # season, paged when the members will not fit one readable square.
+        for name in ("function drawWeeklyResultCard(state, round)", "function drawSeasonTableCard(state)"):
+            fn = self.app[self.app.index(name):]
+            fn = fn[:fn.index("\n}\n")]
+            self.assertIn("cardPageRows(model.rows, page, m)", fn)
+            self.assertIn("cardPageLabel(page, m.pages)", fn)
+            for banned in ("cardColumnBox", "cardColumnCols", "cardSlot", "m.columns", "perColumn"):
+                self.assertNotIn(banned, fn, f"{name} reaches {banned}")
+        self.assertIn("const cardPageLabel = (page, pages) =>", self.app)
+        self.assertIn("Page ${page + 1} of ${pages}", self.app)
+
     def test_a_selection_tap_updates_in_place_and_never_renders(self):
         # v1.7 UX rider B: the tap used to call render(), which rebuilds
         # #pickerLayer and throws the host back to the top of the week.

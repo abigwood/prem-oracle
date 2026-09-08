@@ -516,6 +516,7 @@ function switcher() {
     const currentRoundReveal = () => null;
     const lockHorizonOf = () => Infinity;
     const revalidateMatesAfterSwitch = async () => {};
+    const forgetPicksRound = () => {};
     ${lift("function forgetMatesState()")}
     ${lift("function hydrateMatesState()")}
     ${lift("function setActiveLeague(code, refresh = true)")}

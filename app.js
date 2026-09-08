@@ -867,6 +867,88 @@ async function loadRoundState(generation = navGeneration) {
   }
 }
 
+// --- My Picks' own weekly table --------------------------------------------
+//
+// The share control needs the week's standings. NOTHING else on My Picks does,
+// so the screen never waits for them: the fixture list paints, the control
+// paints beside it saying it is not ready, and the table arrives when it
+// arrives. One read per entry at most, and none at all when this device
+// already holds the week.
+
+/** The table My Picks holds, for its own week — never another league's. */
+let picksRound = null;
+/** key -> promise, so a re-entry joins the read already running. */
+const picksRoundFlights = new Map();
+
+const picksRoundKey = (code, period) => `${code}:${period}`;
+
+/** The week My Picks is showing: the selected league's own current period. */
+const picksPeriod = () => matchweekLeagueState()?.currentPeriod ?? null;
+
+/**
+ * Whether a payload may be My Picks' table.
+ *
+ * The same rule the mates matrix applies, for the same reason: two leagues can
+ * contain the very same fixture, so a payload has to name THIS league and THIS
+ * week before anything is drawn from it.
+ */
+function picksRoundUsable(state, code = activeLeague, period = picksPeriod()) {
+  if (!state || state.error || !code || period == null) return null;
+  if (String(state.code ?? code) !== String(code)) return null;
+  if (String(state.period ?? state.matchday) !== String(period)) return null;
+  return state.table?.length ? state : null;
+}
+
+/** A league or period change makes anything held foreign. It goes at once. */
+function forgetPicksRound() {
+  picksRound = null;
+  picksRoundFlights.clear();
+}
+
+/**
+ * The one round read My Picks is allowed, and only when it needs it.
+ *
+ * Returns the in-flight promise when there is one so a second entry joins it
+ * rather than asking again, and null when nothing was asked at all. Never
+ * awaited by the paint.
+ */
+function ensurePicksRound() {
+  const code = activeLeague;
+  const period = picksPeriod();
+  if (!code || period == null) return null;
+  // Anything this device already holds for this league and this week.
+  const held = picksRoundUsable(picksRound, code, period)
+    || picksRoundUsable(cachedRoundState(code, period), code, period)
+    || picksRoundUsable(currentRoundReveal(), code, period);
+  if (held) {
+    picksRound = held;
+    return null;
+  }
+  const key = picksRoundKey(code, period);
+  const flying = picksRoundFlights.get(key);
+  if (flying) return flying;
+  if (!API) return null;
+  const flight = fetchState(roundStatePath(code, period))
+    .then((state) => {
+      cacheRoundState(code, period, state);
+      // A response for a league or a week we have since left is worth caching
+      // and nothing else: it may not enable the control or draw a card.
+      if (code !== activeLeague || String(period) !== String(picksPeriod())) return;
+      picksRound = picksRoundUsable(state, code, period);
+      syncShareLabel();
+    })
+    .catch(() => {
+      if (code !== activeLeague || String(period) !== String(picksPeriod())) return;
+      picksRound = null;
+      syncShareLabel();
+    })
+    .finally(() => {
+      if (picksRoundFlights.get(key) === flight) picksRoundFlights.delete(key);
+    });
+  picksRoundFlights.set(key, flight);
+  return flight;
+}
+
 /** The round Mates' Picks shows: always the league's current active one. */
 const matesPeriod = () => leagueState?.currentPeriod ?? null;
 
@@ -914,6 +996,8 @@ function forgetMatesState() {
   matesState = null;
   matesRequest++;              // any in-flight read for the old league is void
   matesLockHorizon = Infinity;
+  // My Picks' own table is this league's and this week's, so it goes too.
+  forgetPicksRound();
   // The fold choice is per league and per session, and it is keyed by league,
   // so nothing needs clearing here — but the open row does, because a fixture
   // id can be shared by two leagues.
@@ -3282,14 +3366,23 @@ function mountResults() {
  */
 function syncShareLabel() {
   for (const button of document.querySelectorAll("[data-export-league-table]")) {
-    const { ready, label, hidden } = shareCardState(button.dataset.shareSurface || undefined);
-    button.hidden = !!hidden || !ready;
+    const { ready, loading, label, hidden } = shareCardState(button.dataset.shareSurface || undefined);
+    button.hidden = !!hidden || (!ready && !loading);
     if (button.hidden) continue;
     // The control is an icon; the words are its accessible name, so they are
-    // corrected here and never written into the button as text.
+    // corrected here and never written into the button as text. The name and
+    // the ability to act change together — a control that says it is ready
+    // before it can act is worse than one that is honestly still loading.
     button.setAttribute("aria-label", label);
     button.setAttribute("title", label);
-    button.disabled = false;
+    button.disabled = !ready;
+    if (ready) {
+      button.removeAttribute("aria-disabled");
+      button.removeAttribute("aria-busy");
+    } else {
+      button.setAttribute("aria-disabled", "true");
+      button.setAttribute("aria-busy", "true");
+    }
   }
 }
 
@@ -4893,12 +4986,13 @@ function seasonShareFreshness(state) {
  */
 function shareIconButton(state, surface = shareSurface()) {
   const share = shareCardState(surface);
-  if (share.hidden || !share.ready) return "";
+  if (share.hidden || (!share.ready && !share.loading)) return "";
+  const busy = !share.ready;
   // Icon only. The label is the accessible name and the tooltip — never text
   // beside the glyph, which is what wrapped and collided at narrow widths and
   // large text. One component, so Weekly, Season and My Picks cannot drift.
   return `<button class="share-icon" type="button" data-export-league-table="${escapeHTML(state.code)}"
-    data-share-surface="${escapeHTML(surface || "")}"
+    data-share-surface="${escapeHTML(surface || "")}"${busy ? ' disabled aria-disabled="true" aria-busy="true"' : ""}
     aria-label="${escapeHTML(share.label)}" title="${escapeHTML(share.label)}">
     <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" width="22" height="22">
       <path d="M12 3.5 8.5 7l1.4 1.4L11 7.3V15h2V7.3l1.1 1.1L15.5 7 12 3.5Z" fill="currentColor"/>
@@ -4952,7 +5046,13 @@ function shareSurface() {
  */
 function shareRound(surface = shareSurface()) {
   if (surface !== "weekly") return null;
-  return normaliseView(currentView) === "picks" ? currentRoundReveal() : roundState;
+  if (normaliseView(currentView) !== "picks") return roundState;
+  // Whatever My Picks legitimately holds for its own week, in the order it
+  // becomes available: the read it made, this device's cache, the matrix.
+  const period = picksPeriod();
+  return picksRoundUsable(picksRound, activeLeague, period)
+    || picksRoundUsable(cachedRoundState(activeLeague, period), activeLeague, period)
+    || picksRoundUsable(currentRoundReveal(), activeLeague, period);
 }
 
 /** The period a weekly card must agree with: the one the screen is showing. */
@@ -4981,16 +5081,19 @@ function shareCardState(surface = shareSurface()) {
     const period = sharePeriod(surface);
     const slate = weeklySharePublished(round, period);
     const ready = !!(slate && round && !round.error && round.table?.length);
-    if (round?.matchday != null) {
-      return ready
-        ? { ready: true, label: `Share Matchweek ${round.matchday} standings` }
-        : { ready: false, label: `Matchweek ${round.matchday} standings are still loading` };
+    if (ready && round?.matchday != null) {
+      return { ready: true, label: `Share Matchweek ${round.matchday} standings` };
     }
     // A mixed league has no matchweek number, so it is named in its own terms.
     const week = periodLabel(round?.period ?? period);
-    return ready
-      ? { ready: true, label: `Share ${week} standings` }
-      : { ready: false, label: `${week} standings are still loading` };
+    if (ready) return { ready: true, label: `Share ${week} standings` };
+    // On My Picks the control belongs to the published week itself, not to a
+    // table we happen to hold: it appears the moment the host publishes, and
+    // says honestly that it is not ready to act yet.
+    if (normaliseView(currentView) === "picks" && matchweekSlate()) {
+      return { ready: false, loading: true, label: `${week} standings are still loading` };
+    }
+    return { ready: false, label: `${week} standings are still loading` };
   }
   return {
     ready: !!leagueState?.table?.length,
@@ -6211,13 +6314,19 @@ async function navigateToView(requested) {
     prefetchLeagueStates();
   }
   if (currentView === "picks") {
-    // My Predictions is sectioned by league, so it needs every league's
-    // line-up — and the fixtures behind any competition the active league
-    // does not itself play.
+    // Started, not awaited: the fixture list is what this screen is for, and
+    // it does not wait on a table only the share control needs.
+    ensurePicksRound();
+    // My Picks needs the selected league's line-up — and the fixtures behind
+    // any competition the active league does not itself play.
     await prefetchLeagueStates();
     await loadFixturesForLeagues();
     if (!navCurrent(generation, view)) return;
     render();
+    // The league's own state may only now have named the current period, so
+    // the read gets its one chance with the week it was waiting for. Already
+    // holding it, or already asking, both answer here without a second read.
+    ensurePicksRound();
   }
 }
 

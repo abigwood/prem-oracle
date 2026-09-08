@@ -7,7 +7,7 @@
 // drawCard* functions and records every mark they make.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { APP, load } from "./harness.mjs";
+import { APP, load, sourceOf } from "./harness.mjs";
 
 /** A canvas that keeps every text draw, in order, with where it landed. */
 function recorder() {
@@ -487,4 +487,67 @@ test("pages · forty members hold every floor, across three squares", () => {
   assert.equal(k, 1);
   assert.ok(Math.min(m.name, m.number, m.points) * k >= box.CARD_TYPE_FLOOR);
   assert.ok(Math.min(m.second, m.honoursSize) * k >= box.CARD_SECOND_FLOOR);
+});
+
+// --- the weekly export pages too (Adam's build-25 ruling 1) -----------------
+
+test("pages · a weekly export is one list, paged, with every member once", () => {
+  const box = paintBox();
+  for (const members of [1, 6, 11, 20, 30]) {
+    const round = weekRound(3, six(6), { complete: true,
+      table: Array.from({ length: members }, (_, i) => ({
+        uid: `w${i}`, rank: i + 1, nick: `Player ${i + 1}`, pts: 90 - i * 2, exact: i % 4 })) });
+    const canvases = box.drawWeeklyResultCard(weeklyState, round);
+    const { m } = layoutOf(box, members, true);
+    assert.equal(canvases.length, m.pages, `${members}: wrong page count`);
+    for (const canvas of canvases) {
+      assert.equal(canvas.width, 1080);
+      assert.equal(canvas.height, 1080);
+    }
+    // Every member drawn exactly once, in rank order, across the pages.
+    const model = box.weeklyCardModel(weeklyState, round);
+    const paged = Array.from({ length: m.pages }, (_, page) => box.cardPageRows(model.rows, page, m));
+    const flat = paged.flat();
+    assert.equal(flat.length, members, `${members}: a member was lost or duplicated`);
+    assert.deepEqual(flat.map((row) => row.nick), model.rows.map((row) => row.nick),
+      `${members}: the ranking was reordered`);
+    assert.ok(Math.min(m.name, m.number, m.points) >= box.CARD_TYPE_FLOOR,
+      `${members}: a weekly page fell below the type floor`);
+    assert.equal(Math.min(1, box.CARD_SIDE / m.contentHeight), 1,
+      `${members}: a weekly page was shrunk to fit`);
+  }
+});
+
+test("pages · every weekly page repeats the hero, the headings and its number", () => {
+  const box = paintBox();
+  const round = weekRound(3, six(6), { complete: true,
+    podium: [{ uid: "w0", place: "gold", nick: "Player 1", pts: 90 }],
+    table: Array.from({ length: 20 }, (_, i) => ({
+      uid: `w${i}`, rank: i + 1, nick: `Player ${i + 1}`, pts: 90 - i * 2, exact: i % 4 })) });
+  const canvases = box.drawWeeklyResultCard(weeklyState, round);
+  assert.equal(canvases.length, 2);
+  const pages = box.__made.slice(-2).map((made) => made.marks.map((mark) => mark.text));
+  pages.forEach((drawn, index) => {
+    assert.ok(drawn.includes("PLAYER"), `page ${index + 1} lost its headings`);
+    assert.ok(drawn.includes("Sunday Six"), `page ${index + 1} lost the league name`);
+    assert.ok(drawn.some((text) => text.startsWith("\u{1F3C6} ")), `page ${index + 1} lost the champion`);
+    assert.ok(drawn.includes(`Page ${index + 1} of 2`), `page ${index + 1} is not numbered`);
+  });
+  // Ten and ten, in order, with nothing repeated between the pages.
+  const named = pages.map((drawn) => drawn.filter((text) => /^Player \d+$/.test(text)));
+  assert.equal(named[0].length, 10);
+  assert.equal(named[1].length, 10);
+  assert.equal(new Set([...named[0], ...named[1]]).size, 20, "a member appears on both pages");
+});
+
+test("pages · no exported table uses side-by-side columns, weekly or season", () => {
+  for (const fn of ["drawWeeklyResultCard", "drawSeasonTableCard"]) {
+    const src = sourceOf(fn);
+    for (const banned of ["cardColumnBox", "cardColumnCols", "cardSlot", "drawCardTableColumns",
+      "m.columns", "perColumn", "slot.box", "slot.cols"]) {
+      assert.ok(!src.includes(banned), `${fn} reaches ${banned}`);
+    }
+    assert.match(src, /cardPageRows\(model\.rows, page, m\)/, `${fn} does not page`);
+    assert.match(src, /cardPageLabel\(page, m\.pages\)/, `${fn} does not number its pages`);
+  }
 });

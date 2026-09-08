@@ -33,6 +33,7 @@ const NAMES = ["matchweekLeagueState", "matchweekLeagueName", "matchweekSlate", 
   "resultCard", "resultState", "resultPickLine", "resultBadge", "isSettledCard",
   "pickRowBody", "pickRowLabel", "pickJustSaved", "pickListState", "pickShareRow",
   "shareSurface", "shareRound", "sharePeriod", "normaliseView", "LEGACY_VIEWS",
+  "picksPeriod", "picksRoundUsable",
   "scorePickLocal", "RESULT_FIRST_STATES",
   "weeklyTerminalCount", "weeklyShareStatus", "seasonShareFreshness", "shareIconButton",
   "weeklySharePublished",
@@ -53,7 +54,8 @@ const leagueState = (ids) => ({
 const BASE = {
   leagueNames: {}, expandedPickId: null,
   currentView: "picks", currentRoundReveal: () => null, matesState: null,
-  leagueSupportsRounds: () => true,
+  leagueSupportsRounds: () => true, picksRound: null, picksRoundFlights: new Map(),
+  cachedRoundState: () => null, roundStates: {}, API: null,
   matchweekCountMismatches: new Map(),
   periodLabel: (p) => "Matchweek " + p,
   pulsingStatus: (m) => '<p class="pulse">' + m + "</p>",
@@ -215,12 +217,29 @@ const seasonControl = world({
 });
 console.log("  SEASON (League page, under the standings):");
 console.log(seasonControl.shareIconButton({ code: "AAA" }, "season").trim());
+// My Picks shows the control from publication. Cold, it says it is loading and
+// cannot be pressed; when the table lands it enables, atomically.
+const loadingControl = world({
+  currentView: "picks", selectedPeriod: "7",
+  picksRound: null, picksRoundFlights: new Map(), currentRoundReveal: () => null,
+});
+console.log("\n  WEEKLY (My Picks, cold — published, table not yet in hand):");
+console.log(loadingControl.shareIconButton({ code: "AAA" }, "weekly").trim()
+  || "  (nothing rendered — this would be the defect)");
 const weekControl = world({
   currentView: "picks", selectedPeriod: "7",
+  picksRound: null, picksRoundFlights: new Map(),
   currentRoundReveal: () => round(7, six(6), true),
 });
-console.log("\n  WEEKLY (My Picks, under the list):");
-console.log(weekControl.shareIconButton({ code: "AAA" }, "weekly").trim() || "  (hidden: this device holds no table for the week)");
+console.log("\n  WEEKLY (My Picks, table in hand):");
+console.log(weekControl.shareIconButton({ code: "AAA" }, "weekly").trim() || "  (hidden)");
+const unpublished = world({
+  currentView: "picks", selectedPeriod: "7", leagueState: leagueState(null),
+  picksRound: null, picksRoundFlights: new Map(), currentRoundReveal: () => null,
+});
+console.log("\n  WEEKLY (My Picks, before the host publishes):");
+console.log(unpublished.shareIconButton({ code: "AAA" }, "weekly").trim()
+  || "  (no control at all — there is no week to export yet)");
 
 
 // --- the SQUARE cards, as geometry ------------------------------------------

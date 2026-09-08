@@ -12,6 +12,7 @@ import { APP, load, sourceOf } from "./harness.mjs";
 /** A canvas that keeps every text draw, in order, with where it landed. */
 function recorder() {
   const marks = [];
+  const fills = [];
   const state = { font: "", fillStyle: "", textAlign: "left" };
   const ctx = new Proxy({
     fillText: (t, x, y) => marks.push({ text: String(t), x, y, font: state.font,
@@ -19,7 +20,11 @@ function recorder() {
     // Width follows the font actually set, the way a real canvas does. A flat
     // 12px a character makes every name look too long and every tally too wide.
     measureText: (t) => ({ width: String(t).length * (Number(/(\d+)px/.exec(state.font)?.[1] || 24) * 0.58) }),
-    setTransform: () => {}, fillRect: () => {}, save: () => {}, restore: () => {},
+    setTransform: () => {},
+    // Recorded, not discarded: rules and bands are drawn with fillRect, and a
+    // boundary the eye relies on has to be assertable.
+    fillRect: (x, y, w, h) => fills.push({ x, y, w, h, fill: state.fillStyle }),
+    save: () => {}, restore: () => {},
     beginPath: () => {}, closePath: () => {}, moveTo: () => {}, lineTo: () => {},
     arcTo: () => {}, arc: () => {}, fill: () => {}, stroke: () => {}, clip: () => {},
     rect: () => {}, translate: () => {}, scale: () => {},
@@ -30,10 +35,10 @@ function recorder() {
   });
   const canvas = { width: 0, height: 0, getContext: () => ctx,
     toDataURL: () => "data:image/png;base64,AAAA" };
-  return { canvas, ctx, marks };
+  return { canvas, ctx, marks, fills };
 }
 
-const NAMES = ["seasonCardPages", "drawSeasonPage", "drawSeasonTableCard", "weeklyCardPages", "drawWeeklyPage", "drawWeeklyResultCard", "drawCardHeader", "drawCardHero", "drawCardTableHead", "drawCardRowPlate", "drawWeeklyRowBand",
+const NAMES = ["seasonCardPages", "drawSeasonPage", "drawSeasonTableCard", "weeklyCardPages", "drawWeeklyPage", "drawWeeklyResultCard", "drawCardHeader", "drawCardHero", "drawCardTableHead", "drawCardCellSplit", "drawCardRowPlate", "drawWeeklyRowBand",
   "drawCardRowRule", "weeklyCardGeometry", "drawCardHonours", "drawCardFooter",
   "drawFitted", "fitText", "ellipsise", "roundedRect", "cardCanvas", "cardRowMetrics", "cardFont",
   "cardDate", "sentenceCase", "seasonCardModel",
@@ -42,7 +47,7 @@ const NAMES = ["seasonCardPages", "drawSeasonPage", "drawSeasonTableCard", "week
   "cardPageRows", "cardPageLabel", "cardTableTop", "CARD_MIN_NAME", "weeklySharePublished", "shareCardState", "seasonShareFreshness", "shareIconButton",
   "podiumCounts", "weeklyRanks", "sharedRankByUid", "winnerNames", "noteWeeklyFinalMismatch",
   "weeklyFinalMismatchLines", "finalScore", "isVoidFixture", "isPostponed", "VOID_STATUSES",
-  "CARD_TYPE_FLOOR", "CARD_SECOND_FLOOR", "CARD_MIN_ROW", "cardHonoursWidth", "cardHonoursFit", 
+  "CARD_TYPE_FLOOR", "CARD_SECOND_FLOOR", "CARD_MIN_ROW", "cardHonoursWidth", "cardHonoursSize", "CARD_SEASON_MAX_ROWS", "CARD_ROW_TWO_LINE", "CARD_TABLE_LEAD", 
   "CARD", "CARD_W", "CARD_W_PX", "CARD_H_PX", "CARD_PAD", "CARD_COL", "CARD_HEAD_H", "CARD_HERO_H",
   "CARD_HERO_MIN", "CARD_RULE_H", "weeklyCardGeometry", "drawWeeklyRowBand", "drawCardRowRule",
   "CARD_TABLE_HEAD_H", "CARD_ROW_H", "CARD_SEASON_ROW_H", "CARD_FOOT_H", "CARD_GAP", "PLACE_NUMBER"];
@@ -189,19 +194,31 @@ for (const [label, members] of [["common", 8], ["maximum", 30]]) {
 test("B · honours are on the row, whichever way the row is laid out", () => {
   const box = paintBox({ leagueTab: "season" });
   const chrome = box.CARD_HEAD_H + box.CARD_GAP + box.CARD_TABLE_HEAD_H + box.CARD_GAP + box.CARD_FOOT_H;
-  const roomy = box.cardRowMetrics(8, { chrome, base: box.CARD_SEASON_ROW_H });
-  const tight = box.cardRowMetrics(30, { chrome, base: box.CARD_SEASON_ROW_H });
-  assert.equal(roomy.honoursLine, true, "a roomy row gives honours their own line");
-  assert.equal(tight.honoursLine, false, "a tight row cannot afford a second line");
+  const opts = { chrome, base: box.CARD_SEASON_ROW_H, maxPerPage: box.CARD_SEASON_MAX_ROWS };
+  const roomy = box.cardRowMetrics(8, opts);
+  const tight = box.cardRowMetrics(30, opts);
+  // The cap is what makes the two-line Player cell unconditional: no season
+  // size can produce a row too short to carry a name and a tally beneath it.
+  for (const members of [1, 6, 11, 20, 21, 30, 40, 60, 90, 200]) {
+    const m = box.cardRowMetrics(members, opts);
+    assert.ok(m.rowsPerPage <= box.CARD_SEASON_MAX_ROWS, `${members}: a page exceeded the cap`);
+    assert.equal(m.twoLine, true, `${members}: a row was too short for its own tally`);
+    assert.ok(m.honoursSize >= box.CARD_SECOND_FLOOR, `${members}: the tally fell below the floor`);
+  }
   assert.ok(tight.honoursSize >= 13, "the compact tally is still a readable size");
-  // Laid out beside the name rather than under it, and never over it.
+  assert.ok(roomy.rowH >= tight.rowH, "a smaller table did not get roomier rows");
+  // Laid out beneath the name, inside the same cell.
   const box2 = paintBox({ leagueTab: "season" });
   const pages = box2.drawSeasonTableCard(seasonState(30)).length;
   const marks = box2.__made.slice(-pages).flatMap((made) => made.marks);
   const tally = marks.find((m) => /^🏆 \d+$/.test(m.text));
   const name = marks.find((m) => m.text === "Player 1");
   assert.ok(tally && name, "both the name and the tally are drawn");
-  assert.ok(tally.x > name.x, "the compact tally sits to the right of the name column");
+  // One cell, two lines: the tally shares the name's left edge and sits below
+  // it, so it reads as that player's record rather than as a loose number.
+  assert.equal(tally.x, name.x, "the tally left the name's column");
+  assert.ok(tally.y > name.y, "the tally is not beneath the name");
+  assert.ok(tally.x < box2.CARD_COL.split, "the tally crossed into the scoring columns");
 });
 
 test("B · a member with no honours still shows a zero tally", () => {
@@ -304,7 +321,8 @@ function layoutOf(box, members, weekly) {
     return { m, chrome, hero, k: Math.min(1, box.CARD_H_PX / Math.max(m.contentHeight, 1)) };
   }
   const chrome = box.CARD_HEAD_H + box.CARD_GAP + box.CARD_TABLE_HEAD_H + box.CARD_GAP + box.CARD_FOOT_H;
-  const m = box.cardRowMetrics(members, { chrome, base: box.CARD_SEASON_ROW_H });
+  const m = box.cardRowMetrics(members,
+    { chrome, base: box.CARD_SEASON_ROW_H, maxPerPage: box.CARD_SEASON_MAX_ROWS });
   const k = Math.min(1, box.CARD_H_PX / Math.max(m.contentHeight, 1));
   return { m, k, chrome };
 }
@@ -344,13 +362,16 @@ test("pages · a table takes a second page only when it needs one", () => {
   assert.equal(layoutOf(box, 11, true).m.pages, 1, "an eleven-member week");
   assert.equal(layoutOf(box, 20, true).m.pages, 1, "a twenty-member week");
   assert.equal(layoutOf(box, 30, true).m.pages, 1, "a thirty-member week");
+  // The season table caps itself at twenty a page. The frame would take
+  // forty-four; forty-four rows of a season table is not something read on a
+  // phone, so the cap is the card's own limit rather than the frame's.
   assert.equal(layoutOf(box, 8, false).m.pages, 1, "the common season table");
   assert.equal(layoutOf(box, 11, false).m.pages, 1, "an eleven-member season");
   assert.equal(layoutOf(box, 20, false).m.pages, 1, "a twenty-member season");
-  assert.equal(layoutOf(box, 30, false).m.pages, 1, "a thirty-member season");
-  assert.equal(layoutOf(box, 40, false).m.pages, 1, "a forty-member season");
-  // And a genuinely large table still pages rather than shrinking.
-  assert.ok(layoutOf(box, 60, false).m.pages >= 2, "sixty members did not page");
+  assert.equal(layoutOf(box, 21, false).m.pages, 2, "twenty-one members must split");
+  assert.equal(layoutOf(box, 30, false).m.pages, 2, "a thirty-member season");
+  assert.equal(layoutOf(box, 40, false).m.pages, 2, "a forty-member season");
+  assert.equal(layoutOf(box, 60, false).m.pages, 3, "a sixty-member season");
   assert.ok(layoutOf(box, 60, true).m.pages >= 2, "sixty members did not page");
   // And the row never drops below the height an 18px line needs.
   for (const members of SIZES) {
@@ -370,7 +391,7 @@ test("pages · there is no column machinery left to fall back to", () => {
 
 test("pages · every member appears exactly once, in rank order, across the pages", () => {
   const box = paintBox({ leagueTab: "season" });
-  for (const members of [1, 11, 20, 30, 40]) {
+  for (const members of [1, 11, 20, 21, 30, 40, 60]) {
     const state = seasonState(members);
     const model = box.seasonCardModel(state);
     const { m } = layoutOf(box, members, false);
@@ -390,7 +411,7 @@ test("pages · every member appears exactly once, in rank order, across the page
 });
 
 test("pages · every page is 1080x1920 and carries the table's own headings", () => {
-  for (const members of [11, 20, 30, 40, 60]) {
+  for (const members of [11, 20, 21, 30, 40, 60]) {
     const box = paintBox({ leagueTab: "season" });
     const canvases = box.drawSeasonTableCard(seasonState(members));
     const { m } = layoutOf(box, members, false);
@@ -410,6 +431,110 @@ test("pages · every page is 1080x1920 and carries the table's own headings", ()
   }
 });
 
+// --- Sol's portrait ruling: twenty a page, and every page a whole table -----
+
+const SOL_SEASON = [[11, 1], [20, 1], [21, 2], [30, 2], [40, 2], [60, 3]];
+
+test("sol · a season export pages at twenty, whatever the league's size", () => {
+  const box = paintBox({ leagueTab: "season" });
+  for (const [members, pages] of SOL_SEASON) {
+    const { m } = layoutOf(box, members, false);
+    assert.equal(m.pages, pages, `${members} members should be ${pages} attachment(s)`);
+    assert.ok(m.rowsPerPage <= 20, `${members}: ${m.rowsPerPage} rows on a page`);
+    // Balanced, not front-loaded: thirty is fifteen and fifteen, not twenty and ten.
+    assert.equal(m.rowsPerPage, Math.ceil(members / pages), `${members}: pages are lopsided`);
+  }
+});
+
+test("sol · every attachment is a complete, readable table in its own right", () => {
+  for (const [members, pages] of SOL_SEASON) {
+    const box = paintBox({ leagueTab: "season" });
+    const state = seasonState(members);
+    const model = box.seasonCardModel(state);
+    const canvases = box.drawSeasonTableCard(state);
+    assert.equal(canvases.length, pages, `${members}: wrong attachment count`);
+    const made = box.__made.slice(-pages);
+
+    // 1 · the whole membership, once each, in rank order, across the pages.
+    const names = made.flatMap((page) => page.marks.map((mark) => mark.text))
+      .filter((text) => /^Player \d+$/.test(text));
+    assert.equal(names.length, members, `${members}: a member was lost or duplicated`);
+    assert.deepEqual(names, model.rows.map((row) => row.nick), `${members}: the ranking moved`);
+
+    made.forEach((page, index) => {
+      const drawn = page.marks.map((mark) => mark.text);
+      // 2 · no page carries more than twenty players.
+      const onPage = drawn.filter((text) => /^Player \d+$/.test(text)).length;
+      assert.ok(onPage <= 20, `${members}: page ${index + 1} carries ${onPage} rows`);
+      assert.ok(onPage > 0, `${members}: page ${index + 1} is empty`);
+      // 3 · identity, headings, page marker and branding, repeated on each.
+      assert.ok(drawn.includes("Sunday Six"), `${members}/${index + 1}: no league identity`);
+      for (const heading of ["PLAYER", "EXACT", "PTS"]) {
+        assert.ok(drawn.includes(heading), `${members}/${index + 1}: no ${heading} heading`);
+      }
+      assert.ok(drawn.some((text) => /Prem Oracle/i.test(text)),
+        `${members}/${index + 1}: no Prem Oracle branding`);
+      if (pages > 1) {
+        assert.ok(drawn.includes(`Page ${index + 1} of ${pages}`),
+          `${members}/${index + 1}: no page marker`);
+      }
+      // 4 · a tally under every name, inside the Player cell, clear of EXACT.
+      const tallies = page.marks.filter((mark) => /^🏆 \d+$/.test(mark.text));
+      assert.equal(tallies.length, onPage, `${members}/${index + 1}: a row lost its tally`);
+      for (const tally of tallies) {
+        assert.equal(tally.x, box.CARD_COL.name, `${members}: a tally left the Player column`);
+        assert.ok(tally.x < box.CARD_COL.split, `${members}: a tally crossed the boundary`);
+      }
+      // 5 · nothing on the player side of the rule reaches across it.
+      const playerSide = page.marks.filter((mark) => mark.align !== "right"
+        && mark.x >= box.CARD_COL.name && /^(Player \d+|🏆)/.test(mark.text));
+      for (const mark of playerSide) {
+        const width = String(mark.text).length * (Number(/(\d+)px/.exec(mark.font)?.[1] || 24) * 0.58);
+        assert.ok(mark.x + width <= box.CARD_COL.split,
+          `${members}: "${mark.text}" runs into the scoring columns`);
+      }
+      // 6 · the boundary itself is drawn, once, spanning the table.
+      const rules = page.fills.filter((fill) => fill.x === box.CARD_COL.split);
+      assert.equal(rules.length, 1, `${members}/${index + 1}: the cell boundary is not drawn once`);
+      assert.ok(rules[0].h > 100, `${members}/${index + 1}: the boundary does not span the table`);
+    });
+
+    // 7 · the final pixels hold both floors — no page is scaled down.
+    const { m, k } = layoutOf(box, members, false);
+    assert.equal(k, 1, `${members}: a page was scaled to fit`);
+    assert.ok(Math.min(m.name, m.number, m.points) >= box.CARD_TYPE_FLOOR, `${members}: type floor`);
+    assert.ok(Math.min(m.second, m.honoursSize) >= box.CARD_SECOND_FLOOR, `${members}: second floor`);
+  }
+});
+
+test("sol · eleven members are not held apart from their own heading", () => {
+  const box = paintBox({ leagueTab: "season" });
+  // The table is biased up under its headings; the slack falls below it, as
+  // margin above the footer, rather than opening a gap in the middle.
+  assert.ok(box.CARD_TABLE_LEAD <= 48, "the lead is too generous to read as air");
+  const after = box.CARD_HEAD_H + box.CARD_GAP;
+  const { m } = layoutOf(box, 11, false);
+  const top = box.cardTableTop(after, m.tableHeight, box.CARD_TABLE_LEAD);
+  assert.ok(top - after <= box.CARD_TABLE_LEAD, "eleven members still float below their heading");
+  // The cap is the season's alone. The weekly composition is accepted as it
+  // stands, and it centres — pinning that down, because cardTableTop is shared
+  // and a default-on cap silently moved four accepted weekly cards once.
+  assert.ok(sourceOf("drawSeasonPage").includes("CARD_TABLE_LEAD"), "the season lost its lead cap");
+  assert.ok(!sourceOf("drawWeeklyPage").includes("CARD_TABLE_LEAD"), "the cap leaked into the weekly card");
+  assert.match(sourceOf("cardTableTop"), /lead = Infinity/, "the cap became the default");
+  const weeklyAfter = box.CARD_HEAD_H + box.CARD_GAP + box.weeklyCardGeometry(6).hero + box.CARD_GAP;
+  const weeklyTable = box.weeklyCardGeometry(6).m.tableHeight;
+  const room = box.CARD_H_PX - box.CARD_FOOT_H - box.CARD_GAP - weeklyAfter;
+  assert.equal(box.cardTableTop(weeklyAfter, weeklyTable),
+    weeklyAfter + Math.max(0, (room - weeklyTable) / 2), "the weekly table stopped centring");
+  // A full page is unaffected: it never had slack to give away.
+  const full = layoutOf(box, 20, false).m;
+  assert.ok(box.cardTableTop(after, full.tableHeight, box.CARD_TABLE_LEAD) - after <= box.CARD_TABLE_LEAD);
+  // And the table still clears the footer.
+  assert.ok(top + m.tableHeight <= box.CARD_H_PX - box.CARD_FOOT_H,
+    "the table ran into the footer");
+});
+
 test("pages · a multi-page export marks its pages, a single one does not", () => {
   const box = paintBox({ leagueTab: "season" });
   assert.equal(box.cardPageLabel(0, 1), "", "a single card claimed to be a page");
@@ -426,17 +551,29 @@ test("pages · a multi-page export marks its pages, a single one does not", () =
   assert.ok(!texts(one).some((text) => /^Page /.test(text)), "a single square was marked as a page");
 });
 
-test("pages · an inline tally never runs into the exact column", () => {
+test("pages · a medal tally stays inside the Player cell, clear of EXACT", () => {
   const box = paintBox({ leagueTab: "season" });
-  const { m } = layoutOf(box, 30, false);
-  assert.equal(m.honoursLine, false, "this size is the inline case");
-  const ctx = { font: "", measureText: (t) => ({ width: String(t).length * 12 }) };
-  // Two-digit honours are a real season: 38 matchweeks, three places.
+  const chrome = box.CARD_HEAD_H + box.CARD_GAP + box.CARD_TABLE_HEAD_H + box.CARD_GAP + box.CARD_FOOT_H;
+  const cell = box.CARD_COL.player - box.CARD_COL.name;
+  // Two-digit honours are a real season: thirty-eight weeks, three places.
   const counts = { gold: 12, silver: 34, bronze: 56 };
-  const fit = box.cardHonoursFit(ctx, box.CARD_COL, counts, m);
-  assert.ok(fit.x + fit.width <= box.CARD_COL.exact - m.second, "the tally reached the exact figure");
-  assert.ok(fit.size >= box.CARD_SECOND_FLOOR, "the tally fell below the floor");
-  assert.ok(fit.x - box.CARD_COL.name >= 24, "the name lost every character");
+  const ctx = { font: "", measureText: (t) => ({ width: String(t).length * 12 }) };
+  for (const members of [11, 20, 21, 30, 40, 60]) {
+    const m = box.cardRowMetrics(members,
+      { chrome, base: box.CARD_SEASON_ROW_H, maxPerPage: box.CARD_SEASON_MAX_ROWS });
+    const size = box.cardHonoursSize(ctx, counts, m.honoursSize, cell);
+    assert.ok(size >= box.CARD_SECOND_FLOOR, `${members}: the tally fell below the floor`);
+    assert.ok(box.cardHonoursWidth(ctx, counts, size) <= cell,
+      `${members}: the tally left the Player cell`);
+  }
+  // The cell ends before EXACT does, and a rule is drawn in between: the
+  // heading cannot be read as owning the tally sitting to its left.
+  assert.ok(box.CARD_COL.player < box.CARD_COL.split, "the cell has no boundary");
+  assert.ok(box.CARD_COL.split < box.CARD_COL.exact, "the boundary is inside the exact column");
+  const drawn = box.drawSeasonTableCard(seasonState(30));
+  const fills = box.__made.slice(-drawn.length).flatMap((made) => made.fills || []);
+  assert.ok(fills.some((f) => f.x === box.CARD_COL.split && f.h > 100),
+    "no rule was drawn between the Player cell and the scoring columns");
 });
 
 // --- the exported card carries no rostrum ----------------------------------
@@ -482,14 +619,14 @@ test("podium · dropping the rostrum is what buys the table its size", () => {
   assert.ok(m.name >= 22, `and names at ${m.name}px`);
 });
 
-test("pages · forty members hold every floor, on one portrait image", () => {
+test("pages · forty members hold every floor, across two portrait images", () => {
   const box = paintBox({ leagueTab: "season" });
   const state = seasonState(40);
   const canvases = box.drawSeasonTableCard(state);
-  assert.equal(canvases.length, 1, "forty members should now be one portrait image");
+  assert.equal(canvases.length, 2, "forty members is two pages of twenty");
   const model = box.seasonCardModel(state);
   assert.equal(model.rows.length, 40);
-  const drawn = box.__made.slice(-1).flatMap((made) => made.marks.map((mark) => mark.text));
+  const drawn = box.__made.slice(-2).flatMap((made) => made.marks.map((mark) => mark.text));
   for (const row of model.rows) {
     assert.ok(drawn.includes(row.nick), `${row.nick} was never drawn`);
   }
@@ -686,10 +823,16 @@ test("W2 · the Season export is untouched by the weekly corrections", () => {
   for (const weeklyOnly of ["drawCardRowRule", "drawWeeklyRowBand", "weeklyCardGeometry", "drawCardHero"]) {
     assert.ok(!season.includes(weeklyOnly), `the season card now uses ${weeklyOnly}`);
   }
-  // Its geometry is the same chrome it always had.
+  // Its geometry is the same chrome it always had, now under its own cap.
   const box = paintBox({ leagueTab: "season" });
   assert.equal(layoutOf(box, 11, false).m.pages, 1);
   assert.equal(layoutOf(box, 20, false).m.pages, 1);
-  assert.equal(layoutOf(box, 30, false).m.pages, 1);
-  assert.equal(layoutOf(box, 40, false).m.pages, 1);
+  assert.equal(layoutOf(box, 30, false).m.pages, 2);
+  assert.equal(layoutOf(box, 40, false).m.pages, 2);
+  // And the cap is the season's alone: the accepted weekly capacities stand.
+  assert.equal(layoutOf(box, 11, true).m.pages, 1, "the weekly eleven regressed");
+  assert.equal(layoutOf(box, 20, true).m.pages, 1, "the weekly twenty regressed");
+  assert.equal(layoutOf(box, 30, true).m.pages, 1, "the weekly thirty regressed");
+  assert.equal(layoutOf(box, 40, true).m.pages, 2, "the weekly forty regressed");
+  assert.ok(!sourceOf("weeklyCardPages").includes("maxPerPage"), "the cap leaked into the weekly card");
 });

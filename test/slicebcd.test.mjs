@@ -478,7 +478,7 @@ const CARD_NAMES = ["CARD_W_PX", "CARD_H_PX", "CARD_W", "CARD_HEAD_H", "CARD_HER
   "weeklyCardCaption", "podiumCounts", "weeklyRanks", "sharedRankByUid", "winnerNames",
   "finalScore", "isVoidFixture", "isPostponed", "VOID_STATUSES",
   "CARD", "CARD_PAD", "cardFont", "cardDate", "sentenceCase",
-  "CARD_TYPE_FLOOR", "CARD_SECOND_FLOOR", "CARD_MIN_ROW", "cardHonoursWidth", "cardHonoursFit", 
+  "CARD_TYPE_FLOOR", "CARD_SECOND_FLOOR", "CARD_MIN_ROW", "cardHonoursWidth", "cardHonoursSize", "drawCardCellSplit", "CARD_SEASON_MAX_ROWS", "CARD_ROW_TWO_LINE", "CARD_TABLE_LEAD", 
   "CARD_COL", "CARD_MIN_NAME", "cardPageRows", "cardPageLabel", "cardTableTop", "seasonCardPages", "drawSeasonPage", "drawSeasonTableCard", "weeklyCardPages", "drawWeeklyPage", "drawWeeklyResultCard"];
 
 /** A canvas that records only what a geometry check needs. */
@@ -515,7 +515,7 @@ function cardBox(overrides = {}) {
     fitText: (ctx, text, max, font) => { ctx.font = font(30); },
     roundedRect: () => {},
     drawCardHeader: () => {}, drawCardHero: () => {},
-    drawCardTableHead: () => {}, drawCardRowPlate: () => {}, drawCardHonours: () => {},
+    drawCardTableHead: () => {}, drawCardCellSplit: () => {}, drawCardRowPlate: () => {}, drawCardHonours: () => {},
     drawCardFooter: () => {}, drawFitted: (ctx, t) => { made.push(String(t)); },
     ellipsise: (ctx, t) => t,
     document: { createElement: () => { const c = stubCanvas(); made.push(c); return c.canvas; } },
@@ -564,15 +564,16 @@ test("C-A · the complete table always fits inside the square", () => {
 test("C-A · typography adapts with the row, and honours drop when they cannot fit", () => {
   const s = cardBox();
   const chrome = s.CARD_HEAD_H + s.CARD_GAP + s.CARD_TABLE_HEAD_H + s.CARD_GAP + s.CARD_FOOT_H;
-  const small = s.cardRowMetrics(6, { chrome, base: s.CARD_SEASON_ROW_H });
-  const large = s.cardRowMetrics(30, { chrome, base: s.CARD_SEASON_ROW_H });
+  const opts = { chrome, base: s.CARD_SEASON_ROW_H, maxPerPage: s.CARD_SEASON_MAX_ROWS };
+  const small = s.cardRowMetrics(6, opts);
+  const large = s.cardRowMetrics(40, opts);
   assert.ok(large.rowH < small.rowH, "a bigger table did not compress");
   assert.ok(large.name <= small.name, "type did not adapt with the row");
   assert.ok(large.name >= 15, "type fell below a readable floor");
-  // Honours are NEVER dropped: a roomy row gets a second line, a compressed one
-  // gets a compact tally, and both carry all three counts.
-  assert.equal(small.honoursLine, true, "a roomy row lost its honours line");
-  assert.equal(large.honoursLine, false, "a compressed row still drew a second line");
+  // Honours are NEVER dropped. Capped at twenty rows a page, every season row
+  // is tall enough to carry its tally on a second line under the name.
+  assert.equal(small.twoLine, true, "a roomy row lost its honours line");
+  assert.equal(large.twoLine, true, "a paged row lost its honours line");
   assert.ok(large.honoursSize >= 13, "the compact tally has no readable size");
   assert.ok(large.honoursSize <= small.honoursSize);
 });

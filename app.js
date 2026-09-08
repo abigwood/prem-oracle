@@ -4309,6 +4309,8 @@ const CARD_HERO_H = 220;
 const CARD_HERO_MIN = 150;
 // One straight line under a row, the full width of the table.
 const CARD_RULE_H = 2;
+// The most air a page will put between its headings and its first row.
+const CARD_TABLE_LEAD = 40;
 const CARD_TABLE_HEAD_H = 56;
 const CARD_ROW_H = 74;
 // The floors Sol set for an exported table, in post-transform pixels: names,
@@ -4321,6 +4323,12 @@ const CARD_SECOND_FLOOR = 15;
 const CARD_MIN_ROW = 32;
 // A name column narrower than this is not a name, it is an initial.
 const CARD_MIN_NAME = 104;
+// The season table's own limit, independent of what the frame could fit. Twenty
+// rows is a page somebody reads; the geometry alone would allow forty-four.
+const CARD_SEASON_MAX_ROWS = 20;
+// The row height a two-line Player cell needs. The cap above keeps every
+// season row above it; the tests hold that true.
+const CARD_ROW_TWO_LINE = 62;
 // The season row carries an honours line under the name, so it is taller.
 const CARD_SEASON_ROW_H = 92;
 const CARD_FOOT_H = 200;
@@ -4385,18 +4393,26 @@ const CARD_H_PX = 1920;
  * the export becomes several squares, in rank order, each a complete page of
  * one list. Nothing is truncated and nothing is shrunk below the floors.
  */
-function cardRowMetrics(rows, { chrome, base, min = CARD_MIN_ROW }) {
+function cardRowMetrics(rows, { chrome, base, min = CARD_MIN_ROW, maxPerPage = Infinity }) {
   const available = Math.max(0, CARD_H_PX - chrome);
-  const perPage = Math.max(1, Math.floor(available / min));
+  // What the frame can hold, and what the CARD is willing to hold. The season
+  // table caps itself at twenty a page: the geometry would take forty-four, but
+  // forty-four rows of a season table is a spreadsheet, not something anyone
+  // reads on a phone.
+  const perPage = Math.max(1, Math.min(maxPerPage, Math.floor(available / min)));
   const pages = rows > 0 ? Math.ceil(rows / perPage) : 1;
-  // Evened out, so a two-page export is not seventeen rows and one.
-  const rowsPerPage = rows > 0 ? Math.ceil(rows / pages) : 0;
+  // Evened out, so a two-page export is not seventeen rows and one — and then
+  // held to the cap, because balancing must never push a page over it.
+  const rowsPerPage = rows > 0 ? Math.min(perPage, Math.ceil(rows / pages)) : 0;
   const fitted = rowsPerPage > 0 ? available / rowsPerPage : base;
   const rowH = Math.max(min, Math.min(base, fitted));
   const scale = Math.min(1, rowH / base);
   // A roomy row still carries honours on their own baseline; a compressed one
   // carries a compact tally beside a narrowed name. Neither ever drops them.
-  const honoursLine = rowH >= 62;
+  // A season row is a two-line Player cell: name, then tally. The twenty-row
+  // cap is what makes that unconditional — this is the height it needs, kept
+  // as a check rather than as a branch nothing takes.
+  const twoLine = rowH >= CARD_ROW_TWO_LINE;
   return {
     pages,
     rowsPerPage,
@@ -4410,12 +4426,12 @@ function cardRowMetrics(rows, { chrome, base, min = CARD_MIN_ROW }) {
     number: Math.max(CARD_TYPE_FLOOR, Math.round(30 * scale)),
     points: Math.max(CARD_TYPE_FLOOR, Math.round(34 * scale)),
     second: Math.max(CARD_SECOND_FLOOR, Math.round(30 * scale)),
-    honoursLine,
-    honoursSize: honoursLine
+    twoLine,
+    honoursSize: twoLine
       ? Math.max(CARD_SECOND_FLOOR, Math.min(24, Math.round(rowH * 0.333)))
       : Math.max(CARD_SECOND_FLOOR, Math.round(rowH * 0.42)),
     // Where the two baselines sit inside a row that carries both.
-    nameDy: honoursLine ? -Math.round(rowH * 0.055) : 0,
+    nameDy: -Math.round(rowH * 0.055),
     honoursDy: Math.round(rowH * 0.42),
   };
 }
@@ -4455,9 +4471,18 @@ function weeklyCardGeometry(rows) {
  * six-member card is a roomy card rather than a small card in a large dark
  * frame. A full page centres on nothing, because there is nothing spare.
  */
-function cardTableTop(after, tableHeight) {
+/**
+ * Where the table starts.
+ *
+ * Centred in the room left over, unless the caller caps the lead. The season
+ * card caps it: centring put two hundred pixels of nothing between the heading
+ * and the first row of a short table, which read as a gap rather than as air.
+ * The weekly card does NOT cap it — its composition is accepted as it stands,
+ * and its hero already spends the slack a short table would otherwise leave.
+ */
+function cardTableTop(after, tableHeight, lead = Infinity) {
   const room = CARD_H_PX - CARD_FOOT_H - CARD_GAP - after;
-  return after + Math.max(0, (room - tableHeight) / 2);
+  return after + Math.min(lead, Math.max(0, (room - tableHeight) / 2));
 }
 
 /** The members on one page, in rank order, each appearing on exactly one. */
@@ -4546,7 +4571,22 @@ function drawCardHero(ctx, y, model, height = CARD_HERO_H) {
 }
 
 
-const CARD_COL = { rank: 112, name: 168, exact: 730, pts: 880, medal: 962 };
+// `player` is where the Player CELL ends — not where the next column starts.
+// The name and the medal tally are both held inside it, and `split` is the
+// rule drawn between it and EXACT, so a tally can never read as a score.
+const CARD_COL = { rank: 112, name: 168, player: 632, split: 656, exact: 730, pts: 880, medal: 962 };
+
+/**
+ * The rule between the Player cell and the scoring columns.
+ *
+ * Season rows carry a medal tally under the name. Without a boundary the eye
+ * has only whitespace to tell it the tally belongs to the player rather than
+ * to EXACT — and a bronze count sitting loose in that gap reads as a score.
+ */
+function drawCardCellSplit(ctx, y, height) {
+  ctx.fillStyle = CARD.line;
+  ctx.fillRect(CARD_COL.split, y, 2, height);
+}
 
 function drawCardTableHead(ctx, y) {
   ctx.fillStyle = CARD.muted;
@@ -4785,25 +4825,16 @@ function seasonCardModel(state) {
 }
 
 /**
- * Where an inline tally goes, and how big it is: as far right as it can sit
- * while leaving the exact column its own space, shrinking to the floor before
- * it crowds the name.
+ * The tally's size, so that it fits the Player cell.
  *
- * A season's honours reach two digits, and three two-digit counts in a narrow
- * column will not fit beside a full-width name at any size. Honours are never
- * dropped, so in that case the NAME gives way — a name can be cut and still be
- * recognised; a tally cut in half is a wrong number.
+ * A season's honours reach two digits, and three two-digit counts are wider
+ * than three one-digit ones. Honours are never dropped and never leave the
+ * cell, so the TYPE gives way — down to the readability floor, not past it.
  */
-function cardHonoursFit(ctx, cols, counts, m) {
-  const right = cols.exact - Math.round(m.second * 2);
-  const room = right - (cols.name + CARD_MIN_NAME + 12);
-  let size = m.honoursSize;
-  let width = cardHonoursWidth(ctx, counts, size);
-  while (size > CARD_SECOND_FLOOR && width > room) {
-    size -= 1;
-    width = cardHonoursWidth(ctx, counts, size);
-  }
-  return { size, width, x: Math.max(cols.name + 24, right - width) };
+function cardHonoursSize(ctx, counts, size, room) {
+  let fitted = size;
+  while (fitted > CARD_SECOND_FLOOR && cardHonoursWidth(ctx, counts, fitted) > room) fitted -= 1;
+  return fitted;
 }
 
 /**
@@ -4814,50 +4845,54 @@ function cardHonoursFit(ctx, cols, counts, m) {
 function seasonCardPages(state) {
   const model = seasonCardModel(state);
   const chrome = CARD_HEAD_H + CARD_GAP + CARD_TABLE_HEAD_H + CARD_GAP + CARD_FOOT_H;
-  const m = cardRowMetrics(model.rows.length, { chrome, base: CARD_SEASON_ROW_H });
+  const m = cardRowMetrics(model.rows.length,
+    { chrome, base: CARD_SEASON_ROW_H, maxPerPage: CARD_SEASON_MAX_ROWS });
   return { pages: m.pages, rows: model.rows.length, page: (page) => drawSeasonPage(model, m, page) };
 }
 
 function drawSeasonPage(model, m, page) {
     const { canvas, ctx } = cardCanvas(m.contentHeight);
     drawCardHeader(ctx, model.league, model.headline, cardPageLabel(page, m.pages));
-    const y = cardTableTop(CARD_HEAD_H + CARD_GAP, m.tableHeight);
+    const y = cardTableTop(CARD_HEAD_H + CARD_GAP, m.tableHeight, CARD_TABLE_LEAD);
     const top = y + CARD_TABLE_HEAD_H;
     // The headings are repeated on every page, so a page read on its own is
     // still a table rather than a list of numbers.
     drawCardTableHead(ctx, y);
-    cardPageRows(model.rows, page, m).forEach((row, index) => {
+    const rows = cardPageRows(model.rows, page, m);
+    rows.forEach((row, index) => {
       const rowTop = top + index * m.rowH;
       const mid = rowTop + (m.rowH - 10) / 2;
       drawCardRowPlate(ctx, rowTop, m.rowH, index, null);
       ctx.textAlign = "center";
       ctx.fillStyle = CARD.muted;
       ctx.font = cardFont(900, m.number);
-      ctx.fillText(String(row.rank), CARD_COL.rank, mid + (m.honoursLine ? 4 : m.number / 3));
+      ctx.fillText(String(row.rank), CARD_COL.rank, mid + 4);
       ctx.textAlign = "left";
-      // Present at every size: a second line when the row is tall enough, an
-      // inline tally beside the name when it is not. Sharing a baseline means
-      // the tally is MEASURED and placed clear of the exact column — running a
-      // bronze count into an exact count reads as a single wrong number.
-      const fit = m.honoursLine ? null : cardHonoursFit(ctx, CARD_COL, row.honours, m);
-      const nameWidth = fit ? fit.x - CARD_COL.name - 12 : CARD_COL.exact - CARD_COL.name - 16;
-      drawFitted(ctx, row.nick, CARD_COL.name, mid + (m.honoursLine ? m.nameDy : m.name / 3), nameWidth,
+      // The name and the tally are one cell: same left edge, same width, the
+      // tally on its own line beneath the name. Capped at twenty rows a page,
+      // a season row is never short enough to need them side by side.
+      const cell = CARD_COL.player - CARD_COL.name;
+      drawFitted(ctx, row.nick, CARD_COL.name, mid + m.nameDy, cell,
         { max: m.name, min: Math.min(CARD_TYPE_FLOOR, m.name) });
-      if (fit) {
-        drawCardHonours(ctx, fit.x, mid + m.name / 3, row.honours, { size: fit.size });
-      } else {
-        drawCardHonours(ctx, CARD_COL.name, mid + m.honoursDy, row.honours, { size: m.honoursSize });
-      }
+      drawCardHonours(ctx, CARD_COL.name, mid + m.honoursDy, row.honours,
+        { size: cardHonoursSize(ctx, row.honours, m.honoursSize, cell) });
       ctx.textAlign = "right";
       ctx.fillStyle = CARD.muted;
       ctx.font = cardFont(800, m.second);
-      ctx.fillText(String(row.exact), CARD_COL.exact, mid + (m.honoursLine ? 4 : m.second / 3));
+      ctx.fillText(String(row.exact), CARD_COL.exact, mid + 4);
       ctx.fillStyle = CARD.ink;
       ctx.font = cardFont(900, m.points);
-      ctx.fillText(String(row.pts), CARD_COL.pts, mid + (m.honoursLine ? 5 : m.points / 3));
+      ctx.fillText(String(row.pts), CARD_COL.pts, mid + 5);
       ctx.textAlign = "left";
     });
-    drawCardFooter(ctx, top + m.rowsPerPage * m.rowH + CARD_GAP, model);
+    // Measured from the rows this page actually drew, not from the page
+    // capacity — a last page of ten must not trail a rule under an
+    // eleventh row that is not there.
+    drawCardCellSplit(ctx, y + 12, CARD_TABLE_HEAD_H + rows.length * m.rowH - 12);
+    // Pinned to the foot of the page, not floated under the last row. A short
+    // table leaves slack; as a bottom margin it reads as margin, and as a hole
+    // between the heading and the table it read as a mistake.
+    drawCardFooter(ctx, CARD_H_PX - CARD_FOOT_H, model);
     return canvas;
 }
 

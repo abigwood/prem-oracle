@@ -40,11 +40,11 @@ const NAMES = ["matchweekLeagueState", "matchweekLeagueName", "matchweekSlate", 
   "weeklySharePublished",
   "shareCardState", "seasonCardModel", "weeklyCardModel", "weeklyCardCaption", "podiumCounts",
   "CARD_W_PX", "CARD_H_PX", "CARD_W", "CARD_HEAD_H", "CARD_HERO_H", "CARD_TABLE_HEAD_H", "CARD_ROW_H",
-  "CARD_SEASON_ROW_H", "CARD_FOOT_H", "CARD_GAP",
+  "CARD_SEASON_ROW_H", "CARD_SEASON_MAX_ROWS", "CARD_ROW_TWO_LINE", "CARD_TABLE_LEAD", "CARD_FOOT_H", "CARD_GAP",
   "cardRowMetrics", "weeklyCardGeometry", "cardTableTop", "cardCanvas", "winnerNames", "CARD", "CARD_PAD", "CARD_COL",
   "CARD_TYPE_FLOOR", "CARD_SECOND_FLOOR", "CARD_MIN_ROW", "CARD_MIN_NAME",
   "CARD_HERO_MIN", "CARD_RULE_H",
-  "cardPageRows", "cardPageLabel", "cardHonoursFit", "cardHonoursWidth",
+  "cardPageRows", "cardPageLabel", "cardHonoursSize", "cardHonoursWidth",
   "weeklyRanks", "sharedRankByUid", "cardDate", "noteWeeklyFinalMismatch", "weeklyFinalMismatchLines"];
 
 const leagueState = (ids) => ({
@@ -246,13 +246,14 @@ console.log(unpublished.shareIconButton({ code: "AAA" }, "weekly").trim()
 
 // --- the SQUARE cards, as geometry ------------------------------------------
 console.log("\n" + "=".repeat(74));
-console.log("  SQUARE EXPORT GEOMETRY - the SEASON card, every size");
+console.log("  PORTRAIT EXPORT GEOMETRY - the SEASON card, every size");
 console.log("=".repeat(74));
 const g = world();
 const seasonChrome = g.CARD_HEAD_H + g.CARD_GAP + g.CARD_TABLE_HEAD_H + g.CARD_GAP + g.CARD_FOOT_H;
 console.log("     members  pages  perPage  rowH  name  rank  pts  2nd  honours  tally  content  scale  floors");
-for (const n of [1, 3, 6, 8, 12, 16, 20, 25, 30, 36, 40]) {
-  const m = g.cardRowMetrics(n, { chrome: seasonChrome, base: g.CARD_SEASON_ROW_H });
+for (const n of [1, 3, 6, 8, 11, 12, 16, 20, 21, 25, 30, 36, 40, 60]) {
+  const m = g.cardRowMetrics(n,
+    { chrome: seasonChrome, base: g.CARD_SEASON_ROW_H, maxPerPage: g.CARD_SEASON_MAX_ROWS });
   const { canvas, scale } = g.cardCanvas(m.contentHeight);
   const primary = Math.min(m.name, m.number, m.points) * scale;
   const secondary = Math.min(m.second, m.honoursSize) * scale;
@@ -260,21 +261,22 @@ for (const n of [1, 3, 6, 8, 12, 16, 20, 25, 30, 36, 40]) {
     + "  " + String(m.rowsPerPage).padStart(7) + "  " + String(Math.round(m.rowH)).padStart(4)
     + "  " + String(m.name).padStart(4) + "  " + String(m.number).padStart(4)
     + "  " + String(m.points).padStart(3) + "  " + String(m.second).padStart(3)
-    + "  " + String(m.honoursLine ? "line" : "inline").padStart(7)
+    + "  " + String(m.twoLine ? "2-line" : "short").padStart(7)
     + "  " + String(m.honoursSize).padStart(5)
     + "  " + String(Math.round(m.contentHeight)).padStart(7)
     + "  " + scale.toFixed(3).padStart(5)
     + "  " + (primary >= 18 - 0.001 && secondary >= 15 - 0.001
-      && canvas.width === canvas.height && scale >= 1 ? "yes" : "NO"));
+      && canvas.width === g.CARD_W_PX && canvas.height === g.CARD_H_PX
+      && scale >= 1 ? "yes" : "NO"));
 }
-console.log("\n     Every canvas is square, every member is drawn, and no figure is drawn");
-console.log("     below 18px (names, ranks, points) or 15px (secondary figures, honours).");
+console.log("\n     Every canvas is 1080x1920, every member is drawn, and no figure is");
+console.log("     drawn below 18px (names, ranks, points) or 15px (secondary, honours).");
 
 console.log("\n" + "=".repeat(74));
-console.log("  SQUARE EXPORT GEOMETRY - the WEEKLY card, hero and table together");
+console.log("  PORTRAIT EXPORT GEOMETRY - the WEEKLY card, hero and table together");
 console.log("=".repeat(74));
 console.log("     members  hero  pages  perPage  rowH  name  rank  pts  2nd  content  scale  floors");
-for (const n of [1, 3, 6, 8, 10, 11, 12, 13, 16, 20, 25, 30, 40]) {
+for (const n of [1, 3, 6, 8, 10, 11, 12, 13, 16, 20, 25, 30, 40, 60]) {
   const { hero, m } = g.weeklyCardGeometry(n);
   const { canvas, scale } = g.cardCanvas(m.contentHeight);
   const primary = Math.min(m.name, m.number, m.points) * scale;
@@ -287,7 +289,8 @@ for (const n of [1, 3, 6, 8, 10, 11, 12, 13, 16, 20, 25, 30, 40]) {
     + "  " + String(Math.round(m.contentHeight)).padStart(7)
     + "  " + scale.toFixed(3).padStart(5)
     + "  " + (primary >= 18 - 0.001 && secondary >= 15 - 0.001
-      && canvas.width === canvas.height && scale >= 1 ? "yes" : "NO"));
+      && canvas.width === g.CARD_W_PX && canvas.height === g.CARD_H_PX
+      && scale >= 1 ? "yes" : "NO"));
 }
 console.log("\n     Eleven members fit ONE square: the hero gives up the room the table");
 console.log("     needs, down to a floor of " + g.CARD_HERO_MIN + "px, and nothing shrinks below the type floors.");

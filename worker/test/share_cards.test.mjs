@@ -116,18 +116,21 @@ function cards({ native = false } = {}) {
     ${lift("function ellipsise(ctx, text, maxWidth)")}
     ${lift("function drawFitted(ctx, text, x, y, maxWidth,")}
     ${liftConst("CARD_W_PX")}
-    ${lift("function cardRowMetrics(rows, { chrome, base, min = CARD_MIN_ROW })")}
+    // CARD_SEASON_MAX_ROWS, CARD_ROW_TWO_LINE and CARD_TABLE_LEAD all ride in
+    // on the const runs already lifted above — each is one lift, not four.
+    ${lift("function cardRowMetrics(rows, { chrome, base, min = CARD_MIN_ROW, maxPerPage = Infinity })")}
     ${lift("function weeklyCardGeometry(rows)")}
-    ${lift("function cardTableTop(after, tableHeight)")}
+    ${lift("function cardTableTop(after, tableHeight, lead = Infinity)")}
     ${lift("function cardCanvas(contentHeight)")}
     ${lift("function drawCardHeader(ctx, league, line, page = \"\")")}
     ${lift("function drawCardHero(ctx, y, model, height = CARD_HERO_H)")}
     ${lift("function drawCardTableHead(ctx, y)")}
+    ${lift("function drawCardCellSplit(ctx, y, height)")}
     ${lift("function drawWeeklyRowBand(ctx, y, height, place)")}
     ${lift("function drawCardRowRule(ctx, y)")}
     ${lift("function drawCardRowPlate(ctx, y, height, index, place)")}
     ${lift("function cardHonoursWidth(ctx, counts, size)")}
-    ${lift("function cardHonoursFit(ctx, cols, counts, m)")}
+    ${lift("function cardHonoursSize(ctx, counts, size, room)")}
     ${lift("function drawCardHonours(ctx, x, y, counts, { size = 24 } = {})")}
     ${lift("function drawCardFooter(ctx, y, model)")}
     ${lift("function sharedRankByUid(table)")}

@@ -19,7 +19,7 @@ const CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 
 const FUNCTIONS = ["roundedRect", "fitText", "ellipsise", "drawFitted", "cardCanvas",
   "drawCardHeader", "drawCardHero", "drawCardTableHead", "drawCardRowPlate",
-  "drawCardHonours", "cardHonoursWidth", "cardHonoursFit", "drawCardFooter",
+  "drawCardHonours", "cardHonoursWidth", "cardHonoursSize", "drawCardCellSplit", "drawCardFooter",
   "cardRowMetrics", "weeklyCardGeometry", "cardTableTop", "drawWeeklyRowBand", "drawCardRowRule",
   "seasonCardModel", "weeklyCardModel",
   "weeklyShareStatus", "weeklyTerminalCount", "weeklySharePublished", "podiumCounts",
@@ -27,6 +27,7 @@ const FUNCTIONS = ["roundedRect", "fitText", "ellipsise", "drawFitted", "cardCan
   "weeklyCardPages", "drawWeeklyPage", "drawWeeklyResultCard", "finalScore", "weeklyCardCaption", "noteWeeklyFinalMismatch"];
 const CONSTS = ["CARD_W", "CARD_W_PX", "CARD_H_PX", "CARD_PAD", "CARD", "CARD_COL",
   "CARD_HEAD_H", "CARD_HERO_H", "CARD_TABLE_HEAD_H", "CARD_ROW_H", "CARD_SEASON_ROW_H",
+  "CARD_SEASON_MAX_ROWS", "CARD_ROW_TWO_LINE", "CARD_TABLE_LEAD",
   "CARD_FOOT_H", "CARD_GAP", "cardFont", "cardDate",
   "sentenceCase", "weeklyRanks", "VOID_STATUSES", "isVoidFixture", "isPostponed",
   "CARD_TYPE_FLOOR", "CARD_SECOND_FLOOR", "CARD_MIN_ROW", "CARD_MIN_NAME",
@@ -93,8 +94,9 @@ const SCENE = {
   "season-6": () => drawSeasonTableCard(seasonState(6)),
   "season-11": () => drawSeasonTableCard(seasonState(11)),
   "season-20": () => drawSeasonTableCard(seasonState(20)),
-  "season-30": () => drawSeasonTableCard(seasonState(30)),
-  "season-40": () => drawSeasonTableCard(seasonState(40)),
+  "season-21-paged": () => drawSeasonTableCard(seasonState(21)),
+  "season-30-paged": () => drawSeasonTableCard(seasonState(30)),
+  "season-40-paged": () => drawSeasonTableCard(seasonState(40)),
   "season-60-paged": () => drawSeasonTableCard(seasonState(60)),
   "season-30-two-digit-honours": () => {
     HEAVY = true;
@@ -108,8 +110,9 @@ const FINAL_MEMBERS = { "weekly-final-6": 6, "weekly-final-11": 11, "weekly-fina
 const WEEKLY_MEMBERS = { "weekly-not-started": 6, "weekly-in-progress-with-void": 6,
   "weekly-final-6": 6, "weekly-final-11": 11, "weekly-final-20": 20, "weekly-final-30": 30,
   "weekly-final-40": 40 };
-const SEASON_MEMBERS = { "season-6": 6, "season-11": 11, "season-20": 20, "season-30": 30,
-  "season-40": 40, "season-60-paged": 60, "season-30-two-digit-honours": 30 };
+const SEASON_MEMBERS = { "season-6": 6, "season-11": 11, "season-20": 20, "season-21-paged": 21,
+  "season-30-paged": 30, "season-40-paged": 40, "season-60-paged": 60,
+  "season-30-two-digit-honours": 30 };
 const HEAVY_SCENES = new Set(["season-30-two-digit-honours"]);
 `;
 
@@ -253,13 +256,14 @@ const place = (contentHeight) => {
 function tableGeometry(expect) {
   const m = expect.weekly
     ? weeklyCardGeometry(expect.rows).m
-    : cardRowMetrics(expect.rows, { chrome: expect.chrome, base: expect.base });
+    : cardRowMetrics(expect.rows,
+      { chrome: expect.chrome, base: expect.base, maxPerPage: CARD_SEASON_MAX_ROWS });
   // The same helper the drawers use: chrome anchored, table centred in what is
   // left. Recomputing it here by hand is how a probe drifts off the drawing.
   const after = expect.weekly
     ? CARD_HEAD_H + CARD_GAP + weeklyCardGeometry(expect.rows).hero + CARD_GAP
     : CARD_HEAD_H + CARD_GAP;
-  const head = cardTableTop(after, m.tableHeight);
+  const head = cardTableTop(after, m.tableHeight, expect.weekly ? Infinity : CARD_TABLE_LEAD);
   return { m, head, top: head + CARD_TABLE_HEAD_H, ...place(m.contentHeight) };
 }
 
@@ -298,7 +302,7 @@ function checkCard(name, canvas, expect) {
   if (expect.rows) {
     const g = tableGeometry(expect);
     const onPage = Math.min(g.m.rowsPerPage, expect.rows - expect.page * g.m.rowsPerPage);
-    let withHonours = 0, overlaps = 0, tallyClash = 0;
+    let withHonours = 0, overlaps = 0, tallyClash = 0, gutterInk = 0;
     const gaps = [];
     for (let i = 0; i < onPage; i++) {
       const rowTop = g.top + i * g.m.rowH;
@@ -311,16 +315,25 @@ function checkCard(name, canvas, expect) {
           : { gold: index % 3, silver: (index + 1) % 3, bronze: (index + 2) % 3 };
         // Mirrors the drawing code exactly, so a tally that moved would be
         // found missing rather than quietly measured somewhere else.
-        const fit = g.m.honoursLine ? null : cardHonoursFit(ctx, CARD_COL, counts, g.m);
-        const hx = fit ? fit.x : CARD_COL.name;
-        const hy = g.m.honoursLine ? mid + g.m.honoursDy : mid + g.m.name / 3;
-        const size = fit ? fit.size : g.m.honoursSize;
-        const width = fit ? fit.width : cardHonoursWidth(ctx, counts, size);
+        // Mirrors the drawing code exactly: one cell, the tally on its own
+        // line under the name, sized to the cell it must not leave.
+        const cell = CARD_COL.player - CARD_COL.name;
+        const size = cardHonoursSize(ctx, counts, g.m.honoursSize, cell);
+        const width = cardHonoursWidth(ctx, counts, size);
+        const hx = CARD_COL.name;
+        const hy = mid + g.m.honoursDy;
         if (!flat(ctx, Math.round(g.tx + g.k * hx), Math.round(g.ty + g.k * (hy - size)),
           Math.round(g.k * width), Math.round(g.k * (size + 4)))) withHonours++;
-        // An inline tally shares its baseline with the exact figure, so it
-        // must stop before that figure starts.
-        if (fit && fit.x + fit.width > CARD_COL.exact - g.m.second * 1.2) tallyClash++;
+        // The tally must end inside the Player cell, on the near side of the
+        // rule — a medal count that crosses it reads as an exact score.
+        if (hx + width > CARD_COL.split) tallyClash++;
+        // And nothing at all reaches the rule. Measured a row at a time: the
+        // plates alternate, so a gutter spanning rows is two colours by
+        // design and would fail for a reason that has nothing to do with ink.
+        if (!flat(ctx, Math.round(g.tx + g.k * (CARD_COL.player + 2)),
+          Math.round(g.ty + g.k * (rowTop + g.m.rowH * 0.2)),
+          Math.max(1, Math.round(g.k * (CARD_COL.split - CARD_COL.player - 4))),
+          Math.max(1, Math.round(g.k * g.m.rowH * 0.6)))) gutterInk++;
       }
 
       // Overlap is about ink meeting ink. An emoji tail may hang below its own
@@ -355,6 +368,22 @@ function checkCard(name, canvas, expect) {
       ok("no honours tally runs into the exact column", tallyClash === 0, tallyClash + " clashes");
       ok("honours are painted on EVERY row of this page", withHonours === onPage,
         withHonours + " of " + onPage + " rows carry a tally");
+
+      // Sol M3: the Player cell must be a cell. Two things prove it in the
+      // pixels — a rule drawn between it and the scoring columns, and a clear
+      // gutter on the player side that nothing reaches across.
+      const tableTop = Math.round(g.ty + g.k * (g.head + 14));
+      const tableH = Math.max(1, Math.round(g.k * (g.m.tableHeight - 20)));
+      const ruleX = Math.round(g.tx + g.k * CARD_COL.split);
+      ok("a rule divides the Player cell from the scoring columns",
+        !flat(ctx, ruleX, tableTop, Math.max(1, Math.round(g.k * 2)), tableH),
+        "rule at x=" + ruleX);
+      ok("nothing in the Player cell crosses into that rule", gutterInk === 0,
+        onPage - gutterInk + " of " + onPage + " rows keep the gutter clear");
+      // And the rows are never so short that the tally has to leave the cell.
+      ok("every season row is tall enough for a two-line Player cell",
+        g.m.twoLine && g.m.rowsPerPage <= CARD_SEASON_MAX_ROWS,
+        g.m.rowsPerPage + " rows at " + g.m.rowH + "px (cap " + CARD_SEASON_MAX_ROWS + ")");
     }
     ok("no row's ink runs into the next row", overlaps === 0,
       overlaps + " collisions; narrowest clear space between rows " + Math.min(...gaps, 99) + "px");
@@ -427,7 +456,8 @@ try {
       : CARD_HEAD_H + CARD_GAP + CARD_TABLE_HEAD_H + CARD_GAP + CARD_FOOT_H;
     const m = weekly
       ? weeklyCardGeometry(members).m
-      : cardRowMetrics(members, { chrome, base: CARD_SEASON_ROW_H });
+      : cardRowMetrics(members,
+        { chrome, base: CARD_SEASON_ROW_H, maxPerPage: CARD_SEASON_MAX_ROWS });
     const expect = {
       rows: members, members, weekly, chrome, base: weekly ? CARD_ROW_H : CARD_SEASON_ROW_H,
       honours: !weekly,

@@ -40,8 +40,9 @@ const NAMES = ["matchweekLeagueState", "matchweekLeagueName", "matchweekSlate", 
   "shareCardState", "seasonCardModel", "weeklyCardModel", "weeklyCardCaption", "podiumCounts",
   "CARD_SIDE", "CARD_W", "CARD_HEAD_H", "CARD_HERO_H", "CARD_TABLE_HEAD_H", "CARD_ROW_H",
   "CARD_SEASON_ROW_H", "CARD_FOOT_H", "CARD_GAP",
-  "cardRowMetrics", "cardCanvas", "winnerNames", "CARD", "CARD_PAD", "CARD_COL",
+  "cardRowMetrics", "weeklyCardGeometry", "cardCanvas", "winnerNames", "CARD", "CARD_PAD", "CARD_COL",
   "CARD_TYPE_FLOOR", "CARD_SECOND_FLOOR", "CARD_MIN_ROW", "CARD_MIN_NAME",
+  "CARD_HERO_MIN", "CARD_RULE_H",
   "cardPageRows", "cardPageLabel", "cardHonoursFit", "cardHonoursWidth",
   "weeklyRanks", "sharedRankByUid", "cardDate", "noteWeeklyFinalMismatch", "weeklyFinalMismatchLines"];
 
@@ -244,7 +245,7 @@ console.log(unpublished.shareIconButton({ code: "AAA" }, "weekly").trim()
 
 // --- the SQUARE cards, as geometry ------------------------------------------
 console.log("\n" + "=".repeat(74));
-console.log("  SQUARE EXPORT GEOMETRY - every size, both cards");
+console.log("  SQUARE EXPORT GEOMETRY - the SEASON card, every size");
 console.log("=".repeat(74));
 const g = world();
 const seasonChrome = g.CARD_HEAD_H + g.CARD_GAP + g.CARD_TABLE_HEAD_H + g.CARD_GAP + g.CARD_FOOT_H;
@@ -267,6 +268,28 @@ for (const n of [1, 3, 6, 8, 12, 16, 20, 25, 30, 36, 40]) {
 }
 console.log("\n     Every canvas is square, every member is drawn, and no figure is drawn");
 console.log("     below 18px (names, ranks, points) or 15px (secondary figures, honours).");
+
+console.log("\n" + "=".repeat(74));
+console.log("  SQUARE EXPORT GEOMETRY - the WEEKLY card, hero and table together");
+console.log("=".repeat(74));
+console.log("     members  hero  pages  perPage  rowH  name  rank  pts  2nd  content  scale  floors");
+for (const n of [1, 3, 6, 8, 10, 11, 12, 13, 16, 20, 25, 30, 40]) {
+  const { hero, m } = g.weeklyCardGeometry(n);
+  const { canvas, scale } = g.cardCanvas(m.contentHeight);
+  const primary = Math.min(m.name, m.number, m.points) * scale;
+  const secondary = m.second * scale;
+  console.log("     " + String(n).padStart(7) + "  " + String(Math.round(hero)).padStart(4)
+    + "  " + String(m.pages).padStart(5) + "  " + String(m.rowsPerPage).padStart(7)
+    + "  " + String(Math.round(m.rowH)).padStart(4)
+    + "  " + String(m.name).padStart(4) + "  " + String(m.number).padStart(4)
+    + "  " + String(m.points).padStart(3) + "  " + String(m.second).padStart(3)
+    + "  " + String(Math.round(m.contentHeight)).padStart(7)
+    + "  " + scale.toFixed(3).padStart(5)
+    + "  " + (primary >= 18 - 0.001 && secondary >= 15 - 0.001
+      && canvas.width === canvas.height && scale >= 1 ? "yes" : "NO"));
+}
+console.log("\n     Eleven members fit ONE square: the hero gives up the room the table");
+console.log("     needs, down to a floor of " + g.CARD_HERO_MIN + "px, and nothing shrinks below the type floors.");
 
 // --- the Season page's two folded sections ---------------------------------
 console.log("\n" + "=".repeat(74));

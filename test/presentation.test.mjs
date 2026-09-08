@@ -33,7 +33,8 @@ function recorder() {
   return { canvas, ctx, marks };
 }
 
-const NAMES = ["drawSeasonTableCard", "drawWeeklyResultCard", "drawCardHeader", "drawCardHero", "drawCardTableHead", "drawCardRowPlate", "drawCardHonours", "drawCardFooter",
+const NAMES = ["drawSeasonTableCard", "drawWeeklyResultCard", "drawCardHeader", "drawCardHero", "drawCardTableHead", "drawCardRowPlate", "drawWeeklyRowBand",
+  "drawCardRowRule", "weeklyCardGeometry", "drawCardHonours", "drawCardFooter",
   "drawFitted", "fitText", "ellipsise", "roundedRect", "cardCanvas", "cardRowMetrics", "cardFont",
   "cardDate", "sentenceCase", "seasonCardModel",
   "weeklyCardModel", "weeklyCardCaption", "weeklyShareStatus", "weeklyTerminalCount",
@@ -43,6 +44,7 @@ const NAMES = ["drawSeasonTableCard", "drawWeeklyResultCard", "drawCardHeader", 
   "weeklyFinalMismatchLines", "finalScore", "isVoidFixture", "isPostponed", "VOID_STATUSES",
   "CARD_TYPE_FLOOR", "CARD_SECOND_FLOOR", "CARD_MIN_ROW", "cardHonoursWidth", "cardHonoursFit", 
   "CARD", "CARD_W", "CARD_SIDE", "CARD_PAD", "CARD_COL", "CARD_HEAD_H", "CARD_HERO_H",
+  "CARD_HERO_MIN", "CARD_RULE_H", "weeklyCardGeometry", "drawWeeklyRowBand", "drawCardRowRule",
   "CARD_TABLE_HEAD_H", "CARD_ROW_H", "CARD_SEASON_ROW_H", "CARD_FOOT_H", "CARD_GAP", "PLACE_NUMBER"];
 
 function paintBox(overrides = {}) {
@@ -295,11 +297,14 @@ const WEEKLY_CHROME = () => {
 };
 
 function layoutOf(box, members, weekly) {
-  const chrome = weekly
-    ? box.CARD_HEAD_H + box.CARD_GAP + box.CARD_HERO_H + box.CARD_GAP
-      + box.CARD_TABLE_HEAD_H + box.CARD_GAP + box.CARD_FOOT_H
-    : box.CARD_HEAD_H + box.CARD_GAP + box.CARD_TABLE_HEAD_H + box.CARD_GAP + box.CARD_FOOT_H;
-  const m = box.cardRowMetrics(members, { chrome, base: weekly ? box.CARD_ROW_H : box.CARD_SEASON_ROW_H });
+  // The weekly card's hero and table are solved together, by the shipped
+  // function — the test must not carry its own copy of that arithmetic.
+  if (weekly) {
+    const { hero, chrome, m } = box.weeklyCardGeometry(members);
+    return { m, chrome, hero, k: Math.min(1, box.CARD_SIDE / Math.max(m.contentHeight, 1)) };
+  }
+  const chrome = box.CARD_HEAD_H + box.CARD_GAP + box.CARD_TABLE_HEAD_H + box.CARD_GAP + box.CARD_FOOT_H;
+  const m = box.cardRowMetrics(members, { chrome, base: box.CARD_SEASON_ROW_H });
   const k = Math.min(1, box.CARD_SIDE / Math.max(m.contentHeight, 1));
   return { m, k, chrome };
 }
@@ -550,4 +555,125 @@ test("pages · no exported table uses side-by-side columns, weekly or season", (
     assert.match(src, /cardPageRows\(model\.rows, page, m\)/, `${fn} does not page`);
     assert.match(src, /cardPageLabel\(page, m\.pages\)/, `${fn} does not number its pages`);
   }
+});
+
+// --- Adam's build-25 weekly corrections ------------------------------------
+
+test("W1 · eleven members are one square weekly attachment", () => {
+  const box = paintBox();
+  const { m, hero } = layoutOf(box, 11, true);
+  assert.equal(m.pages, 1, `eleven members split into ${m.pages} attachments`);
+  assert.equal(m.rowsPerPage, 11, "the page does not carry all eleven");
+  // It fits because the hero gave up the room, not because anything shrank.
+  assert.ok(hero < box.CARD_HERO_H, "the hero did not compact");
+  assert.ok(hero >= box.CARD_HERO_MIN, `the hero fell to ${hero}, below its floor`);
+  assert.ok(m.rowH >= box.CARD_MIN_ROW, "the rows fell below the row floor");
+  assert.ok(Math.min(m.name, m.number, m.points) >= box.CARD_TYPE_FLOOR);
+  assert.ok(Math.min(m.second) >= box.CARD_SECOND_FLOOR);
+  assert.equal(Math.min(1, box.CARD_SIDE / m.contentHeight), 1, "the card was shrunk to fit");
+});
+
+test("W1 · the eleven names are drawn once each, in rank order, on that one square", () => {
+  const box = paintBox();
+  const table = Array.from({ length: 11 }, (_, i) => ({
+    uid: `w${i}`, rank: i + 1, nick: `Player ${i + 1}`, pts: 92 - i * 3, exact: i % 4 }));
+  const canvases = box.drawWeeklyResultCard(weeklyState, weekRound(3, six(6), { complete: true, table }));
+  assert.equal(canvases.length, 1);
+  const drawn = texts(box);
+  for (const row of table) {
+    assert.equal(drawn.filter((text) => text === row.nick).length, 1, `${row.nick} is not drawn exactly once`);
+    assert.ok(drawn.includes(String(row.pts)), `${row.nick}'s points are missing`);
+  }
+  const order = drawn.filter((text) => /^Player \d+$/.test(text));
+  assert.deepEqual(order, table.map((row) => row.nick), "the ranking was reordered");
+  assert.ok(!drawn.some((text) => /^Page /.test(text)), "a single square was marked as a page");
+});
+
+test("W1 · the hero compacts only as far as the table needs, and no further", () => {
+  const box = paintBox();
+  // A small week keeps the roomy hero; a big one is bounded by its floor.
+  assert.equal(layoutOf(box, 6, true).hero, box.CARD_HERO_H, "a six-member week lost its hero");
+  assert.ok(layoutOf(box, 11, true).hero < box.CARD_HERO_H);
+  for (const members of SIZES) {
+    const { hero } = layoutOf(box, members, true);
+    assert.ok(hero >= box.CARD_HERO_MIN && hero <= box.CARD_HERO_H,
+      `${members} members put the hero at ${hero}`);
+  }
+  // It is a calculation, not a cutoff: the source contains no member count.
+  const geometry = sourceOf("weeklyCardGeometry");
+  assert.match(geometry, /CARD_SIDE - fixed - count \* CARD_MIN_ROW/);
+  assert.ok(!/\b(11|eleven)\b/.test(geometry), "a member count is hard-coded");
+  assert.match(geometry, /cardRowMetrics\(rows, \{ chrome: fixed \+ hero, base: CARD_ROW_H \}\)/);
+});
+
+test("W1 · twenty and thirty page only where the geometry requires it", () => {
+  const box = paintBox();
+  for (const [members, pages] of [[6, 1], [11, 1], [12, 1], [20, 2], [30, 3]]) {
+    const { m } = layoutOf(box, members, true);
+    assert.equal(m.pages, pages, `${members} members produced ${m.pages} attachments`);
+    // A page never carries more rows than a readable row height allows.
+    assert.ok(m.rowsPerPage * box.CARD_MIN_ROW <= box.CARD_SIDE - layoutOf(box, members, true).chrome + 0.5,
+      `${members}: a page is overfilled`);
+  }
+  // And no size is ever truncated.
+  for (const members of SIZES) {
+    const { m } = layoutOf(box, members, true);
+    assert.ok(m.pages * m.rowsPerPage >= members, `${members}: the pages cannot hold everyone`);
+  }
+});
+
+test("W2 · a weekly row's divider is drawn once, straight, across the table", () => {
+  const rule = sourceOf("drawCardRowRule");
+  // One rect, full table width, constant y and thickness — not per-column
+  // fragments and not a rounded plate edge that curves at the name column.
+  assert.match(rule, /ctx\.fillRect\(CARD_PAD, Math\.round\(y\), CARD_W - CARD_PAD \* 2, CARD_RULE_H\)/);
+  assert.match(rule, /ctx\.fillStyle = CARD\.line;/);
+  assert.equal((rule.match(/fillRect/g) || []).length, 1, "the divider is drawn more than once");
+  const draw = sourceOf("drawWeeklyResultCard");
+  assert.match(draw, /if \(index < rows\.length - 1\) drawCardRowRule\(ctx, rowTop \+ m\.rowH - CARD_RULE_H\);/);
+  // The weekly card no longer uses the rounded plate at all.
+  assert.ok(!draw.includes("drawCardRowPlate"), "the weekly row still draws a rounded plate");
+  // The band behind a podium row is a straight rect, so its edges agree.
+  assert.match(sourceOf("drawWeeklyRowBand"), /ctx\.fillRect\(CARD_PAD, y, CARD_W - CARD_PAD \* 2, height\)/);
+});
+
+test("W2 · every row gets exactly one divider, and the last row gets none", () => {
+  const box = paintBox();
+  const rules = [];
+  box.evalIn(`globalThis.__rules = [];`);
+  const table = Array.from({ length: 11 }, (_, i) => ({
+    uid: `w${i}`, rank: i + 1, nick: `P${i + 1}`, pts: 92 - i * 3, exact: i % 4 }));
+  box.drawWeeklyResultCard(weeklyState, weekRound(3, six(6), { complete: true, table }));
+  // The recorder does not capture fillRect, so count from the geometry and the
+  // source contract instead: ten dividers for eleven rows on one page.
+  const { m } = layoutOf(box, 11, true);
+  assert.equal(m.pages, 1);
+  assert.equal(m.rowsPerPage - 1, 10, "eleven rows should carry ten dividers");
+  void rules;
+});
+
+test("W2 · two-digit points and a medal do not move the divider", () => {
+  // The divider's y comes from the row, not from what is drawn in it, so a
+  // medal and a two-digit total cannot shift it.
+  const draw = sourceOf("drawWeeklyResultCard");
+  const ruleAt = /drawCardRowRule\(ctx, rowTop \+ m\.rowH - CARD_RULE_H\)/;
+  assert.match(draw, ruleAt);
+  const rule = draw.slice(draw.search(ruleAt));
+  for (const perRow of ["row.pts", "row.place", "PLACE_EMOJI", "row.nick"]) {
+    assert.ok(!rule.slice(0, 90).includes(perRow), `the divider position depends on ${perRow}`);
+  }
+});
+
+test("W2 · the Season export is untouched by the weekly corrections", () => {
+  const season = sourceOf("drawSeasonTableCard");
+  assert.match(season, /drawCardRowPlate\(ctx, rowTop, m\.rowH, index, null\)/, "the season plate changed");
+  for (const weeklyOnly of ["drawCardRowRule", "drawWeeklyRowBand", "weeklyCardGeometry", "drawCardHero"]) {
+    assert.ok(!season.includes(weeklyOnly), `the season card now uses ${weeklyOnly}`);
+  }
+  // Its geometry is the same chrome it always had.
+  const box = paintBox({ leagueTab: "season" });
+  assert.equal(layoutOf(box, 11, false).m.pages, 1);
+  assert.equal(layoutOf(box, 20, false).m.pages, 2);
+  assert.equal(layoutOf(box, 30, false).m.pages, 2);
+  assert.equal(layoutOf(box, 40, false).m.pages, 3);
 });

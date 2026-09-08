@@ -117,10 +117,13 @@ function cards({ native = false } = {}) {
     ${lift("function drawFitted(ctx, text, x, y, maxWidth,")}
     ${liftConst("CARD_SIDE")}
     ${lift("function cardRowMetrics(rows, { chrome, base, min = CARD_MIN_ROW })")}
+    ${lift("function weeklyCardGeometry(rows)")}
     ${lift("function cardCanvas(contentHeight)")}
     ${lift("function drawCardHeader(ctx, league, line, page = \"\")")}
-    ${lift("function drawCardHero(ctx, y, model)")}
+    ${lift("function drawCardHero(ctx, y, model, height = CARD_HERO_H)")}
     ${lift("function drawCardTableHead(ctx, y)")}
+    ${lift("function drawWeeklyRowBand(ctx, y, height, place)")}
+    ${lift("function drawCardRowRule(ctx, y)")}
     ${lift("function drawCardRowPlate(ctx, y, height, index, place)")}
     ${lift("function cardHonoursWidth(ctx, counts, size)")}
     ${lift("function cardHonoursFit(ctx, cols, counts, m)")}

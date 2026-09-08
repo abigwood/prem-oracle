@@ -20,7 +20,8 @@ const CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const FUNCTIONS = ["roundedRect", "fitText", "ellipsise", "drawFitted", "cardCanvas",
   "drawCardHeader", "drawCardHero", "drawCardTableHead", "drawCardRowPlate",
   "drawCardHonours", "cardHonoursWidth", "cardHonoursFit", "drawCardFooter",
-  "cardRowMetrics", "seasonCardModel", "weeklyCardModel",
+  "cardRowMetrics", "weeklyCardGeometry", "drawWeeklyRowBand", "drawCardRowRule",
+  "seasonCardModel", "weeklyCardModel",
   "weeklyShareStatus", "weeklyTerminalCount", "weeklySharePublished", "podiumCounts",
   "sharedRankByUid", "winnerNames", "seasonShareFreshness", "drawSeasonTableCard",
   "drawWeeklyResultCard", "finalScore", "weeklyCardCaption", "noteWeeklyFinalMismatch"];
@@ -29,6 +30,7 @@ const CONSTS = ["CARD_W", "CARD_SIDE", "CARD_PAD", "CARD", "CARD_COL",
   "CARD_FOOT_H", "CARD_GAP", "cardFont", "cardDate",
   "sentenceCase", "weeklyRanks", "VOID_STATUSES", "isVoidFixture", "isPostponed",
   "CARD_TYPE_FLOOR", "CARD_SECOND_FLOOR", "CARD_MIN_ROW", "CARD_MIN_NAME",
+  "CARD_HERO_MIN", "CARD_RULE_H",
   "cardPageRows", "cardPageLabel",
   "PLACE_NUMBER", "PLACE_EMOJI"];
 
@@ -84,7 +86,9 @@ const SCENE = {
   "weekly-in-progress-with-void": () => drawWeeklyResultCard(league,
     week(3, six(2, 1), { table: players(6) })),
   "weekly-final-6": () => drawWeeklyResultCard(league, week(3, six(5, 1), FINAL(6))),
+  "weekly-final-11": () => drawWeeklyResultCard(league, week(3, six(5, 1), FINAL(11))),
   "weekly-final-20": () => drawWeeklyResultCard(league, week(3, six(5, 1), FINAL(20))),
+  "weekly-final-30": () => drawWeeklyResultCard(league, week(3, six(5, 1), FINAL(30))),
   "season-1": () => drawSeasonTableCard(seasonState(1)),
   "season-11": () => drawSeasonTableCard(seasonState(11)),
   "season-20": () => drawSeasonTableCard(seasonState(20)),
@@ -97,9 +101,10 @@ const SCENE = {
     return canvases;
   },
 };
-const FINAL_MEMBERS = { "weekly-final-6": 6, "weekly-final-20": 20 };
+const FINAL_MEMBERS = { "weekly-final-6": 6, "weekly-final-11": 11, "weekly-final-20": 20,
+  "weekly-final-30": 30 };
 const WEEKLY_MEMBERS = { "weekly-not-started": 6, "weekly-in-progress-with-void": 6,
-  "weekly-final-6": 6, "weekly-final-20": 20 };
+  "weekly-final-6": 6, "weekly-final-11": 11, "weekly-final-20": 20, "weekly-final-30": 30 };
 const SEASON_MEMBERS = { "season-1": 1, "season-11": 11, "season-20": 20, "season-30": 30,
   "season-40": 40, "season-30-two-digit-honours": 30 };
 const HEAVY_SCENES = new Set(["season-30-two-digit-honours"]);
@@ -211,6 +216,25 @@ ${SCENES}
 ${CHECKS}
 
 const report = { cards: [], errors: [] };
+
+/**
+ * Every horizontal transition down one column of pixels.
+ *
+ * A row divider drawn once, straight, from the row itself gives the SAME list
+ * at every x. A rounded plate gives a different list near the name column than
+ * across the points column, which is what "misaligned separators" looks like.
+ */
+function columnEdges(ctx, x, height, from, to) {
+  const col = ctx.getImageData(x, 0, 1, height).data;
+  const edges = [];
+  for (let y = Math.max(1, from); y < Math.min(height, to); y++) {
+    const i = y * 4, j = (y - 1) * 4;
+    if (Math.abs(col[i] - col[j]) + Math.abs(col[i + 1] - col[j + 1])
+      + Math.abs(col[i + 2] - col[j + 2]) > 12) edges.push(y);
+  }
+  return edges;
+}
+
 const bg = [0x18, 0x00, 0x20];
 
 // Where the drawing sits inside the square, in device pixels.
@@ -220,9 +244,11 @@ const place = (contentHeight) => {
 };
 
 function tableGeometry(expect) {
-  const m = cardRowMetrics(expect.rows, { chrome: expect.chrome, base: expect.base });
+  const m = expect.weekly
+    ? weeklyCardGeometry(expect.rows).m
+    : cardRowMetrics(expect.rows, { chrome: expect.chrome, base: expect.base });
   const head = expect.weekly
-    ? CARD_HEAD_H + CARD_GAP + CARD_HERO_H + CARD_GAP
+    ? CARD_HEAD_H + CARD_GAP + weeklyCardGeometry(expect.rows).hero + CARD_GAP
     : CARD_HEAD_H + CARD_GAP;
   return { m, head, top: head + CARD_TABLE_HEAD_H, ...place(m.contentHeight) };
 }
@@ -337,6 +363,28 @@ function checkCard(name, canvas, expect) {
       "square fit " + g.k.toFixed(3));
   }
 
+  if (expect.weekly && expect.rows) {
+    // The dividers, measured at the table's left edge, between the name and
+    // exact columns, and at its right edge. One straight rule gives the same
+    // answer at all three; a curved plate edge does not.
+    const g = tableGeometry(expect);
+    const from = Math.round(g.ty + g.k * g.top);
+    const to = Math.round(g.ty + g.k * (g.top + g.m.rowsPerPage * g.m.rowH));
+    const at = (x) => columnEdges(ctx, x, canvas.height, from, to).join(",");
+    const left = at(Math.round(g.tx + g.k * (CARD_PAD + 6)));
+    const mid = at(Math.round(g.tx + g.k * 620));
+    const right = at(Math.round(g.tx + g.k * (CARD_W - CARD_PAD - 6)));
+    ok("every divider is one continuous line across the full width",
+      left === mid && mid === right,
+      left === mid && mid === right
+        ? left.split(",").length + " transitions, identical at every x"
+        : "left [" + left + "] mid [" + mid + "] right [" + right + "]");
+    // And it never runs into the page margin.
+    const outside = columnEdges(ctx, Math.round(g.tx + g.k * (CARD_PAD - 8)), canvas.height, from, to);
+    ok("no divider crosses the page margin", outside.length === 0,
+      outside.length + " transitions outside the table");
+  }
+
   if (expect.podium === "none") {
     // The rostrum used to live between the hero and the table head. That band
     // is a gap now, and a gap is flat.
@@ -365,9 +413,11 @@ try {
     const members = WEEKLY_MEMBERS[name] ?? SEASON_MEMBERS[name];
     const weekly = name.startsWith("weekly");
     const chrome = weekly
-      ? CARD_HEAD_H + CARD_GAP + CARD_HERO_H + CARD_GAP + CARD_TABLE_HEAD_H + CARD_GAP + CARD_FOOT_H
+      ? weeklyCardGeometry(members).chrome
       : CARD_HEAD_H + CARD_GAP + CARD_TABLE_HEAD_H + CARD_GAP + CARD_FOOT_H;
-    const m = cardRowMetrics(members, { chrome, base: weekly ? CARD_ROW_H : CARD_SEASON_ROW_H });
+    const m = weekly
+      ? weeklyCardGeometry(members).m
+      : cardRowMetrics(members, { chrome, base: CARD_SEASON_ROW_H });
     const expect = {
       rows: members, members, weekly, chrome, base: weekly ? CARD_ROW_H : CARD_SEASON_ROW_H,
       honours: !weekly,
@@ -408,6 +458,7 @@ const json = dom.slice(dom.indexOf(">", at) + 1, dom.indexOf("</pre>", at))
 const report = JSON.parse(json);
 
 if (report.errors.length) { console.error(report.errors.join("\n")); process.exit(1); }
+
 
 let failed = 0;
 console.log(`\n  Rendered in ${execFileSync(CHROME, ["--version"], { encoding: "utf8" }).trim()}\n`);

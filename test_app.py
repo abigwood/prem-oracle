@@ -886,6 +886,46 @@ class CustomMixTests(unittest.TestCase):
         # And a league change drops it at once.
         self.assertIn("forgetPicksRound();", self.app[self.app.index("function forgetMatesState()"):])
 
+    def test_the_weekly_hero_gives_the_table_the_room_it_needs(self):
+        # Adam's build-25 correction 1: eleven members fit one weekly square,
+        # because the hero is a calculation rather than a fixed 220px.
+        fn = self.app[self.app.index("function weeklyCardGeometry(rows)"):]
+        fn = fn[:fn.index("\n}\n")]
+        self.assertIn("CARD_SIDE - fixed - count * CARD_MIN_ROW", fn)
+        self.assertIn("Math.max(CARD_HERO_MIN,", fn)
+        self.assertIn("Math.min(CARD_HERO_H,", fn)
+        self.assertIn("cardRowMetrics(rows, { chrome: fixed + hero, base: CARD_ROW_H })", fn)
+        # A calculation, not a cutoff at some member count.
+        for cutoff in ("11", "eleven", "== 11", "> 10"):
+            self.assertNotIn(cutoff, fn, cutoff)
+        self.assertIn("const CARD_HERO_MIN = 150;", self.app)
+        # And the hero draws itself at whatever height it is given.
+        hero = self.app[self.app.index("function drawCardHero(ctx, y, model, height = CARD_HERO_H)"):]
+        hero = hero[:hero.index("\n}")]
+        self.assertIn("const at = (share) => y + Math.round(height * share);", hero)
+        self.assertIn("const scale = height / CARD_HERO_H;", hero)
+
+    def test_a_weekly_row_has_one_continuous_divider(self):
+        # Adam's build-25 correction 2: one straight line, the full width of
+        # the table, drawn once from the row rather than per column.
+        rule = self.app[self.app.index("function drawCardRowRule(ctx, y)"):]
+        rule = rule[:rule.index("\n}")]
+        self.assertIn("ctx.fillStyle = CARD.line;", rule)
+        self.assertIn("ctx.fillRect(CARD_PAD, Math.round(y), CARD_W - CARD_PAD * 2, CARD_RULE_H);", rule)
+        self.assertEqual(rule.count("fillRect"), 1)
+        self.assertIn("const CARD_RULE_H = 2;", self.app)
+        draw = self.app[self.app.index("function drawWeeklyResultCard(state, round)"):]
+        draw = draw[:draw.index("\n}\n")]
+        self.assertIn("if (index < rows.length - 1) drawCardRowRule(ctx, rowTop + m.rowH - CARD_RULE_H);", draw)
+        # The weekly row no longer uses the rounded plate whose edge curved.
+        self.assertNotIn("drawCardRowPlate", draw)
+        # The season card still does, unchanged.
+        season = self.app[self.app.index("function drawSeasonTableCard(state)"):]
+        season = season[:season.index("\n}\n")]
+        self.assertIn("drawCardRowPlate(ctx, rowTop, m.rowH, index, null)", season)
+        self.assertNotIn("drawCardRowRule", season)
+        self.assertNotIn("weeklyCardGeometry", season)
+
     def test_no_exported_table_uses_columns(self):
         # Adam's build-25 ruling 1: one linear vertical list, weekly as well as
         # season, paged when the members will not fit one readable square.

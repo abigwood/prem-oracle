@@ -47,7 +47,7 @@ const NAMES = ["roundTableHtml", "seasonTableHtml", "medalLine", "weeklyMovement
   "cardPageRows", "cardPageLabel", "cardTableTop", "CARD_MIN_NAME", "weeklySharePublished", "shareCardState", "seasonShareFreshness", "shareIconButton",
   "podiumCounts", "weeklyRanks", "sharedRankByUid", "winnerNames", "noteWeeklyFinalMismatch",
   "weeklyFinalMismatchLines", "finalScore", "isVoidFixture", "isPostponed", "VOID_STATUSES",
-  "CARD_TYPE_FLOOR", "CARD_SECOND_FLOOR", "CARD_MIN_ROW", "cardHonoursWidth", "cardHonoursSize", "CARD_MOVE_GAP", "CARD_MOVE_COLOUR", "CARD_SEASON_MAX_ROWS", "CARD_ROW_TWO_LINE", "CARD_TABLE_LEAD", 
+  "CARD_TYPE_FLOOR", "CARD_SECOND_FLOOR", "CARD_MIN_ROW", "cardHonoursParts", "CARD_HONOURS_SEP", "cardHonoursWidth", "cardHonoursSize", "CARD_MOVE_GAP", "CARD_MOVE_COLOUR", "CARD_SEASON_MAX_ROWS", "CARD_ROW_TWO_LINE", "CARD_TABLE_LEAD", 
   "CARD", "CARD_W", "CARD_W_PX", "CARD_H_PX", "CARD_PAD", "CARD_COL", "CARD_HEAD_H", "CARD_HERO_H",
   "CARD_HERO_MIN", "CARD_RULE_H", "weeklyCardGeometry", "drawWeeklyRowBand", "drawCardRowRule",
   "CARD_TABLE_HEAD_H", "CARD_ROW_H", "CARD_SEASON_ROW_H", "CARD_FOOT_H", "CARD_GAP", "PLACE_NUMBER"];
@@ -170,7 +170,13 @@ test("A · the hero frame is neutral until somebody is named", () => {
 const seasonMove = (i) => ((i + 2) % 5) - 2;
 const seasonTable = (n) => Array.from({ length: n }, (_, i) => ({
   uid: `u${i}`, rank: i + 1, nick: `Player ${i + 1}`, pts: 200 - i * 3, exact: i % 4,
-  podiums: { gold: i % 3, silver: (i + 1) % 3, bronze: (i + 2) % 3 },
+  // Four shapes, cycling: no medals at all, one type only, two types, and all
+  // three at two digits. Every rendered table therefore carries a row that
+  // must show nothing and a row that must show everything.
+  podiums: [{ gold: 0, silver: 0, bronze: 0 },
+    { gold: 3, silver: 0, bronze: 0 },
+    { gold: 0, silver: 2, bronze: 4 },
+    { gold: 12, silver: 34, bronze: 56 }][i % 4],
   // The worker sends both, and they agree: movement IS previousRank - rank.
   movement: seasonMove(i),
   previousRank: i + 1 + seasonMove(i),
@@ -189,15 +195,22 @@ for (const [label, members] of [["common", 8], ["maximum", 30]]) {
     const drawn = box.__made.slice(-pages).flatMap((made) => made.marks.map((mark) => mark.text));
     const model = box.seasonCardModel(state);
     assert.equal(model.rows.length, members, "every member is exported");
+    // Compression, never truncation: every NON-ZERO count reaches the canvas.
+    // A zero reaches nothing, because a medal nobody won is not a record.
+    let withMedals = 0, withNone = 0;
     for (const row of model.rows) {
+      if (box.cardHonoursParts(row.honours).length) withMedals++; else withNone++;
       for (const [emoji, key] of [["🏆", "gold"], ["🥈", "silver"], ["🥉", "bronze"]]) {
-        assert.ok(drawn.includes(`${emoji} ${row.honours[key]}`),
-          `${row.nick}: ${key}=${row.honours[key]} never reached the canvas`);
+        const count = row.honours[key];
+        if (count > 0) {
+          assert.ok(drawn.includes(emoji + count),
+            `${row.nick}: ${key}=${count} never reached the canvas`);
+        } else {
+          assert.ok(!drawn.includes(emoji + "0"), `${row.nick}: ${key}=0 was drawn anyway`);
+        }
       }
     }
-    // Every row's tally is drawn, not just the ones that happen to be non-zero.
-    const tallies = drawn.filter((t) => /^🏆 \d+$/.test(t)).length;
-    assert.equal(tallies, members, `${tallies} gold tallies for ${members} rows`);
+    assert.ok(withMedals > 0 && withNone > 0, "the fixture covers only one case");
   });
 }
 
@@ -207,39 +220,49 @@ test("B · honours are on the row, whichever way the row is laid out", () => {
   const opts = { chrome, base: box.CARD_SEASON_ROW_H, maxPerPage: box.CARD_SEASON_MAX_ROWS };
   const roomy = box.cardRowMetrics(8, opts);
   const tight = box.cardRowMetrics(30, opts);
-  // The cap is what makes the two-line Player cell unconditional: no season
-  // size can produce a row too short to carry a name and a tally beneath it.
   for (const members of [1, 6, 11, 20, 21, 30, 40, 60, 90, 200]) {
     const m = box.cardRowMetrics(members, opts);
     assert.ok(m.rowsPerPage <= box.CARD_SEASON_MAX_ROWS, `${members}: a page exceeded the cap`);
-    assert.equal(m.twoLine, true, `${members}: a row was too short for its own tally`);
     assert.ok(m.honoursSize >= box.CARD_SECOND_FLOOR, `${members}: the tally fell below the floor`);
   }
   assert.ok(tight.honoursSize >= 13, "the compact tally is still a readable size");
   assert.ok(roomy.rowH >= tight.rowH, "a smaller table did not get roomier rows");
-  // Laid out beneath the name, inside the same cell.
+  // One line, one cell: the tally follows the name and shares its baseline.
   const box2 = paintBox({ leagueTab: "season" });
   const pages = box2.drawSeasonTableCard(seasonState(30)).length;
   const marks = box2.__made.slice(-pages).flatMap((made) => made.marks);
-  const tally = marks.find((m) => /^🏆 \d+$/.test(m.text));
-  const name = marks.find((m) => m.text === "Player 1");
+  const name = marks.find((m) => m.text === "Player 4");
+  const tally = marks.find((m) => /^🏆\d+$/.test(m.text) && Math.abs(m.y - name.y) < 1);
   assert.ok(tally && name, "both the name and the tally are drawn");
-  // One cell, two lines: the tally shares the name's left edge and sits below
-  // it, so it reads as that player's record rather than as a loose number.
-  assert.equal(tally.x, name.x, "the tally left the name's column");
-  assert.ok(tally.y > name.y, "the tally is not beneath the name");
-  assert.ok(tally.x < box2.CARD_COL.split, "the tally crossed into the scoring columns");
+  assert.equal(tally.y, name.y, "the tally left the name's line");
+  assert.ok(tally.x > name.x, "the tally does not follow the name");
+  assert.ok(tally.x < box2.CARD_COL.player, "the tally left the Player cell");
 });
 
-test("B · a member with no honours still shows a zero tally", () => {
+test("B · a member with no honours shows nothing, and reserves nothing", () => {
   const box = paintBox({ leagueTab: "season" });
-  const state = { code: "AAA", name: "Sunday Six", owner: "u1", currentMatchday: 8,
+  const bare = { code: "AAA", name: "Sunday Six", owner: "u1", currentMatchday: 8,
     currentMatchdayHasResults: true,
     table: [{ uid: "u1", rank: 1, nick: "Adam", pts: 12, exact: 1 }] };
-  box.drawSeasonTableCard(state);
+  box.drawSeasonTableCard(bare);
   const drawn = texts(box);
-  assert.ok(drawn.includes("🏆 0") && drawn.includes("🥈 0") && drawn.includes("🥉 0"),
-    "an empty tally is drawn as zeroes, not omitted");
+  assert.ok(!drawn.some((t) => /[🏆🥈🥉]/u.test(t)),
+    "an empty tally was drawn as noughts rather than omitted");
+  assert.equal(box.cardHonoursParts({ gold: 0, silver: 0, bronze: 0 }).length, 0);
+  const ctx = { font: "", measureText: (t) => ({ width: String(t).length * 12 }) };
+  assert.equal(box.cardHonoursWidth(ctx, { gold: 0, silver: 0, bronze: 0 }, 24), 0,
+    "an absent tally still reserved width");
+  // And the name gets the space the tally would have taken: a medal-less row
+  // is not indented to line up with rows that have one.
+  const medalled = { ...bare,
+    table: [{ uid: "u1", rank: 1, nick: "Adam", pts: 12, exact: 1,
+      podiums: { gold: 12, silver: 34, bronze: 56 } }] };
+  const box2 = paintBox({ leagueTab: "season" });
+  box2.drawSeasonTableCard(medalled);
+  const withTally = box2.__made.slice(-1)[0].marks.filter((m) => /^[🏆🥈🥉]\d+$/u.test(m.text));
+  assert.equal(withTally.length, 3, "all three medal types must be shown");
+  assert.deepEqual(withTally.map((m) => m.text), ["🏆12", "🥈34", "🥉56"],
+    "two-digit counts were compressed away");
 });
 
 // --- C · terminal is not "settled" -----------------------------------------
@@ -488,16 +511,21 @@ test("sol · every attachment is a complete, readable table in its own right", (
         assert.ok(drawn.includes(`Page ${index + 1} of ${pages}`),
           `${members}/${index + 1}: no page marker`);
       }
-      // 4 · a tally under every name, inside the Player cell, clear of EXACT.
-      const tallies = page.marks.filter((mark) => /^🏆 \d+$/.test(mark.text));
-      assert.equal(tallies.length, onPage, `${members}/${index + 1}: a row lost its tally`);
+      // 4 · every medalled row's tally sits inside the Player cell, beside the
+      //     name, and every medal-less row shows none.
+      const tallies = page.marks.filter((mark) => /^🏆\d+$/u.test(mark.text));
+      const medalled = model.rows
+        .filter((row) => box.cardHonoursParts(row.honours).some(([g]) => g === "🏆"))
+        .filter((row) => drawn.includes(row.nick)).length;
+      assert.equal(tallies.length, medalled,
+        `${members}/${index + 1}: ${tallies.length} gold tallies for ${medalled} medalled rows`);
       for (const tally of tallies) {
-        assert.equal(tally.x, box.CARD_COL.name, `${members}: a tally left the Player column`);
-        assert.ok(tally.x < box.CARD_COL.split, `${members}: a tally crossed the boundary`);
+        assert.ok(tally.x >= box.CARD_COL.name, `${members}: a tally sat left of the name`);
+        assert.ok(tally.x < box.CARD_COL.player, `${members}: a tally left the Player cell`);
       }
-      // 5 · nothing on the player side of the rule reaches across it.
-      const playerSide = page.marks.filter((mark) => mark.align !== "right"
-        && mark.x >= box.CARD_COL.name && /^(Player \d+|🏆)/.test(mark.text));
+      // 5 · nothing in the Player cell reaches across the rule at its edge.
+      const playerSide = page.marks.filter((mark) => mark.align !== "right" && mark.align !== "center"
+        && mark.x >= box.CARD_COL.name && /^(Player \d+|[🏆🥈🥉])/u.test(mark.text));
       for (const mark of playerSide) {
         const width = String(mark.text).length * (Number(/(\d+)px/.exec(mark.font)?.[1] || 24) * 0.58);
         assert.ok(mark.x + width <= box.CARD_COL.split,
@@ -1069,9 +1097,11 @@ test("move · markers appear on every page of a paged table, once per row", () =
       assert.equal(marks.length, rows, `${members}/${index + 1}: ${marks.length} markers for ${rows} rows`);
       total += marks.length;
       // Every kind is present somewhere, so no page is a single-state page.
+      // Every marker on its own column's axis, between the Player cell and
+      // EXACT — that is what makes a page of them read as a column.
       for (const mark of marks) {
-        assert.ok(mark.x >= box.CARD_COL.name, `${members}: a marker sat left of the name`);
-        assert.ok(mark.x < box.CARD_COL.split, `${members}: a marker crossed into the scoring columns`);
+        assert.equal(mark.x, box.CARD_COL.move, `${members}: a marker left the MOVE column`);
+        assert.equal(mark.align, "center", `${members}: a marker is not centred on its column`);
       }
     });
     assert.equal(total, members, `${members}: a member lost their marker across pages`);
@@ -1086,16 +1116,28 @@ test("move · a marker is never mistaken for honours, Exact or Pts", () => {
   const marks = box.__made.slice(-1)[0].marks;
   for (const row of model.rows) {
     const name = marks.find((m) => m.text === row.nick);
-    const tally = marks.find((m) => /^🏆 \d+$/.test(m.text) && m.y > name.y && m.y - name.y < 60);
     const mark = marks.find((m) => /^[▲▼–]/.test(m.text) && Math.abs(m.y - name.y) < 1);
     assert.ok(mark, `${row.nick}: no marker drawn`);
-    // On the NAME's line, not the tally's, and to the right of the name.
-    assert.equal(mark.y, name.y, `${row.nick}: the marker left the name's line`);
-    assert.ok(tally && mark.y < tally.y, `${row.nick}: the marker sits on the honours line`);
-    assert.ok(mark.x > name.x, `${row.nick}: the marker is not beside the name`);
-    // And clear of the scoring columns entirely.
-    assert.ok(mark.x < box.CARD_COL.split, `${row.nick}: the marker reached the scoring columns`);
+    // Its own column: past the Player cell and its rule, short of EXACT, on
+    // the same axis for every row whatever the magnitude.
+    assert.equal(mark.x, box.CARD_COL.move, `${row.nick}: the marker left the MOVE column`);
+    // Shares the row's baseline with the name and the scores, so the row
+    // reads straight across rather than stepping up and down.
+    assert.equal(mark.y, name.y, `${row.nick}: the marker left the row's line`);
+    // A tally, where the row has one, stays behind in the Player cell.
+    const tally = marks.find((m) => /^🏆\d+$/u.test(m.text) && Math.abs(m.y - name.y) < 1);
+    if (tally) assert.ok(tally.x < box.CARD_COL.split, `${row.nick}: the tally left the cell`);
   }
+  assert.ok(box.CARD_COL.split < box.CARD_COL.move, "MOVE is inside the Player cell");
+  assert.ok(box.CARD_COL.move < box.CARD_COL.exact, "MOVE is not before EXACT");
+  // The column order is PLAYER | MOVE | EXACT | PTS, and the headings say so.
+  const headings = marks.filter((m) => ["PLAYER", "MOVE", "EXACT", "PTS"].includes(m.text));
+  assert.deepEqual(headings.map((h) => h.text), ["PLAYER", "MOVE", "EXACT", "PTS"],
+    "the headings are missing or out of order");
+  assert.deepEqual(headings.map((h) => h.x),
+    [box.CARD_COL.name, box.CARD_COL.move, box.CARD_COL.exact, box.CARD_COL.pts]);
+  assert.equal(headings[1].align, "center", "the MOVE heading is not over its column");
+  assert.ok(headings.every((h) => h.y === headings[0].y), "the headings are not on one line");
 });
 
 test("move · nothing accepted moved to make room for the markers", () => {
@@ -1265,4 +1307,171 @@ test("unavailable · 5 · nothing else moved: layout, paging, floors, or words",
   // The weekly card is untouched by a season-only correction.
   assert.ok(!sourceOf("weeklyCardModel").includes("seasonMovement"), "the weekly model changed");
   assert.match(sourceOf("weeklyCardModel"), /movement\.has\(row\.uid\)/, "the weekly rule changed");
+});
+
+// --- the MOVE column and the compact tally (build-29 rider) ----------------
+
+const HONOUR_SHAPES = [
+  ["no medals at all", { gold: 0, silver: 0, bronze: 0 }, []],
+  ["one type only", { gold: 3, silver: 0, bronze: 0 }, ["🏆3"]],
+  ["two types", { gold: 0, silver: 2, bronze: 4 }, ["🥈2", "🥉4"]],
+  ["all three, two digits", { gold: 12, silver: 34, bronze: 56 }, ["🏆12", "🥈34", "🥉56"]],
+];
+
+const seasonOf = (table) => ({ code: "AAA", name: "Sunday Six", owner: "u1", table,
+  currentMatchday: 8, currentMatchdayHasResults: true });
+
+test("cols · the export reads PLAYER | MOVE | EXACT | PTS, in that order", () => {
+  for (const weekly of [false, true]) {
+    const box = paintBox({ leagueTab: weekly ? "matchday" : "season" });
+    if (weekly) box.drawWeeklyResultCard(weeklyState, moverRound());
+    else box.drawSeasonTableCard(seasonState(11));
+    const marks = box.__made.slice(-1)[0].marks;
+    const headings = marks.filter((m) => ["PLAYER", "MOVE", "EXACT", "PTS"].includes(m.text));
+    assert.deepEqual(headings.map((h) => h.text), ["PLAYER", "MOVE", "EXACT", "PTS"],
+      `${weekly ? "weekly" : "season"}: wrong headings or order`);
+    // Left to right, strictly increasing, with MOVE immediately before EXACT.
+    const xs = [box.CARD_COL.name, box.CARD_COL.move, box.CARD_COL.exact, box.CARD_COL.pts];
+    assert.deepEqual(headings.map((h) => h.x), xs);
+    assert.deepEqual([...xs].sort((a, b) => a - b), xs, "the columns are out of order");
+    assert.ok(box.CARD_COL.player < box.CARD_COL.move, "MOVE is still inside the Player cell");
+    assert.ok(box.CARD_COL.split > box.CARD_COL.player && box.CARD_COL.split < box.CARD_COL.move,
+      "the rule is not between PLAYER and MOVE");
+    // Every marker on the column's axis, whatever its magnitude.
+    const markers = marks.filter((m) => /^[▲▼–]/.test(m.text));
+    assert.ok(markers.length > 0, "no markers drawn");
+    for (const marker of markers) {
+      assert.equal(marker.x, box.CARD_COL.move, "a marker left the MOVE column");
+      assert.equal(marker.align, "center");
+    }
+  }
+});
+
+test("cols · both exports place the MOVE column identically", () => {
+  const season = paintBox({ leagueTab: "season" });
+  season.drawSeasonTableCard(seasonState(11));
+  const weekly = paintBox();
+  weekly.drawWeeklyResultCard(weeklyState, moverRound());
+  const moveX = (box) => box.__made.slice(-1)[0].marks
+    .filter((m) => /^[▲▼–]/.test(m.text)).map((m) => m.x);
+  const seasonXs = moveX(season), weeklyXs = moveX(weekly);
+  assert.ok(seasonXs.length && weeklyXs.length, "one of the cards drew no markers");
+  assert.deepEqual(new Set([...seasonXs, ...weeklyXs]), new Set([season.CARD_COL.move]),
+    "the two exports put the marker in different places");
+});
+
+for (const [label, counts, expected] of HONOUR_SHAPES) {
+  test(`tally · ${label}`, () => {
+    const box = paintBox({ leagueTab: "season" });
+    const table = [{ uid: "u1", rank: 1, nick: "Adam", pts: 12, exact: 1,
+      podiums: counts, movement: 0, previousRank: 1 }];
+    box.drawSeasonTableCard(seasonOf(table));
+    const marks = box.__made.slice(-1)[0].marks;
+    const name = marks.find((m) => m.text === "Adam");
+    const parts = marks.filter((m) => /^[🏆🥈🥉]\d+$/u.test(m.text)).map((m) => m.text);
+    // Only non-zero counts, in medal order, complete and uncompressed.
+    assert.deepEqual(parts, expected, `${label}: wrong tally`);
+    // Nothing at all when there is nothing to show — no empty glyphs.
+    if (!expected.length) {
+      assert.ok(!marks.some((m) => /[🏆🥈🥉]/u.test(m.text)), "an empty glyph was drawn");
+    }
+    // Same line as the name, after it, inside the Player cell.
+    for (const part of marks.filter((m) => /^[🏆🥈🥉]\d+$/u.test(m.text))) {
+      assert.equal(part.y, name.y, `${label}: the tally left the name's line`);
+      assert.ok(part.x > name.x, `${label}: the tally is not after the name`);
+      assert.ok(part.x < box.CARD_COL.player, `${label}: the tally left the Player cell`);
+      assert.ok(part.x < box.CARD_COL.move, `${label}: the tally reached the MOVE column`);
+    }
+  });
+}
+
+test("tally · the tally is reserved first; an over-long name takes the ellipsis", () => {
+  const box = paintBox({ leagueTab: "season" });
+  const long = "Bartholomew Fotheringay-Chumleigh";
+  const table = [
+    { uid: "u1", rank: 1, nick: long, pts: 12, exact: 1,
+      podiums: { gold: 12, silver: 34, bronze: 56 }, movement: 0, previousRank: 1 },
+    { uid: "u2", rank: 2, nick: long, pts: 9, exact: 0,
+      podiums: { gold: 0, silver: 0, bronze: 0 }, movement: 0, previousRank: 2 },
+  ];
+  box.drawSeasonTableCard(seasonOf(table));
+  const marks = box.__made.slice(-1)[0].marks;
+  const parts = marks.filter((m) => /^[🏆🥈🥉]\d+$/u.test(m.text)).map((m) => m.text);
+  // Compression only, never truncation: all three survive the long name.
+  assert.deepEqual(parts, ["🏆12", "🥈34", "🥉56"], "a medal was dropped to fit a name");
+  // The name is what gave way, and it says so with an ellipsis.
+  const names = marks.filter((m) => m.text.startsWith("Bart"));
+  assert.equal(names.length, 2, "both rows should have drawn a name");
+  assert.ok(names[0].text.endsWith("…"), `the medalled name was not ellipsised: ${names[0].text}`);
+  assert.ok(names[0].text.length < long.length, "the name was not shortened at all");
+  // The medal-less row keeps more of its name: nothing is reserved for a
+  // tally that does not exist.
+  assert.ok(names[1].text.length > names[0].text.length,
+    "a row with no medals lost the same space as one with three");
+  // Nothing wraps: one mark per name, one line per row.
+  assert.equal(new Set(marks.filter((m) => m.text.startsWith("Bart")).map((m) => m.y)).size, 2,
+    "a name was drawn on more than one line");
+});
+
+test("tally · names stay dominant, and the tally stays legible", () => {
+  const box = paintBox({ leagueTab: "season" });
+  const chrome = box.CARD_HEAD_H + box.CARD_GAP + box.CARD_TABLE_HEAD_H + box.CARD_GAP + box.CARD_FOOT_H;
+  const opts = { chrome, base: box.CARD_SEASON_ROW_H, maxPerPage: box.CARD_SEASON_MAX_ROWS };
+  for (const members of [11, 20, 21, 30, 40, 60]) {
+    const m = box.cardRowMetrics(members, opts);
+    assert.ok(m.honoursSize <= m.name, `${members}: the tally is not smaller than the name`);
+    assert.ok(m.honoursSize >= box.CARD_SECOND_FLOOR, `${members}: the tally fell below the floor`);
+    assert.ok(m.name >= box.CARD_TYPE_FLOOR, `${members}: the name fell below the floor`);
+  }
+  // Even squeezed to its floor the tally keeps every medal it was given.
+  const ctx = { font: "", measureText: (t) => ({ width: String(t).length * 12 }) };
+  const counts = { gold: 12, silver: 34, bronze: 56 };
+  const size = box.cardHonoursSize(ctx, counts, 24, 40);
+  assert.equal(size, box.CARD_SECOND_FLOOR, "the tally did not shrink to its floor");
+  assert.equal(box.cardHonoursParts(counts).length, 3, "a medal was dropped under pressure");
+});
+
+test("cols · the accepted portrait guarantees are all still true", () => {
+  const box = paintBox({ leagueTab: "season" });
+  for (const [members, pages] of [[11, 1], [20, 1], [21, 2], [30, 2], [40, 2], [60, 3]]) {
+    const { m, k } = layoutOf(box, members, false);
+    assert.equal(m.pages, pages, `${members}: season pagination moved`);
+    assert.ok(m.rowsPerPage <= box.CARD_SEASON_MAX_ROWS, `${members}: the 20-row cap moved`);
+    assert.equal(k, 1, `${members}: a page is being scaled`);
+    assert.ok(Math.min(m.name, m.number, m.points) >= box.CARD_TYPE_FLOOR, `${members}: type floor`);
+    assert.ok(Math.min(m.second, m.honoursSize) >= box.CARD_SECOND_FLOOR, `${members}: second floor`);
+  }
+  for (const [members, pages] of [[6, 1], [11, 1], [20, 1], [30, 1], [40, 2]]) {
+    assert.equal(layoutOf(box, members, true).m.pages, pages, `${members}: weekly pagination moved`);
+  }
+  for (const members of [11, 20, 30]) {
+    for (const [weekly, draw] of [[false, () => box.drawSeasonTableCard(seasonState(members))],
+      [true, () => box.drawWeeklyResultCard(weeklyState, moverRound(MOVERS, MOVER_TABLE))]]) {
+      void weekly;
+      for (const canvas of draw()) {
+        assert.equal(canvas.width, 1080);
+        assert.equal(canvas.height, 1920);
+      }
+    }
+  }
+  // Season rows stay rounded plates; weekly rows stay banded with one rule.
+  assert.match(sourceOf("drawSeasonPage"), /drawCardRowPlate\(ctx, rowTop, m\.rowH, index, null\)/);
+  assert.ok(!sourceOf("drawSeasonPage").includes("drawCardRowRule"), "the season card grew dividers");
+  assert.match(sourceOf("drawWeeklyPage"), /drawCardRowRule\(ctx, rowTop \+ m\.rowH - CARD_RULE_H\)/);
+  assert.ok(!sourceOf("drawWeeklyPage").includes("drawCardHonours"), "the weekly card grew a tally");
+});
+
+test("cols · the on-screen tables are untouched by an export-only change", () => {
+  // The screen keeps its own three-column shape and its own badge markup.
+  const screen = sourceOf("seasonTableHtml");
+  assert.ok(!screen.includes("MOVE"), "the screen grew a MOVE column");
+  assert.match(screen, /<th>Player<\/th><th><\/th><th>Pts<\/th><th>Exact<\/th>/);
+  assert.match(screen, /\$\{movementBadge\(row\)\}/, "the screen's badge changed");
+  assert.match(sourceOf("medalLine"), /class="medals"/, "the screen's medal line changed");
+  // The screen still shows a zero medal, muted — only the CARD suppresses.
+  assert.match(sourceOf("medalLine"), /is-none/, "the screen stopped showing zero medals");
+  const box = paintBox({ leagueTab: "season" });
+  const html = box.seasonTableHtml(seasonOf(seasonTable(4)), false, true);
+  assert.ok(html.includes("🏆 0") || html.includes("🥈 0") || html.includes("🥉 0"),
+    "the screen's zero medals disappeared with the card's");
 });

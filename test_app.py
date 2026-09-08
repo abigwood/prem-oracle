@@ -939,6 +939,35 @@ class CustomMixTests(unittest.TestCase):
         self.assertIn("const cardPageLabel = (page, pages) =>", self.app)
         self.assertIn("Page ${page + 1} of ${pages}", self.app)
 
+    def test_my_picks_expands_to_the_same_card_next_builds(self):
+        # Adam's v1.7 correction: the editable disclosure was a bare stepper,
+        # which is a truncated version of a card that already exists. There is
+        # one card renderer and My Picks calls it.
+        self.assertEqual(self.app.count("function matchCard("), 1)
+        body = self.app[self.app.index("function pickRowBody(match, editable)"):]
+        body = body[:body.index("\n}")]
+        self.assertIn("return editable ? matchCard(match, { social: false }) : fixtureRevealSection(match);", body)
+        # social:false is the privacy boundary, not a presentation difference:
+        # an editable fixture has not locked, so nobody else's pick is on it.
+        card = self.app[self.app.index("function matchCard(match, { resultFirst = false, reveal = null, social = true } = {})"):]
+        card = card[:card.index("\n}")]
+        self.assertIn("${!social ? \"\" : reveal ? pickRevealSection(match, reveal) : fixtureRevealSection(match)}", card)
+        # Everything the brief lists is in that one card.
+        for part in ("matchIntelStrip(match)", "players football-teams", "teamBadge(match.player1)",
+                     "matchTime(match)", "probabilityStrip(match)", "formGuide(match)",
+                     "pickStatus(match, pick, open)", "scorePicker(match, open)", "resultText(match)"):
+            self.assertIn(part, card, part)
+        # Venue rides on the intel strip, with no pill when there is none.
+        strip = self.app[self.app.index("function matchIntelStrip(match)"):]
+        strip = strip[:strip.index("\n}")]
+        self.assertIn("${match.venue ? ", strip)
+        # And the expansion mounts exactly what a first paint would have.
+        expand = self.app[self.app.index("function expandPick(id)"):]
+        expand = expand[:expand.index("\n}")]
+        self.assertIn("pickRowBody(fixture, pickEditable(fixture))", expand)
+        for banned in ("render(", "navigateToView", "api(", "fetch(", "scrollTo", "scrollIntoView"):
+            self.assertNotIn(banned, expand, banned)
+
     def test_a_selection_tap_updates_in_place_and_never_renders(self):
         # v1.7 UX rider B: the tap used to call render(), which rebuilds
         # #pickerLayer and throws the host back to the top of the week.

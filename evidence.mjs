@@ -14,10 +14,11 @@ const fx = (id, o = {}) => ({
   startAt: new Date(now + (o.hours ?? 24) * HOUR).toISOString(),
   ...(o.result ? { result: o.result, status: "complete" } : o.status ? { status: o.status } : {}),
   ...(o.lockAt ? { lockAt: o.lockAt } : {}),
+  ...(o.venue ? { venue: o.venue } : {}),
 });
 
 const F = [
-  fx("f1", { hours: 30, h: "Arsenal", a: "Coventry City" }),
+  fx("f1", { hours: 30, h: "Arsenal", a: "Coventry City", venue: "Emirates Stadium" }),
   fx("f2", { hours: 3, lockAt: new Date(now - HOUR).toISOString(), h: "Hull City", a: "Man Utd" }),
   fx("f3", { hours: -1, h: "Everton", a: "Crystal Palace" }),
   fx("f4", { hours: -26, result: [2, 1], h: "Brighton", a: "Aston Villa" }),
@@ -314,3 +315,52 @@ folds.evalIn(`seasonOpenSections.add(seasonSectionKey("reveals"));`);
 folds.evalIn(`seasonOpenSections.add(seasonSectionKey("weeks"));`);
 show("SEASON - both open (the same nodes, filled in place)",
   folds.trophyCabinet(CABINET) + folds.leagueRevealsHtml(REVEALS));
+
+// --- the same fixture, on Next and expanded in My Picks --------------------
+//
+// Built from the REAL matchCard, not a stub: the point is whether My Picks
+// mounts the same thing Next does, so a stubbed card would prove nothing.
+console.log("\n" + "=".repeat(74));
+console.log("  THE SAME EDITABLE FIXTURE: Next card vs expanded My Picks row");
+console.log("=".repeat(74));
+
+const CARD_NAMES = ["matchCard", "matchIntelStrip", "resultText", "pickRowBody", "pickEditable",
+  "matchweekRowState", "matchOpen", "isSettledCard", "resultState", "RESULT_FIRST_STATES",
+  "finalScore", "isVoidFixture", "isPostponed", "VOID_STATUSES", "closedStatus", "clientLockMs"];
+const cards = load(CARD_NAMES, {
+  ...BASE,
+  fixtures: F,
+  picks: { f1: { p1: 2, p2: 0 } },
+  activeLeague: "AAA",
+  leagueState: leagueState(ids),
+  leagueStates: {},
+  leagueCodes: ["AAA"],
+  currentView: "picks",
+  // Leaf presentation, stubbed once so the OUTPUT is readable in a terminal.
+  calendarLink: (m) => ({ href: "#" + m.id, download: m.id + ".ics" }),
+  matchTime: () => "Sat 12 Sept \u00b7 15:00",
+  teamBadge: (n) => "[" + n + "]",
+  weatherIntel: () => ({ icon: "\u2600", temp: 18, desc: "Clear", provisional: false }),
+  probabilityStrip: () => "<div class=prob>Home 52% \u00b7 Draw 24% \u00b7 Away 24%</div>",
+  formGuide: () => "<div class=form>Form: W W D L W</div>",
+  pickStatus: (m, pick) => "<p>Your prediction: " + pick.p1 + "-" + pick.p2 + "</p>",
+  scorePicker: (m, open) => "<div class=score-picker>[ - ] 2 - 0 [ + ] " + (open ? "Save prediction" : "locked") + "</div>",
+  fixtureRevealSection: () => "<section class=fixture-reveal>MATES AND POINTS</section>",
+  pickRevealSection: () => "",
+});
+
+const subject = F.find((f) => f.id === "f1");
+const nextLines = readable(cards.matchCard(subject)).split("\n     ").map((l) => l.trim()).filter(Boolean);
+const mineLines = readable(cards.pickRowBody(subject, true)).split("\n     ").map((l) => l.trim()).filter(Boolean);
+const width = Math.max(...nextLines.map((l) => l.length), 20);
+console.log("     " + "NEXT".padEnd(width) + " | MY PICKS (expanded)");
+console.log("     " + "-".repeat(width) + "-+-" + "-".repeat(28));
+for (let i = 0; i < Math.max(nextLines.length, mineLines.length); i += 1) {
+  const a = nextLines[i] ?? "", b = mineLines[i] ?? "";
+  console.log("     " + a.padEnd(width) + " | " + b + (a === b ? "" : "   <-- differs"));
+}
+console.log();
+console.log("     identical but for the mates section: " +
+  (cards.pickRowBody(subject, true) === cards.matchCard(subject, { social: false }) ? "YES" : "NO"));
+console.log("     An editable fixture has not locked, so nobody else's prediction may be");
+console.log("     on it — that is the privacy boundary, not a presentation difference.");

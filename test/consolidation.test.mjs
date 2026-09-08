@@ -370,6 +370,9 @@ function journeyBox(picks = {}) {
     onboardingState: () => "",
     leagueSwitcher: () => "",
     scorePicker: (m) => `<div class="score-picker" data-picker="${m.id}"></div>`,
+    // The editable disclosure mounts the same card Next builds.
+    matchCard: (m, opts) => `<article class="match-card" data-match-card="${m.id}"${
+      opts?.social === false ? ' data-social="false"' : ""}><div class="score-picker" data-picker="${m.id}"></div></article>`,
     resultCard: (m) => `<article class="result-card" data-match-card="${m.id}"><div class="result-score">2–1</div><p class="result-pick">Your pick 2-1 · 5 points</p></article>`,
     fixtureRevealSection: (m) => `<section class="fixture-reveal" data-reveal="${m.id}">MATES</section>`,
     pickShareRow: () => "",

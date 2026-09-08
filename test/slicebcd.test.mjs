@@ -62,7 +62,10 @@ const BASE = {
   leagueSwitcher: () => "",
   playerName: "Adam",
   scorePicker: (match) => `<div class="score-picker" data-picker="${match.id}"></div>`,
-  matchCard: (m) => `<div data-match-card="${m.id}"></div>`,
+  // The editable disclosure mounts the same card Next builds, so the stub
+  // carries what that card carries: the score controls.
+  matchCard: (m, opts) => `<div data-match-card="${m.id}"${opts?.social === false ? ' data-social="false"' : ""
+    }><div class="score-picker" data-picker="${m.id}"></div></div>`,
   fixtureRevealSection: () => `<section class="fixture-reveal">MATES</section>`,
   pickRevealSection: () => "",
   countPhrase: (n, word) => `${n} ${word}`,

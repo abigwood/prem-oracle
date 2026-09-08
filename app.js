@@ -2927,12 +2927,22 @@ function pickRow(slot, { expanded }) {
 }
 
 /**
- * What the disclosure holds. An editable fixture shows the score controls and
- * says nothing about anybody else; anything past its lock shows the mates
- * section, which applies the reveal clock itself.
+ * What the disclosure holds.
+ *
+ * An editable fixture gets the WHOLE card — the same `matchCard` Next builds,
+ * from the same data and the same formatting: teams and badges, the kick-off,
+ * the venue and weather, the forecast strip, the form guide, the viewer's
+ * current prediction, the score controls and the save action. It was a bare
+ * stepper, which is a truncated version of a card that already exists; a
+ * second renderer for the same fixture is a thing that drifts.
+ *
+ * `social: false` is the one difference, and it is the privacy boundary: an
+ * editable fixture has not locked, so nobody else's prediction may be on it.
+ * Past the lock the row shows the mates section, which applies the reveal
+ * clock itself.
  */
 function pickRowBody(match, editable) {
-  return editable ? scorePicker(match, true) : fixtureRevealSection(match);
+  return editable ? matchCard(match, { social: false }) : fixtureRevealSection(match);
 }
 
 /** The row's spoken name, since the visible line no longer repeats its state. */

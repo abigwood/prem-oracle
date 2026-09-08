@@ -12,11 +12,24 @@ const RECENT_KICKOFF_MS = 6 * 60 * 60 * 1000;
 // or void and `postponed` is not void — which is how Bury Legends sat on Week
 // 4 with Week 5 already published (2026-09-08).
 //
-// So an unresolved PAST fixture stays eligible for a fortnight: long enough to
-// outlast a feed outage, a rate limit or a gap in the cron, short enough that
-// a season is never scanned. It is bounded three ways — by age, by how many
-// fixtures one run will carry, and by how often the catch-up may run at all.
-export const CATCH_UP_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000;
+// The first fix put a fortnight's ceiling on it, which only MOVED the point of
+// permanent abandonment from six hours to fourteen days. So there is no age
+// ceiling at all: every unresolved past fixture the competition holds stays
+// eligible for as long as it is unresolved. The season the caller passes in is
+// the only horizon, and it is a real one.
+//
+// What bounds the work is not age but WHICH of them one run carries:
+//
+//   - twenty stale fixtures per catch-up run;
+//   - one page per run, rotating deterministically by the hour, so a fixture
+//     the provider can never match cannot sit at the head of the queue and
+//     starve everything behind it;
+//   - one catch-up run an hour.
+//
+// The rotation gives the guarantee the age ceiling could not: with N stale
+// fixtures, every one of them is considered at least once every
+// ceil(N / CATCH_UP_LIMIT) hourly runs — a number the operator can calculate
+// and the diagnostics report.
 export const CATCH_UP_LIMIT = 20;
 export const CATCH_UP_INTERVAL_MS = 60 * 60 * 1000;
 // The cron period this worker is scheduled on (wrangler.toml: */15).
@@ -32,6 +45,17 @@ const CRON_PERIOD_MS = 15 * 60 * 1000;
  */
 export const catchUpDue = (nowMs, intervalMs = CATCH_UP_INTERVAL_MS, tickMs = CRON_PERIOD_MS) =>
   Number.isFinite(nowMs) && nowMs >= 0 && (nowMs % intervalMs) < tickMs;
+
+/**
+ * Which page of the stale queue this hour carries.
+ *
+ * Derived from the clock, so it is the same answer for every worker instance
+ * and needs nothing stored. It advances by one every hour and wraps, which is
+ * what stops a permanently unmatchable fixture from being the only thing ever
+ * attempted.
+ */
+export const catchUpPage = (nowMs, pages, intervalMs = CATCH_UP_INTERVAL_MS) =>
+  pages > 0 ? Math.floor(nowMs / intervalMs) % pages : 0;
 
 export const FOOTBALL_DATA_TEAM_MAP = {
   "AFC Bournemouth": "AFC Bournemouth",
@@ -151,18 +175,16 @@ export function mapFootballDataTeam(name, competition = "PL") {
 }
 
 /**
- * What one settlement run will look at.
+ * What one settlement run will look at, and the diagnostics for why.
  *
  * The recent set is exactly what it always was, so the ordinary path is
- * unchanged and costs what it always cost. On a catch-up tick the stale set is
- * added: past fixtures still carrying no result and no void, oldest first —
- * the one holding a period open is the one that matters — and capped, so a
- * long outage cannot turn one run into a season scan.
+ * unchanged and costs what it always cost. On a catch-up tick a single
+ * rotating page of the stale queue is added to it.
  *
  * Nothing already settled or void is ever included, from the fixture itself or
  * from the results overlay, so a fixture is never worked on twice.
  */
-export function fixturesNeedingAutoSettle(fixtures, results, nowMs = Date.now(), { catchUp = false } = {}) {
+export function planAutoSettle(fixtures, results, nowMs = Date.now(), { catchUp = false } = {}) {
   const startOf = (match) => Date.parse(match.startAt || match.lockAt);
   const unresolved = (fixtures || []).filter((match) => {
     if (!match?.id || !match.player1 || !match.player2) return false;
@@ -174,17 +196,36 @@ export function fixturesNeedingAutoSettle(fixtures, results, nowMs = Date.now(),
   });
 
   const recent = unresolved.filter((match) => nowMs - startOf(match) <= RECENT_KICKOFF_MS);
-  if (!catchUp) return recent;
+  if (!catchUp) {
+    return { fixtures: recent, catchUp: false, eligible: recent.length, pages: recent.length ? 1 : 0,
+      page: 0, considered: recent.length, consideredIds: recent.map((match) => match.id) };
+  }
 
+  // Every unresolved past fixture beyond the fast path, in a stable order:
+  // oldest first, with the id as the tie-break so two fixtures kicking off
+  // together cannot swap places between runs and break the rotation.
   const stale = unresolved
-    .filter((match) => {
-      const age = nowMs - startOf(match);
-      return age > RECENT_KICKOFF_MS && age <= CATCH_UP_MAX_AGE_MS;
-    })
-    .sort((a, b) => startOf(a) - startOf(b))
-    .slice(0, CATCH_UP_LIMIT);
+    .filter((match) => nowMs - startOf(match) > RECENT_KICKOFF_MS)
+    .sort((a, b) => startOf(a) - startOf(b) || String(a.id).localeCompare(String(b.id)));
 
-  return [...recent, ...stale];
+  const pages = Math.ceil(stale.length / CATCH_UP_LIMIT);
+  const page = catchUpPage(nowMs, pages);
+  const carried = stale.slice(page * CATCH_UP_LIMIT, page * CATCH_UP_LIMIT + CATCH_UP_LIMIT);
+  const chosen = [...recent, ...carried];
+  return {
+    fixtures: chosen,
+    catchUp: true,
+    eligible: stale.length,
+    pages,
+    page,
+    considered: chosen.length,
+    consideredIds: chosen.map((match) => match.id),
+  };
+}
+
+/** The fixtures one run will look at. The plan, for callers that want the rest. */
+export function fixturesNeedingAutoSettle(fixtures, results, nowMs = Date.now(), options = {}) {
+  return planAutoSettle(fixtures, results, nowMs, options).fixtures;
 }
 
 const fixtureSeason = (fixtures) => {
@@ -269,18 +310,43 @@ export async function footballDataResults(env, fixtures, competition = "PL") {
 }
 
 export async function autoSettleResults(env, fixtures, existingResults, nowMs = Date.now(), competition = "PL") {
-  const idle = { checked: false, settled: 0, results: existingResults || {} };
-  if (!env.FOOTBALL_DATA_TOKEN) return idle;
-  if (!feedForCompetition(competition)) return idle;
-  // The catch-up widens WHAT is eligible, never how often the feed is called:
-  // one request per competition per run, and only when something is pending.
-  const catchUp = catchUpDue(nowMs);
-  const pending = fixturesNeedingAutoSettle(fixtures, existingResults, nowMs, { catchUp });
-  if (!pending.length) return { ...idle, catchUp };
+  const results = existingResults || {};
+  const idle = (diagnostics) => ({ checked: false, settled: 0, results, diagnostics });
+  const blank = { catchUp: false, eligible: 0, pages: 0, page: 0, considered: 0, consideredIds: [],
+    settled: 0, providerError: null };
+  if (!env.FOOTBALL_DATA_TOKEN) return idle({ ...blank, skipped: "no token" });
+  if (!feedForCompetition(competition)) return idle({ ...blank, skipped: "no feed" });
 
-  const feedResults = await footballDataResults(env, fixtures, competition);
-  const pendingIds = new Set(pending.map((match) => match.id));
-  const next = { ...(existingResults || {}) };
+  // The catch-up widens WHICH fixtures are eligible, never how often the feed
+  // is called: one request per competition per run, and only when the plan has
+  // something in it.
+  const plan = planAutoSettle(fixtures, existingResults, nowMs, { catchUp: catchUpDue(nowMs) });
+  const diagnostics = {
+    competition,
+    catchUp: plan.catchUp,
+    eligible: plan.eligible,
+    pages: plan.pages,
+    page: plan.page,
+    considered: plan.considered,
+    consideredIds: plan.consideredIds,
+    settled: 0,
+    providerError: null,
+  };
+  if (!plan.fixtures.length) return idle(diagnostics);
+
+  let feedResults;
+  try {
+    feedResults = await footballDataResults(env, fixtures, competition);
+  } catch (error) {
+    // Fail safely: the overlay is returned untouched and the next hourly run
+    // tries the same page again. The reason travels with the outcome rather
+    // than being thrown away.
+    return { checked: true, settled: 0, results,
+      diagnostics: { ...diagnostics, providerError: String(error?.message || error) } };
+  }
+
+  const pendingIds = new Set(plan.fixtures.map((match) => match.id));
+  const next = { ...results };
   let settled = 0;
 
   for (const [matchId, overlay] of Object.entries(feedResults)) {
@@ -290,5 +356,5 @@ export async function autoSettleResults(env, fixtures, existingResults, nowMs = 
     settled++;
   }
 
-  return { checked: true, settled, results: next, catchUp, considered: pending.length };
+  return { checked: true, settled, results: next, diagnostics: { ...diagnostics, settled } };
 }

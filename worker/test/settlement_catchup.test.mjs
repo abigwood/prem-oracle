@@ -12,9 +12,10 @@
 // season scan or a second call on the official feed.
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import {
-  autoSettleResults, catchUpDue, fixturesNeedingAutoSettle, footballDataResults,
-  mapFootballDataTeam, CATCH_UP_MAX_AGE_MS, CATCH_UP_LIMIT, CATCH_UP_INTERVAL_MS,
+  autoSettleResults, catchUpDue, catchUpPage, fixturesNeedingAutoSettle, footballDataResults,
+  mapFootballDataTeam, planAutoSettle, CATCH_UP_LIMIT, CATCH_UP_INTERVAL_MS,
 } from "../src/results_feed.js";
 import { earliestUnplayedPeriod, roundComplete, roundStatus } from "../src/logic.js";
 import { comparePeriods, windowKeyFor } from "../src/competitions.js";
@@ -80,10 +81,9 @@ test("S1 · cron drift does not switch the catch-up off", () => {
   for (const late of ["11:00:00", "11:00:31", "11:02:00", "11:09:44", "11:14:58"]) {
     assert.equal(catchUpDue(Date.parse(`2026-09-08T${late}Z`)), true, `${late} was refused`);
   }
-  // A missed hour is not a stuck fixture: eligibility lasts a fortnight, so
-  // the next hour's tick finds it.
-  assert.ok(CATCH_UP_MAX_AGE_MS / CATCH_UP_INTERVAL_MS >= 300,
-    "the age bound gives far more chances than one");
+  // A missed hour is not a stuck fixture: eligibility never expires, so the
+  // next hour's tick finds it.
+  assert.equal(CATCH_UP_INTERVAL_MS, HOUR);
 });
 
 // --- what one run will look at --------------------------------------------
@@ -117,27 +117,43 @@ test("S2 · the fast path is untouched by the correction", () => {
   assert.deepEqual(both.sort(), ["just-now", "stale"]);
 });
 
-test("S3 · several unresolved fixtures are taken oldest first, and capped", () => {
+test("S3 · one run carries at most one page of twenty, in oldest-first order", () => {
   const now = CATCH_UP_TICK;
-  const many = Array.from({ length: CATCH_UP_LIMIT + 12 }, (_, i) =>
+  const total = CATCH_UP_LIMIT + 12;
+  const many = Array.from({ length: total }, (_, i) =>
     fx(`stale-${String(i).padStart(2, "0")}`, { startAt: at(now, 8 + i) }));
-  const taken = fixturesNeedingAutoSettle(many, {}, now, { catchUp: true });
-  assert.equal(taken.length, CATCH_UP_LIMIT, `${taken.length} taken, cap is ${CATCH_UP_LIMIT}`);
-  // Oldest first: the fixture holding a period open is the one that matters.
-  const ages = taken.map((m) => now - Date.parse(m.startAt));
-  assert.deepEqual(ages, [...ages].sort((a, b) => b - a), "not oldest first");
-  assert.equal(taken[0].id, `stale-${String(CATCH_UP_LIMIT + 11).padStart(2, "0")}`);
+  const plan = planAutoSettle(many, {}, now, { catchUp: true });
+  assert.equal(plan.eligible, total);
+  assert.equal(plan.pages, Math.ceil(total / CATCH_UP_LIMIT));
+  assert.ok(plan.considered <= CATCH_UP_LIMIT, `${plan.considered} carried, cap is ${CATCH_UP_LIMIT}`);
+  assert.equal(plan.considered, Math.min(CATCH_UP_LIMIT, total - plan.page * CATCH_UP_LIMIT),
+    "the page did not carry what that page holds");
+  // The queue is oldest first, so page 0 starts at the oldest fixture.
+  const zeroHour = now - (now % (CATCH_UP_INTERVAL_MS * plan.pages));
+  const first = planAutoSettle(many, {}, zeroHour, { catchUp: true });
+  assert.equal(first.page, 0);
+  assert.equal(first.fixtures[0].id, `stale-${String(total - 1).padStart(2, "0")}`,
+    "page 0 does not begin at the oldest unresolved fixture");
+  const ages = first.fixtures.map((m) => zeroHour - Date.parse(m.startAt));
+  assert.deepEqual(ages, [...ages].sort((a, b) => b - a), "the page is not in oldest-first order");
 });
 
-test("S3 · the age bound is real: nothing older than a fortnight is scanned", () => {
+test("S3 · there is no age ceiling: a fixture is eligible for as long as it is unresolved", () => {
   const now = CATCH_UP_TICK;
+  // Sol's correction: a fortnight's ceiling only moved the point of permanent
+  // abandonment. Nothing is ever aged out.
   const list = [
-    fx("inside", { startAt: new Date(now - CATCH_UP_MAX_AGE_MS + HOUR).toISOString() }),
-    fx("outside", { startAt: new Date(now - CATCH_UP_MAX_AGE_MS - HOUR).toISOString() }),
-    fx("ancient", { startAt: at(now, 24 * 90) }),
+    fx("a-day", { startAt: at(now, 24) }),
+    fx("a-fortnight-and-an-hour", { startAt: at(now, 24 * 14 + 1) }),
+    fx("three-months", { startAt: at(now, 24 * 90) }),
+    fx("a-whole-season", { startAt: at(now, 24 * 300) }),
   ];
-  assert.deepEqual(fixturesNeedingAutoSettle(list, {}, now, { catchUp: true }).map((m) => m.id), ["inside"]);
-  assert.equal(CATCH_UP_MAX_AGE_MS, 14 * DAY);
+  const taken = fixturesNeedingAutoSettle(list, {}, now, { catchUp: true }).map((m) => m.id);
+  assert.deepEqual(taken.sort(), ["a-day", "a-fortnight-and-an-hour", "a-whole-season", "three-months"],
+    "a fixture was aged out of eligibility");
+  // The season the caller passes in is the only horizon there is.
+  const plan = planAutoSettle(list, {}, now, { catchUp: true });
+  assert.equal(plan.eligible, 4);
 });
 
 test("S4 · settled, void, postponed and future fixtures are treated correctly", () => {
@@ -175,8 +191,10 @@ test("S5 · one feed call per run, catch-up or not", async () => {
   try {
     const out = await autoSettleResults(p.env, list, {}, now, "ELC");
     assert.equal(p.calls.length, 1, `${p.calls.length} feed calls for one run`);
-    assert.equal(out.catchUp, true);
-    assert.ok(out.considered <= CATCH_UP_LIMIT + 5, "the run carried more than its bound");
+    assert.equal(out.diagnostics.catchUp, true);
+    assert.equal(out.diagnostics.eligible, 25);
+    assert.ok(out.diagnostics.considered <= CATCH_UP_LIMIT, "the run carried more than its bound");
+    assert.ok(out.diagnostics.pages >= 2, "25 stale fixtures should need more than one page");
   } finally { p.restore(); }
 });
 
@@ -191,27 +209,38 @@ test("S5 · nothing pending means no feed call at all", async () => {
   } finally { p.restore(); }
 });
 
-test("S5 · a provider failure settles nothing and leaves the overlay alone", async () => {
+test("S5 · a provider failure settles nothing, keeps the overlay, and says why", async () => {
   const now = CATCH_UP_TICK;
   const list = [fx("elc-2026-27-058-swansea-city-wrexham", { startAt: "2026-09-05T15:00:00+01:00" })];
   const before = { other: { status: "complete", result: [1, 1] } };
   for (const status of [500, 502, 403]) {
     const p = provider([], { status });
     try {
-      await assert.rejects(() => autoSettleResults(p.env, list, before, now, "ELC"), /football-data fetch/);
+      const out = await autoSettleResults(p.env, list, before, now, "ELC");
+      assert.equal(out.settled, 0, `HTTP ${status} settled something`);
+      assert.deepEqual(out.results, before, `HTTP ${status} altered the overlay`);
+      assert.match(out.diagnostics.providerError, new RegExp(String(status)),
+        `HTTP ${status} was not reported`);
+      // The page it was working on is still reported, so the next run's page
+      // is calculable from the log rather than guessed.
+      assert.equal(out.diagnostics.considered, 1);
+      assert.deepEqual(out.diagnostics.consideredIds, ["elc-2026-27-058-swansea-city-wrexham"]);
     } finally { p.restore(); }
   }
-  // The caller isolates it per competition, so the overlay is never rewritten.
   assert.deepEqual(before, { other: { status: "complete", result: [1, 1] } });
 });
 
-test("S5 · rate limiting is a failure, not a silent empty settlement", async () => {
+test("S5 · rate limiting is reported, and the same page is retried next hour", async () => {
   const now = CATCH_UP_TICK;
   const list = [fx("swa-wre", { startAt: at(now, 68) })];
   const p = provider([], { status: 429 });
   try {
-    await assert.rejects(() => autoSettleResults(p.env, list, {}, now, "ELC"), /football-data fetch 429/);
+    const out = await autoSettleResults(p.env, list, {}, now, "ELC");
+    assert.equal(out.settled, 0);
+    assert.match(out.diagnostics.providerError, /429/);
   } finally { p.restore(); }
+  // Nothing was written, so the fixture is still eligible on the next run.
+  assert.equal(planAutoSettle(list, {}, now + HOUR, { catchUp: true }).eligible, 1);
 });
 
 test("S5 · a partial or malformed payload settles nothing", async () => {
@@ -368,4 +397,171 @@ test("S9 · Bury Legends advances to Week 5 once Week 4 is terminal", () => {
 test("S9 · the fixture really does sit in the window the league is stuck on", () => {
   assert.equal(windowKeyFor("2026-09-05T15:00:00+01:00"), "w2026-09-01");
   assert.equal(windowKeyFor("2026-09-08T11:00:00Z"), "w2026-09-08");
+});
+
+// --- Sol's correction: rotation, not an age ceiling -------------------------
+//
+// A fortnight's ceiling only moved the point of permanent abandonment. What
+// replaces it is a deterministic rotation, and these are the properties that
+// have to hold for that to be a real guarantee rather than a nicer number.
+
+test("R1 · the page advances by one an hour and wraps deterministically", () => {
+  const base = Date.parse("2026-09-08T00:00:00Z");
+  const pages = 4;
+  const seen = [];
+  for (let h = 0; h < 9; h += 1) seen.push(catchUpPage(base + h * HOUR, pages));
+  assert.deepEqual(seen, [0, 1, 2, 3, 0, 1, 2, 3, 0], "the rotation is not a clean wrap");
+  // The same clock always gives the same page, on any instance, with nothing
+  // stored — two workers cannot disagree about whose turn it is.
+  assert.equal(catchUpPage(base + 5 * HOUR, pages), catchUpPage(base + 5 * HOUR, pages));
+  assert.equal(catchUpPage(base, 0), 0, "no pages must not divide by zero");
+  assert.equal(catchUpPage(base, 1), 0);
+});
+
+test("R2 · an unmatchable oldest fixture cannot starve the ones behind it", () => {
+  const now = Date.parse("2026-09-08T00:00:00Z");
+  // One fixture the provider will never match, sitting at the head of the
+  // queue because it is the oldest, plus a page and a half behind it.
+  const cursed = fx("cursed-oldest", { startAt: at(now, 24 * 200) });
+  const rest = Array.from({ length: CATCH_UP_LIMIT + 5 }, (_, i) =>
+    fx(`later-${String(i).padStart(2, "0")}`, { startAt: at(now, 10 + i) }));
+  const all = [cursed, ...rest];
+
+  const reached = new Set();
+  const pages = planAutoSettle(all, {}, now, { catchUp: true }).pages;
+  for (let h = 0; h < pages; h += 1) {
+    for (const m of planAutoSettle(all, {}, now + h * HOUR, { catchUp: true }).fixtures) reached.add(m.id);
+  }
+  assert.equal(reached.size, all.length, "some fixtures were never reached");
+  assert.ok(reached.has("cursed-oldest"));
+  assert.ok(reached.has(`later-${String(CATCH_UP_LIMIT + 4).padStart(2, "0")}`),
+    "the newest unresolved fixture was starved by the oldest");
+});
+
+test("R3 · every unresolved fixture is considered within ceil(N/20) hourly runs", () => {
+  const now = Date.parse("2026-09-08T00:00:00Z");
+  for (const N of [1, 19, 20, 21, 45, 100, 380]) {
+    const all = Array.from({ length: N }, (_, i) =>
+      fx(`f-${String(i).padStart(3, "0")}`, { startAt: at(now, 8 + i) }));
+    const bound = Math.ceil(N / CATCH_UP_LIMIT);
+    const reached = new Set();
+    for (let h = 0; h < bound; h += 1) {
+      for (const m of planAutoSettle(all, {}, now + h * HOUR, { catchUp: true }).fixtures) reached.add(m.id);
+    }
+    assert.equal(reached.size, N,
+      `N=${N}: ${reached.size} of ${N} reached in the calculable bound of ${bound} run(s)`);
+  }
+});
+
+test("R3 · the bound is reported, so an operator can calculate the wait", () => {
+  const now = Date.parse("2026-09-08T00:00:00Z");
+  const all = Array.from({ length: 45 }, (_, i) => fx(`f-${i}`, { startAt: at(now, 8 + i) }));
+  const plan = planAutoSettle(all, {}, now, { catchUp: true });
+  assert.equal(plan.eligible, 45);
+  assert.equal(plan.pages, 3, "45 stale fixtures is three pages of twenty");
+  // Longest wait for any one fixture = pages hours.
+  assert.equal(plan.pages * (CATCH_UP_INTERVAL_MS / HOUR), 3);
+});
+
+test("R4 · a page that settles shrinks the queue without stranding anyone", () => {
+  const now = Date.parse("2026-09-08T00:00:00Z");
+  const all = Array.from({ length: 30 }, (_, i) => fx(`f-${String(i).padStart(2, "0")}`, { startAt: at(now, 8 + i) }));
+  // Settle whatever the first two hours reach, then check the rest still get a turn.
+  const overlay = {};
+  for (let h = 0; h < 2; h += 1) {
+    for (const m of planAutoSettle(all, overlay, now + h * HOUR, { catchUp: true }).fixtures) {
+      overlay[m.id] = { status: "complete", result: [0, 0] };
+    }
+  }
+  const left = planAutoSettle(all, overlay, now + 2 * HOUR, { catchUp: true });
+  const remaining = all.filter((m) => !overlay[m.id]).map((m) => m.id);
+  assert.equal(left.eligible, remaining.length);
+  const reached = new Set();
+  for (let h = 2; h < 2 + Math.max(1, left.pages); h += 1) {
+    for (const m of planAutoSettle(all, overlay, now + h * HOUR, { catchUp: true }).fixtures) reached.add(m.id);
+  }
+  for (const id of remaining) assert.ok(reached.has(id), `${id} was stranded after the queue shrank`);
+});
+
+test("R5 · provider failure then recovery: the same fixture is settled next hour", async () => {
+  const now = Date.parse("2026-09-08T00:00:00Z");
+  const swansea = { id: "elc-2026-27-058-swansea-city-wrexham", player1: "Swansea City",
+    player2: "Wrexham", startAt: "2026-09-05T15:00:00+01:00" };
+  const good = [feedMatch("Swansea City", "Wrexham", "2026-09-05T14:00:00Z", 0, 0)];
+
+  const down = provider([], { status: 503 });
+  let overlay = {};
+  try {
+    const out = await autoSettleResults(down.env, [swansea], overlay, now, "ELC");
+    assert.equal(out.settled, 0);
+    assert.match(out.diagnostics.providerError, /503/);
+    overlay = out.results;
+  } finally { down.restore(); }
+  assert.deepEqual(overlay, {}, "a failed run wrote something");
+
+  const back = provider(good);
+  try {
+    const out = await autoSettleResults(back.env, [swansea], overlay, now + HOUR, "ELC");
+    assert.equal(out.settled, 1, "recovery did not settle the fixture");
+    assert.deepEqual(out.results[swansea.id].result, [0, 0]);
+    assert.equal(out.diagnostics.providerError, null);
+    assert.equal(back.calls.length, 1);
+  } finally { back.restore(); }
+});
+
+test("R6 · the diagnostics carry everything the review asked for", async () => {
+  const now = Date.parse("2026-09-08T00:00:00Z");
+  const all = Array.from({ length: 25 }, (_, i) =>
+    fx(`f-${String(i).padStart(2, "0")}`, { startAt: at(now, 8 + i), h: "Swansea City", a: "Wrexham" }));
+  const p = provider([]);
+  try {
+    const out = await autoSettleResults(p.env, all, {}, now, "ELC");
+    const d = out.diagnostics;
+    for (const key of ["competition", "catchUp", "eligible", "pages", "page", "considered",
+                       "consideredIds", "settled", "providerError"]) {
+      assert.ok(key in d, `the diagnostics have no ${key}`);
+    }
+    assert.equal(d.competition, "ELC");
+    assert.equal(d.catchUp, true);
+    assert.equal(d.eligible, 25);
+    assert.equal(d.pages, 2);
+    assert.ok(d.page === 0 || d.page === 1);
+    assert.equal(d.considered, d.consideredIds.length);
+    assert.equal(d.settled, 0);
+    assert.equal(d.providerError, null);
+  } finally { p.restore(); }
+  // And the worker records them whether or not anything was written.
+  const src = readFileSync(new URL("../src/worker.js", import.meta.url), "utf8");
+  assert.match(src, /if \(settled\.diagnostics\) outcomes\.push\(\{ competition, \.\.\.settled\.diagnostics \}\);/);
+  assert.ok(src.indexOf("outcomes.push({ competition, ...settled.diagnostics })")
+    < src.indexOf("if (!settled.checked || settled.settled === 0) continue;"),
+    "the diagnostics are recorded only when something was written");
+});
+
+test("R7 · idempotent across a full rotation, one request per run", async () => {
+  const now = Date.parse("2026-09-08T00:00:00Z");
+  const swansea = { id: "elc-2026-27-058-swansea-city-wrexham", player1: "Swansea City",
+    player2: "Wrexham", startAt: "2026-09-05T15:00:00+01:00" };
+  const others = Array.from({ length: 24 }, (_, i) =>
+    ({ id: `elc-filler-${i}`, player1: "Bristol City", player2: "Millwall",
+       startAt: at(now, 20 + i) }));
+  const all = [swansea, ...others];
+  const feed = [feedMatch("Swansea City", "Wrexham", "2026-09-05T14:00:00Z", 0, 0)];
+  let overlay = {};
+  let settledTotal = 0;
+  let calls = 0;
+  const pages = planAutoSettle(all, {}, now, { catchUp: true }).pages;
+  for (let h = 0; h < pages + 2; h += 1) {
+    const p = provider(feed);
+    try {
+      const out = await autoSettleResults(p.env, all, overlay, now + h * HOUR, "ELC");
+      overlay = out.results;
+      settledTotal += out.settled;
+      calls += p.calls.length;
+      assert.ok(p.calls.length <= 1, "a run made more than one request");
+    } finally { p.restore(); }
+  }
+  assert.equal(settledTotal, 1, `the fixture was settled ${settledTotal} times`);
+  assert.deepEqual(overlay[swansea.id].result, [0, 0]);
+  assert.ok(calls <= pages + 2, `${calls} requests across ${pages + 2} runs`);
 });

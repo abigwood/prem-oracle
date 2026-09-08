@@ -2121,6 +2121,10 @@ async function autoSettle(env) {
       if (!matchList.length) continue;
       const current = await currentResults(env, competition);
       const settled = await autoSettleResults(env, matchList, current, Date.now(), competition);
+      // Recorded whether or not anything was written: the catch-up's page,
+      // what it looked at and why it settled nothing are the diagnostics an
+      // operator needs when a league is still sitting on an old week.
+      if (settled.diagnostics) outcomes.push({ competition, ...settled.diagnostics });
       if (!settled.checked || settled.settled === 0) continue;
       const foreign = Object.keys(settled.results).filter((id) => competitionOfFixture(id) !== competition);
       if (foreign.length) {

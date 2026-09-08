@@ -207,7 +207,12 @@ test("only competitions with a configured feed are auto-settled", () => {
 test("a competition without a feed settles nothing", async () => {
   const fixtures = [{ id: "cl-2026-001-a-b", player1: "A", player2: "B", startAt: new Date().toISOString() }];
   const outcome = await autoSettleResults({ FOOTBALL_DATA_TOKEN: "t" }, fixtures, {}, Date.now(), "CL");
-  assert.deepEqual(outcome, { checked: false, settled: 0, results: {} });
+  assert.equal(outcome.checked, false);
+  assert.equal(outcome.settled, 0);
+  assert.deepEqual(outcome.results, {});
+  // ...and says why, rather than being silently indistinguishable from a run
+  // that looked and found nothing.
+  assert.equal(outcome.diagnostics.skipped, "no feed");
 });
 
 test("the Championship feed is queried on its own competition path", async () => {

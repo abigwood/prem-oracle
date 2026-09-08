@@ -440,7 +440,7 @@ test("W7 · a round with no reveal draws no arrows and does not throw", () => {
 
 import { computeTable, withSharedRank } from "../worker/src/logic.js";
 
-const RANKED = ["sharedRankByUid", "weeklyRanks", "weeklyMovementBadge",
+const RANKED = ["sharedRankByUid", "weeklyRanks", "weeklyMovementBadge", "slateIdsOf", "movementMark",
   "settlementWindows", "windowPointsByUid", "weeklyMovement", "isPostponed",
   "isVoidFixture", "VOID_STATUSES"];
 

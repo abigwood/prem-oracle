@@ -129,6 +129,19 @@ function cards({ native = false } = {}) {
     ${lift("function drawWeeklyRowBand(ctx, y, height, place)")}
     ${lift("function drawCardRowRule(ctx, y)")}
     ${lift("function drawCardRowPlate(ctx, y, height, index, place)")}
+    ${lift("function movementMark(value)")}
+    ${liftConst("seasonMovement")}
+    ${liftConst("slateIdsOf")}
+    ${liftConst("VOID_STATUSES")}
+    ${liftConst("isVoidFixture")}
+    ${liftConst("isPostponed")}
+    ${lift("function settlementWindows(reveal, slateIds = null, lookup = fixtureById)")}
+    ${lift("function windowPointsByUid(window)")}
+    ${lift("function weeklyMovement(table, reveal, slateIds = null, lookup = fixtureById)")}
+    ${liftConst("CARD_MOVE_COLOUR")}
+    ${lift("function cardMovementText(value)")}
+    ${lift("function cardMovementWidth(ctx, value, size)")}
+    ${lift("function drawCardMovement(ctx, x, baseline, value, size)")}
     ${lift("function cardHonoursWidth(ctx, counts, size)")}
     ${lift("function cardHonoursSize(ctx, counts, size, room)")}
     ${lift("function drawCardHonours(ctx, x, y, counts, { size = 24 } = {})")}

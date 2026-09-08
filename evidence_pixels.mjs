@@ -20,14 +20,16 @@ const CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const FUNCTIONS = ["roundedRect", "fitText", "ellipsise", "drawFitted", "cardCanvas",
   "drawCardHeader", "drawCardHero", "drawCardTableHead", "drawCardRowPlate",
   "drawCardHonours", "cardHonoursWidth", "cardHonoursSize", "drawCardCellSplit", "drawCardFooter",
+  "movementMark", "cardMovementText", "cardMovementWidth", "drawCardMovement",
+  "settlementWindows", "windowPointsByUid", "weeklyMovement",
   "cardRowMetrics", "weeklyCardGeometry", "cardTableTop", "drawWeeklyRowBand", "drawCardRowRule",
   "seasonCardModel", "weeklyCardModel",
   "weeklyShareStatus", "weeklyTerminalCount", "weeklySharePublished", "podiumCounts",
   "sharedRankByUid", "winnerNames", "seasonShareFreshness", "seasonCardPages", "drawSeasonPage", "drawSeasonTableCard",
   "weeklyCardPages", "drawWeeklyPage", "drawWeeklyResultCard", "finalScore", "weeklyCardCaption", "noteWeeklyFinalMismatch"];
-const CONSTS = ["CARD_W", "CARD_W_PX", "CARD_H_PX", "CARD_PAD", "CARD", "CARD_COL",
+const CONSTS = ["slateIdsOf", "seasonMovement", "CARD_MOVE_COLOUR", "CARD_W", "CARD_W_PX", "CARD_H_PX", "CARD_PAD", "CARD", "CARD_COL",
   "CARD_HEAD_H", "CARD_HERO_H", "CARD_TABLE_HEAD_H", "CARD_ROW_H", "CARD_SEASON_ROW_H",
-  "CARD_SEASON_MAX_ROWS", "CARD_ROW_TWO_LINE", "CARD_TABLE_LEAD",
+  "CARD_SEASON_MAX_ROWS", "CARD_ROW_TWO_LINE", "CARD_TABLE_LEAD", "CARD_MOVE_GAP",
   "CARD_FOOT_H", "CARD_GAP", "cardFont", "cardDate",
   "sentenceCase", "weeklyRanks", "VOID_STATUSES", "isVoidFixture", "isPostponed",
   "CARD_TYPE_FLOOR", "CARD_SECOND_FLOOR", "CARD_MIN_ROW", "CARD_MIN_NAME",
@@ -56,8 +58,22 @@ const SCENES = `
 const slate = (n, ids) => ({ period: String(n), status: "published", fixtureIds: ids, count: ids.length });
 const six = (settled, voided) => Array.from({ length: 6 }, (_, i) => ({
   id: "w-" + i,
+  // One kick-off each, so every fixture is its own settlement window and the
+  // void one below completes a window that pays nobody.
+  lockAt: "2026-09-1" + (2 + i) + "T14:00:00Z",
   ...(i < settled ? { settled: true } : i < settled + (voided || 0) ? { voided: true } : {}),
 }));
+// Two settled windows, so the weekly exports have real movement to show. The
+// SECOND is what the arrows measure: it pays two players and nobody else, so
+// the table carries climbs, drops and rows that held, all at once.
+// Spread down the table, so a SECOND page is not twenty rows of "unchanged".
+const BONUS = { 3: 9, 8: 6, 22: 9, 30: 6 };
+const windows = (table) => [
+  { id: "w-a", lockAt: "2026-09-12T14:00:00Z", settled: true,
+    picks: table.map((p, i) => ({ uid: p.uid, pts: p.pts - (BONUS[i] || 0) })) },
+  { id: "w-b", lockAt: "2026-09-13T14:00:00Z", settled: true,
+    picks: table.map((p, i) => ({ uid: p.uid, pts: BONUS[i] || 0 })) },
+];
 let HEAVY = false;
 const league = { code: "CGALPR", name: "Sunday Six", owner: "u1" };
 const week = (n, entries, over) => ({
@@ -71,6 +87,12 @@ const players = (n) => Array.from({ length: n }, (_, i) => ({
     "Zed","Ash","Bo","Cleo","Dax","Eve","Finn","Gil","Hux","Iris","Jax","Kaya","Loz","Moss",
     "Nell"][i] || ("Player " + (i + 1)),
   pts: 92 - i * 3, exact: (i * 2) % 5,
+  // Unchanged, up one, up two, down two, down one — repeating, so no rendered
+  // season table is ever all one marker. The cycle starts at zero so that no
+  // player's PREVIOUS rank comes out below first.
+  movement: ((i + 2) % 5) - 2,
+  // What tells a measured hold apart from a table nobody has measured yet.
+  previousRank: i + 1 + (((i + 2) % 5) - 2),
   podiums: HEAVY
     ? { gold: 12 - (i % 3), silver: 10 + (i % 4), bronze: 11 + (i % 2) }
     : { gold: i % 3, silver: (i + 1) % 3, bronze: (i + 2) % 3 },
@@ -86,12 +108,18 @@ const SCENE = {
     week(3, six(0), { table: players(6).map((p) => ({ ...p, pts: 0, exact: 0 })) })),
   "weekly-in-progress-with-void": () => drawWeeklyResultCard(league,
     week(3, six(2, 1), { table: players(6) })),
-  "weekly-final-6": () => drawWeeklyResultCard(league, week(3, six(5, 1), FINAL(6))),
-  "weekly-final-11": () => drawWeeklyResultCard(league, week(3, six(5, 1), FINAL(11))),
-  "weekly-final-20": () => drawWeeklyResultCard(league, week(3, six(5, 1), FINAL(20))),
-  "weekly-final-30": () => drawWeeklyResultCard(league, week(3, six(5, 1), FINAL(30))),
-  "weekly-final-40": () => drawWeeklyResultCard(league, week(3, six(5, 1), FINAL(40))),
+  "weekly-final-6": () => drawWeeklyResultCard(league, week(3, windows(players(6)), FINAL(6))),
+  "weekly-final-11": () => drawWeeklyResultCard(league, week(3, windows(players(11)), FINAL(11))),
+  "weekly-final-20": () => drawWeeklyResultCard(league, week(3, windows(players(20)), FINAL(20))),
+  "weekly-final-30": () => drawWeeklyResultCard(league, week(3, windows(players(30)), FINAL(30))),
+  "weekly-final-40": () => drawWeeklyResultCard(league, week(3, windows(players(40)), FINAL(40))),
   "season-6": () => drawSeasonTableCard(seasonState(6)),
+  // Before a second window completes there is no comparison, so the column is
+  // empty rather than a stack of dashes claiming everybody held position.
+  "season-11-no-comparison-yet": () => drawSeasonTableCard({
+    ...seasonState(11),
+    table: players(11).map((p) => ({ ...p, movement: 0, previousRank: null })),
+  }),
   "season-11": () => drawSeasonTableCard(seasonState(11)),
   "season-20": () => drawSeasonTableCard(seasonState(20)),
   "season-21-paged": () => drawSeasonTableCard(seasonState(21)),
@@ -110,7 +138,7 @@ const FINAL_MEMBERS = { "weekly-final-6": 6, "weekly-final-11": 11, "weekly-fina
 const WEEKLY_MEMBERS = { "weekly-not-started": 6, "weekly-in-progress-with-void": 6,
   "weekly-final-6": 6, "weekly-final-11": 11, "weekly-final-20": 20, "weekly-final-30": 30,
   "weekly-final-40": 40 };
-const SEASON_MEMBERS = { "season-6": 6, "season-11": 11, "season-20": 20, "season-21-paged": 21,
+const SEASON_MEMBERS = { "season-6": 6, "season-11": 11, "season-11-no-comparison-yet": 11, "season-20": 20, "season-21-paged": 21,
   "season-30-paged": 30, "season-40-paged": 40, "season-60-paged": 60,
   "season-30-two-digit-honours": 30 };
 const HEAVY_SCENES = new Set(["season-30-two-digit-honours"]);
@@ -177,6 +205,31 @@ function inkLines(ctx, x, y, w, h, grounds) {
     }
   }
   return { first, last };
+}
+
+/**
+ * Where a given colour was painted inside a rectangle.
+ *
+ * Used for the movement markers, whose two directional colours appear nowhere
+ * else inside a table. Counting THEM rather than re-deriving each row's value
+ * keeps this a measurement of the picture, not a second copy of the drawing.
+ */
+function findColour(ctx, hex, x, y, w, h, tolerance = 26) {
+  const want = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
+  const d = ctx.getImageData(x, y, w, h).data;
+  let count = 0, minX = null, maxX = null, rows = new Set();
+  for (let row = 0; row < h; row++) {
+    for (let col = 0; col < w; col++) {
+      const i = (row * w + col) * 4;
+      if (Math.abs(d[i] - want[0]) > tolerance) continue;
+      if (Math.abs(d[i + 1] - want[1]) > tolerance) continue;
+      if (Math.abs(d[i + 2] - want[2]) > tolerance) continue;
+      count++; rows.add(row);
+      if (minX === null || col < minX) minX = col;
+      if (maxX === null || col > maxX) maxX = col;
+    }
+  }
+  return { count, minX, maxX, rows: rows.size };
 }
 
 /** The colour a single pixel is, as a triple. */
@@ -385,6 +438,46 @@ function checkCard(name, canvas, expect) {
         g.m.twoLine && g.m.rowsPerPage <= CARD_SEASON_MAX_ROWS,
         g.m.rowsPerPage + " rows at " + g.m.rowH + "px (cap " + CARD_SEASON_MAX_ROWS + ")");
     }
+    // --- movement markers (Adam's build-28 rider) ------------------------
+    // The two directional colours appear nowhere else on a row's NAME line, so
+    // they can be counted in the finished pixels rather than trusted from the
+    // model. The line matters: the rest of the Player cell holds colour emoji,
+    // and a bronze medal sits close enough to the falling red to be miscounted
+    // as one — an earlier version of this check did exactly that.
+    {
+      const cellEnd = expect.weekly ? CARD_COL.exact - 18 : CARD_COL.split;
+      const left = Math.round(g.tx + g.k * CARD_COL.name);
+      const cellW = Math.max(1, Math.round(g.k * (cellEnd - CARD_COL.name)));
+      const beyond = Math.round(g.tx + g.k * cellEnd);
+      const rest = Math.max(1, Math.round(g.tx + g.k * CARD_W) - beyond);
+      let upRows = 0, downRows = 0, widest = 0, spill = 0;
+      for (let i = 0; i < onPage; i++) {
+        const rowTop = g.top + i * g.m.rowH;
+        // The name's half of the row: above the tally on a season card, the
+        // whole row on a weekly one, which has no second line.
+        const lineTop = Math.round(g.ty + g.k * rowTop) + 2;
+        const lineH = Math.max(1, Math.round(g.k * g.m.rowH * (expect.weekly ? 0.9 : 0.55)));
+        const up = findColour(ctx, CARD.rise, left, lineTop, cellW, lineH, 12);
+        const down = findColour(ctx, CARD.fall, left, lineTop, cellW, lineH, 12);
+        if (up.count) { upRows++; widest = Math.max(widest, up.maxX - up.minX + 1); }
+        if (down.count) { downRows++; widest = Math.max(widest, down.maxX - down.minX + 1); }
+        spill += findColour(ctx, CARD.rise, beyond, lineTop, rest, lineH, 12).count
+          + findColour(ctx, CARD.fall, beyond, lineTop, rest, lineH, 12).count;
+      }
+      if (expect.movers) {
+        ok("both directions are painted, so no card is one state only",
+          upRows > 0 && downRows > 0,
+          upRows + " rows rising, " + downRows + " falling, of " + onPage);
+        // Colour CONFIRMS the arrow, never carries it: an arrow plus its
+        // magnitude is wider than a coloured dot could be.
+        ok("a marker is an arrow with its size, not a coloured dot", widest >= 10,
+          "widest marker " + widest + "px");
+      }
+      // Whatever the state, no marker may reach the scoring columns.
+      ok("no movement marker reaches the scoring columns", spill === 0,
+        spill + " marker pixels past the Player cell");
+    }
+
     ok("no row's ink runs into the next row", overlaps === 0,
       overlaps + " collisions; narrowest clear space between rows " + Math.min(...gaps, 99) + "px");
     ok("one linear vertical list, never side-by-side columns",
@@ -462,6 +555,9 @@ try {
       rows: members, members, weekly, chrome, base: weekly ? CARD_ROW_H : CARD_SEASON_ROW_H,
       honours: !weekly,
       hero: weekly ? (name === "weekly-not-started" ? "bare" : "trophy") : null,
+      // Every season table carries mixed movement; the weekly ones do from the
+      // moment a window has completed, which the not-started scene has not.
+      movers: (!weekly && !name.includes("no-comparison")) || name.startsWith("weekly-final"),
       contentHeight: m.contentHeight,
       metrics: { m, k: place(m.contentHeight).k },
       podium: FINAL_MEMBERS[name] ? "none" : null,

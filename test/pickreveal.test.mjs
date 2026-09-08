@@ -105,7 +105,7 @@ function world({ rounds = [], matesState = null, roundState = null, activeLeague
 // --- A · weekly movement placement ---------------------------------------
 
 test("A · the weekly row puts the arrow AFTER the name, in the season table's slot", () => {
-  const box = load(["roundTableHtml", "weeklyRanks", "weeklyMovement", "weeklyMovementBadge",
+  const box = load(["roundTableHtml", "slateIdsOf", "weeklyRanks", "weeklyMovement", "weeklyMovementBadge",
     "sharedRankByUid", "settlementWindows", "windowPointsByUid",
     "VOID_STATUSES", "isVoidFixture", "isPostponed",
     "PLACE_EMOJI", "medalLine", "podiumCounts"], {

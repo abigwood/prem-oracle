@@ -19,8 +19,18 @@ function lift(startsWith) {
   return APP.slice(start, end + 2);
 }
 
+/** A one-line const, for the small readers the badge is built out of. */
+function liftLine(startsWith) {
+  const start = APP.indexOf(startsWith);
+  if (start < 0) throw new Error(`not found in app.js: ${startsWith}`);
+  const end = APP.indexOf("\n", start);
+  return APP.slice(start, end);
+}
+
 const ui = new Function(`
   ${lift("function escapeHTML(")}
+  ${lift("function movementMark(value)")}
+  ${liftLine("const seasonMovement =")}
   ${lift("function movementBadge(")}
   ${lift("function podiumCounts(row)")}
   ${lift("function medalLine(row)")}

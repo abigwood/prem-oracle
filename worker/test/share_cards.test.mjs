@@ -142,6 +142,8 @@ function cards({ native = false } = {}) {
     ${lift("function cardMovementText(value)")}
     ${lift("function cardMovementWidth(ctx, value, size)")}
     ${lift("function drawCardMovement(ctx, x, baseline, value, size)")}
+    ${liftConst("cardHonoursParts")}
+    ${liftConst("CARD_HONOURS_SEP")}
     ${lift("function cardHonoursWidth(ctx, counts, size)")}
     ${lift("function cardHonoursSize(ctx, counts, size, room)")}
     ${lift("function drawCardHonours(ctx, x, y, counts, { size = 24 } = {})")}
@@ -194,6 +196,7 @@ function cards({ native = false } = {}) {
       shareState: () => shareCardState(),
       ready: () => weeklyCardReady(),
       captions: () => ({ weekly: roundState ? weeklyCardCaption(leagueState, roundState) : null, season: leagueTableShareText(leagueState) }),
+      cols: () => CARD_COL,
       recorded: () => recorded,
       canvases: () => canvases,
       requests: () => requests,
@@ -354,8 +357,10 @@ test("medals follow the podium, not the row order", () => {
   app.drawWeekly();
   const calls = app.recorded()[0];
   // The right edge of the standings rows, where the row medals live — the
-  // rostrum draws its own, and those are counted separately.
-  const rowMedals = calls.text.filter((entry) => entry.x === 962).map((entry) => entry.text);
+  // rostrum draws its own, and those are counted separately. Read from the
+  // shipped column table, not written out here, so moving a column moves the
+  // probe with it instead of failing for a reason that is not a defect.
+  const rowMedals = calls.text.filter((entry) => entry.x === app.cols().medal).map((entry) => entry.text);
   assert.deepEqual(rowMedals, ["🏆", "🏆", "🥉"], "both winners are medalled, and nobody takes the place below the tie");
   assert.equal(texts(calls).filter((text) => text === "🥈").length, 0, "no silver is drawn anywhere");
 });

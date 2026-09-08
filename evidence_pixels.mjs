@@ -27,7 +27,7 @@ const FUNCTIONS = ["roundedRect", "fitText", "ellipsise", "drawFitted", "cardCan
   "weeklyShareStatus", "weeklyTerminalCount", "weeklySharePublished", "podiumCounts",
   "sharedRankByUid", "winnerNames", "seasonShareFreshness", "seasonCardPages", "drawSeasonPage", "drawSeasonTableCard",
   "weeklyCardPages", "drawWeeklyPage", "drawWeeklyResultCard", "finalScore", "weeklyCardCaption", "noteWeeklyFinalMismatch"];
-const CONSTS = ["slateIdsOf", "seasonMovement", "CARD_MOVE_COLOUR", "CARD_W", "CARD_W_PX", "CARD_H_PX", "CARD_PAD", "CARD", "CARD_COL",
+const CONSTS = ["slateIdsOf", "seasonMovement", "cardHonoursParts", "CARD_HONOURS_SEP", "CARD_MOVE_COLOUR", "CARD_W", "CARD_W_PX", "CARD_H_PX", "CARD_PAD", "CARD", "CARD_COL",
   "CARD_HEAD_H", "CARD_HERO_H", "CARD_TABLE_HEAD_H", "CARD_ROW_H", "CARD_SEASON_ROW_H",
   "CARD_SEASON_MAX_ROWS", "CARD_ROW_TWO_LINE", "CARD_TABLE_LEAD", "CARD_MOVE_GAP",
   "CARD_FOOT_H", "CARD_GAP", "cardFont", "cardDate",
@@ -93,10 +93,21 @@ const players = (n) => Array.from({ length: n }, (_, i) => ({
   movement: ((i + 2) % 5) - 2,
   // What tells a measured hold apart from a table nobody has measured yet.
   previousRank: i + 1 + (((i + 2) % 5) - 2),
+  // Sol's four cases, cycling: nobody has won anything, one medal type only,
+  // two types, and all three at two digits. Every table therefore renders a
+  // row that must show nothing beside a row that must show everything.
   podiums: HEAVY
     ? { gold: 12 - (i % 3), silver: 10 + (i % 4), bronze: 11 + (i % 2) }
-    : { gold: i % 3, silver: (i + 1) % 3, bronze: (i + 2) % 3 },
+    : [{ gold: 0, silver: 0, bronze: 0 },
+       { gold: 3, silver: 0, bronze: 0 },
+       { gold: 0, silver: 2, bronze: 4 },
+       { gold: 12, silver: 34, bronze: 56 }][i % 4],
 }));
+// One name nobody could fit, on a row that also has the widest possible
+// tally: the tally is reserved first, so this is what the ellipsis looks like.
+const longNamed = (table) => table.map((row, i) => (i === 1
+  ? { ...row, nick: "Bartholomew Fotheringay-Chumleigh", podiums: { gold: 12, silver: 34, bronze: 56 } }
+  : row));
 const seasonState = (n) => ({ ...league, table: players(n), currentMatchday: 8, currentMatchdayHasResults: true });
 const FINAL = (n) => ({ complete: true, table: players(n),
   podium: [{ uid: "u0", place: "gold", nick: "Adam", pts: 92 },
@@ -122,6 +133,11 @@ const SCENE = {
   }),
   "season-11": () => drawSeasonTableCard(seasonState(11)),
   "season-20": () => drawSeasonTableCard(seasonState(20)),
+  // The ellipsis case: a name nobody could fit, on a row that also carries
+  // the widest tally there is. The tally is reserved first, so this is what
+  // gives way.
+  "season-20-long-name": () => drawSeasonTableCard({
+    ...seasonState(20), table: longNamed(players(20)) }),
   "season-21-paged": () => drawSeasonTableCard(seasonState(21)),
   "season-30-paged": () => drawSeasonTableCard(seasonState(30)),
   "season-40-paged": () => drawSeasonTableCard(seasonState(40)),
@@ -138,7 +154,7 @@ const FINAL_MEMBERS = { "weekly-final-6": 6, "weekly-final-11": 11, "weekly-fina
 const WEEKLY_MEMBERS = { "weekly-not-started": 6, "weekly-in-progress-with-void": 6,
   "weekly-final-6": 6, "weekly-final-11": 11, "weekly-final-20": 20, "weekly-final-30": 30,
   "weekly-final-40": 40 };
-const SEASON_MEMBERS = { "season-6": 6, "season-11": 11, "season-11-no-comparison-yet": 11, "season-20": 20, "season-21-paged": 21,
+const SEASON_MEMBERS = { "season-6": 6, "season-11": 11, "season-11-no-comparison-yet": 11, "season-20-long-name": 20, "season-20": 20, "season-21-paged": 21,
   "season-30-paged": 30, "season-40-paged": 40, "season-60-paged": 60,
   "season-30-two-digit-honours": 30 };
 const HEAVY_SCENES = new Set(["season-30-two-digit-honours"]);
@@ -355,34 +371,25 @@ function checkCard(name, canvas, expect) {
   if (expect.rows) {
     const g = tableGeometry(expect);
     const onPage = Math.min(g.m.rowsPerPage, expect.rows - expect.page * g.m.rowsPerPage);
-    let withHonours = 0, overlaps = 0, tallyClash = 0, gutterInk = 0;
+    let withHonours = 0, overlaps = 0, gutterInk = 0;
     const gaps = [];
     for (let i = 0; i < onPage; i++) {
       const rowTop = g.top + i * g.m.rowH;
       const mid = rowTop + (g.m.rowH - 10) / 2;
 
       if (expect.honours) {
-        const index = expect.page * g.m.rowsPerPage + i;
-        const counts = expect.heavy
-          ? { gold: 12 - (index % 3), silver: 10 + (index % 4), bronze: 11 + (index % 2) }
-          : { gold: index % 3, silver: (index + 1) % 3, bronze: (index + 2) % 3 };
-        // Mirrors the drawing code exactly, so a tally that moved would be
-        // found missing rather than quietly measured somewhere else.
-        // Mirrors the drawing code exactly: one cell, the tally on its own
-        // line under the name, sized to the cell it must not leave.
-        const cell = CARD_COL.player - CARD_COL.name;
-        const size = cardHonoursSize(ctx, counts, g.m.honoursSize, cell);
-        const width = cardHonoursWidth(ctx, counts, size);
-        const hx = CARD_COL.name;
-        const hy = mid + g.m.honoursDy;
-        if (!flat(ctx, Math.round(g.tx + g.k * hx), Math.round(g.ty + g.k * (hy - size)),
-          Math.round(g.k * width), Math.round(g.k * (size + 4)))) withHonours++;
-        // The tally must end inside the Player cell, on the near side of the
-        // rule — a medal count that crosses it reads as an exact score.
-        if (hx + width > CARD_COL.split) tallyClash++;
-        // And nothing at all reaches the rule. Measured a row at a time: the
-        // plates alternate, so a gutter spanning rows is two colours by
-        // design and would fail for a reason that has nothing to do with ink.
+        // The tally's exact x depends on how wide the NAME came out, which is
+        // a fitting decision, not a constant. So this measures the finished
+        // picture rather than re-deriving the drawer's arithmetic: the cell's
+        // right-hand half must carry ink somewhere (the tallies are there),
+        // and the gutter at the cell's edge must carry none (they stay in).
+        if (!flat(ctx, Math.round(g.tx + g.k * (CARD_COL.name + CARD_MIN_NAME)),
+          Math.round(g.ty + g.k * (rowTop + g.m.rowH * 0.2)),
+          Math.max(1, Math.round(g.k * (CARD_COL.player - CARD_COL.name - CARD_MIN_NAME))),
+          Math.max(1, Math.round(g.k * g.m.rowH * 0.6)))) withHonours++;
+        // Nothing in the Player cell reaches the rule at its edge. Measured a
+        // row at a time: the plates alternate, so a gutter spanning rows is
+        // two colours by design and would fail for a reason that is not ink.
         if (!flat(ctx, Math.round(g.tx + g.k * (CARD_COL.player + 2)),
           Math.round(g.ty + g.k * (rowTop + g.m.rowH * 0.2)),
           Math.max(1, Math.round(g.k * (CARD_COL.split - CARD_COL.player - 4))),
@@ -418,9 +425,12 @@ function checkCard(name, canvas, expect) {
       Math.round(g.k * (CARD_W - CARD_PAD * 2)), Math.round(g.k * 36)), "headings drawn");
 
     if (expect.honours) {
-      ok("no honours tally runs into the exact column", tallyClash === 0, tallyClash + " clashes");
-      ok("honours are painted on EVERY row of this page", withHonours === onPage,
-        withHonours + " of " + onPage + " rows carry a tally");
+      // Presence only. This probe cannot tell a tally from a long name that
+      // reaches the same part of the cell, and saying it can would be worse
+      // than not asking: per-row SUPPRESSION is asserted structurally, where
+      // each drawn mark is known, not guessed at from a region of pixels.
+      ok("tallies are painted inside the Player cell", withHonours > 0,
+        withHonours + " of " + onPage + " rows carry ink beside the name");
 
       // Sol M3: the Player cell must be a cell. Two things prove it in the
       // pixels — a rule drawn between it and the scoring columns, and a clear
@@ -438,31 +448,32 @@ function checkCard(name, canvas, expect) {
         g.m.twoLine && g.m.rowsPerPage <= CARD_SEASON_MAX_ROWS,
         g.m.rowsPerPage + " rows at " + g.m.rowH + "px (cap " + CARD_SEASON_MAX_ROWS + ")");
     }
-    // --- movement markers (Adam's build-28 rider) ------------------------
-    // The two directional colours appear nowhere else on a row's NAME line, so
-    // they can be counted in the finished pixels rather than trusted from the
-    // model. The line matters: the rest of the Player cell holds colour emoji,
-    // and a bronze medal sits close enough to the falling red to be miscounted
-    // as one — an earlier version of this check did exactly that.
+    // --- the MOVE column (Adam's build-29 rider) --------------------------
+    // The markers have a column now, so this asks a stronger question than
+    // before: not just "is a marker somewhere in the Player cell" but "is
+    // every marker inside the narrow band the MOVE heading sits over".
     {
-      const cellEnd = expect.weekly ? CARD_COL.exact - 18 : CARD_COL.split;
-      const left = Math.round(g.tx + g.k * CARD_COL.name);
-      const cellW = Math.max(1, Math.round(g.k * (cellEnd - CARD_COL.name)));
-      const beyond = Math.round(g.tx + g.k * cellEnd);
-      const rest = Math.max(1, Math.round(g.tx + g.k * CARD_W) - beyond);
+      const half = 52;
+      const left = Math.round(g.tx + g.k * (CARD_COL.move - half));
+      const bandW = Math.max(1, Math.round(g.k * half * 2));
+      // Outside the column, in either direction, nothing of that colour.
+      const beforeX = Math.round(g.tx + g.k * CARD_PAD);
+      const beforeW = Math.max(1, left - beforeX);
+      const afterX = left + bandW;
+      const afterW = Math.max(1, Math.round(g.tx + g.k * (CARD_W - CARD_PAD)) - afterX);
       let upRows = 0, downRows = 0, widest = 0, spill = 0;
       for (let i = 0; i < onPage; i++) {
         const rowTop = g.top + i * g.m.rowH;
-        // The name's half of the row: above the tally on a season card, the
-        // whole row on a weekly one, which has no second line.
         const lineTop = Math.round(g.ty + g.k * rowTop) + 2;
-        const lineH = Math.max(1, Math.round(g.k * g.m.rowH * (expect.weekly ? 0.9 : 0.55)));
-        const up = findColour(ctx, CARD.rise, left, lineTop, cellW, lineH, 12);
-        const down = findColour(ctx, CARD.fall, left, lineTop, cellW, lineH, 12);
+        const lineH = Math.max(1, Math.round(g.k * g.m.rowH) - 4);
+        const up = findColour(ctx, CARD.rise, left, lineTop, bandW, lineH, 12);
+        const down = findColour(ctx, CARD.fall, left, lineTop, bandW, lineH, 12);
         if (up.count) { upRows++; widest = Math.max(widest, up.maxX - up.minX + 1); }
         if (down.count) { downRows++; widest = Math.max(widest, down.maxX - down.minX + 1); }
-        spill += findColour(ctx, CARD.rise, beyond, lineTop, rest, lineH, 12).count
-          + findColour(ctx, CARD.fall, beyond, lineTop, rest, lineH, 12).count;
+        for (const [x, w] of [[beforeX, beforeW], [afterX, afterW]]) {
+          spill += findColour(ctx, CARD.rise, x, lineTop, w, lineH, 12).count
+            + findColour(ctx, CARD.fall, x, lineTop, w, lineH, 12).count;
+        }
       }
       if (expect.movers) {
         ok("both directions are painted, so no card is one state only",
@@ -473,9 +484,8 @@ function checkCard(name, canvas, expect) {
         ok("a marker is an arrow with its size, not a coloured dot", widest >= 10,
           "widest marker " + widest + "px");
       }
-      // Whatever the state, no marker may reach the scoring columns.
-      ok("no movement marker reaches the scoring columns", spill === 0,
-        spill + " marker pixels past the Player cell");
+      ok("every movement marker is inside the MOVE column", spill === 0,
+        spill + " marker pixels outside the column");
     }
 
     ok("no row's ink runs into the next row", overlaps === 0,
@@ -496,15 +506,19 @@ function checkCard(name, canvas, expect) {
   }
 
   if (expect.weekly && expect.rows) {
-    // The dividers, measured at the table's left edge, between the name and
-    // exact columns, and at its right edge. One straight rule gives the same
-    // answer at all three; a curved plate edge does not.
+    // The dividers, measured at the table's left edge, in the gap between the
+    // rank and the name, and at its right edge. One straight rule gives the
+    // same answer at all three; a curved plate edge does not.
+    //
+    // The middle sample sits in a gap on purpose. It used to sit at x=620,
+    // which was empty until the MOVE column was put there — a probe has to
+    // measure the rule, not whatever else happens to be drawn on that axis.
     const g = tableGeometry(expect);
     const from = Math.round(g.ty + g.k * g.top);
     const to = Math.round(g.ty + g.k * (g.top + g.m.rowsPerPage * g.m.rowH));
     const at = (x) => columnEdges(ctx, x, canvas.height, from, to).join(",");
     const left = at(Math.round(g.tx + g.k * (CARD_PAD + 6)));
-    const mid = at(Math.round(g.tx + g.k * 620));
+    const mid = at(Math.round(g.tx + g.k * ((CARD_COL.rank + CARD_COL.name) / 2)));
     const right = at(Math.round(g.tx + g.k * (CARD_W - CARD_PAD - 6)));
     ok("every divider is one continuous line across the full width",
       left === mid && mid === right,

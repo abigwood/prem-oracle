@@ -494,7 +494,7 @@ const CARD_NAMES = ["CARD_W_PX", "CARD_H_PX", "CARD_W", "CARD_HEAD_H", "CARD_HER
   "weeklyCardCaption", "podiumCounts", "weeklyRanks", "sharedRankByUid", "winnerNames",
   "finalScore", "isVoidFixture", "isPostponed", "VOID_STATUSES",
   "CARD", "CARD_PAD", "cardFont", "cardDate", "sentenceCase",
-  "CARD_TYPE_FLOOR", "CARD_SECOND_FLOOR", "CARD_MIN_ROW", "cardHonoursWidth", "cardHonoursSize", "drawCardCellSplit", "CARD_MOVE_GAP", "CARD_MOVE_COLOUR", "CARD_SEASON_MAX_ROWS", "CARD_ROW_TWO_LINE", "CARD_TABLE_LEAD", 
+  "CARD_TYPE_FLOOR", "CARD_SECOND_FLOOR", "CARD_MIN_ROW", "cardHonoursParts", "CARD_HONOURS_SEP", "cardHonoursWidth", "cardHonoursSize", "drawCardCellSplit", "CARD_MOVE_GAP", "CARD_MOVE_COLOUR", "CARD_SEASON_MAX_ROWS", "CARD_ROW_TWO_LINE", "CARD_TABLE_LEAD", 
   "CARD_COL", "CARD_MIN_NAME", "cardPageRows", "cardPageLabel", "cardTableTop", "seasonCardPages", "drawSeasonPage", "drawSeasonTableCard", "weeklyCardPages", "drawWeeklyPage", "drawWeeklyResultCard"];
 
 /** A canvas that records only what a geometry check needs. */

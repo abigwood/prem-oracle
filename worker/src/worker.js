@@ -32,6 +32,7 @@ import {
   randomSelection,
   reconcileSlate,
   refreshSnapshot,
+  earliestUnplayedPeriod,
   roundComplete,
   roundStatus,
   roundWinners,
@@ -1476,13 +1477,10 @@ async function state(env, url) {
   // derived from these totals rather than walked for a second time — running
   // both was the same season twice for the same answer.
   const medals = computePodiumTotals(memberList, matchList, picks, slates, keyOf);
-  const unplayed = scopedFixtures.filter((match) => match.period != null && !normaliseResult(match) && !isVoided(match));
   // "Current" is the earliest period still to be played. Window keys sort
   // chronologically as strings; matchweek numbers need numeric comparison —
   // comparePeriods is the shared ordering the period abstraction exposes.
-  const currentPeriod = unplayed.length
-    ? [...new Set(unplayed.map((match) => match.period))].sort(comparePeriods)[0]
-    : null;
+  const currentPeriod = earliestUnplayedPeriod(scopedFixtures, comparePeriods);
   const currentFixtures = currentPeriod == null ? [] : scopedFixtures.filter((match) => match.period === currentPeriod);
   const currentPool = currentPeriod == null ? [] : (byPeriod.get(currentPeriod) || []);
   const currentStored = currentPeriod != null && slateAware(league)

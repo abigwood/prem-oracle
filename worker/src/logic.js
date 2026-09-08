@@ -92,6 +92,22 @@ export function computeRoundTable(members, completed, picksByMatch, matchday) {
   return computeTable(members, completed.filter((match) => match.matchday === matchday), picksByMatch);
 }
 
+/**
+ * The earliest period still holding a fixture that is neither settled nor void.
+ *
+ * This is what "current" means to a league, and it is why one unresolved
+ * fixture pins a league to an old week however many later weeks the host has
+ * published: the period does not advance until nothing is left unplayed in it.
+ * Extracted so that behaviour is under test rather than inline in the state
+ * handler — it is the rule at the centre of the settlement defect.
+ */
+export function earliestUnplayedPeriod(fixtures, compare) {
+  const unplayed = (fixtures || []).filter((match) =>
+    match?.period != null && !normaliseResult(match) && !isVoided(match));
+  if (!unplayed.length) return null;
+  return [...new Set(unplayed.map((match) => match.period))].sort(compare)[0];
+}
+
 // A round is complete once every non-void fixture has a result. Cancelled/abandoned
 // fixtures (isVoided) are exempt; a postponed fixture is non-void without a result,
 // so it keeps the round open until it is replayed.

@@ -403,7 +403,12 @@ test("D6 · the cards carry names and settled points, never predictions", () => 
   for (const forbidden of ["\"p1\"", "\"p2\"", "recovery", "pushToken"]) {
     assert.ok(!text.includes(forbidden), `the season card carries ${forbidden}`);
   }
-  assert.deepEqual(Object.keys({ ...model.rows[0] }).sort(), ["exact", "honours", "nick", "pts", "rank"]);
+  // `movement` joins the allow-list deliberately: it is a position delta
+  // derived from settled points, carries no prediction, and is the same value
+  // the on-screen row already shows to everyone who can see the table.
+  assert.deepEqual(Object.keys({ ...model.rows[0] }).sort(),
+    ["exact", "honours", "movement", "nick", "pts", "rank"]);
+  assert.equal(typeof model.rows[0].movement, "number", "movement must be a plain delta");
 });
 
 // --- D7 · the DOM, for real -------------------------------------------------
@@ -474,11 +479,13 @@ test("D8 · a 30-member season card is built without truncation", () => {
 const CARD_NAMES = ["CARD_W_PX", "CARD_H_PX", "CARD_W", "CARD_HEAD_H", "CARD_HERO_H", "CARD_TABLE_HEAD_H",
   "CARD_ROW_H", "CARD_SEASON_ROW_H", "CARD_FOOT_H", "CARD_GAP", "cardRowMetrics", "cardCanvas",
   "seasonCardModel", "weeklyCardModel", "weeklyShareStatus", "weeklyTerminalCount",
+  "movementMark", "cardMovementText", "cardMovementWidth", "drawCardMovement",
+  "slateIdsOf", "weeklyMovement", "settlementWindows", "windowPointsByUid",
   "weeklyFinalMismatchLines", "noteWeeklyFinalMismatch", "seasonShareFreshness", "weeklySharePublished", "shareCardState",
   "weeklyCardCaption", "podiumCounts", "weeklyRanks", "sharedRankByUid", "winnerNames",
   "finalScore", "isVoidFixture", "isPostponed", "VOID_STATUSES",
   "CARD", "CARD_PAD", "cardFont", "cardDate", "sentenceCase",
-  "CARD_TYPE_FLOOR", "CARD_SECOND_FLOOR", "CARD_MIN_ROW", "cardHonoursWidth", "cardHonoursSize", "drawCardCellSplit", "CARD_SEASON_MAX_ROWS", "CARD_ROW_TWO_LINE", "CARD_TABLE_LEAD", 
+  "CARD_TYPE_FLOOR", "CARD_SECOND_FLOOR", "CARD_MIN_ROW", "cardHonoursWidth", "cardHonoursSize", "drawCardCellSplit", "CARD_MOVE_GAP", "CARD_MOVE_COLOUR", "CARD_SEASON_MAX_ROWS", "CARD_ROW_TWO_LINE", "CARD_TABLE_LEAD", 
   "CARD_COL", "CARD_MIN_NAME", "cardPageRows", "cardPageLabel", "cardTableTop", "seasonCardPages", "drawSeasonPage", "drawSeasonTableCard", "weeklyCardPages", "drawWeeklyPage", "drawWeeklyResultCard"];
 
 /** A canvas that records only what a geometry check needs. */

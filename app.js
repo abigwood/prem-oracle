@@ -4351,16 +4351,20 @@ function drawFitted(ctx, text, x, y, maxWidth, { weight = 900, max = 48, min = 2
 }
 
 /**
- * Both exports are SQUARE. A group chat crops and previews a square cleanly;
- * the tall portrait the row-count used to produce was cropped to its middle,
- * which is the part of a league table nobody needs.
+ * Both exports are 1080x1920 PORTRAIT, 9:16, every time.
  *
- * The design is still drawn in 1080-wide units. What changes is that the canvas
- * is 1080x1080 whatever the table holds, and the drawing is scaled to fit into
- * it — after the row height has already been reduced for the member count, so
- * the scale is a small correction rather than the whole adaptation.
+ * A square cropped cleanly in a group chat, but it bought that at the cost of
+ * the thing being shared: a league table is a tall list, and squeezing one into
+ * a square meant shorter rows, smaller type and — past twenty-odd members —
+ * splitting a single table across several pictures. Portrait is the shape the
+ * content already is, and it is the shape a phone screen already is.
+ *
+ * Fixed, not derived from the device: everyone who receives the picture gets
+ * the same picture. The design is still drawn in 1080-wide units; the extra
+ * height is spent on breathing room and on not paginating.
  */
-const CARD_SIDE = 1080;
+const CARD_W_PX = 1080;
+const CARD_H_PX = 1920;
 
 /**
  * The row height and type sizes a table of `rows` can have inside the square.
@@ -4382,7 +4386,7 @@ const CARD_SIDE = 1080;
  * one list. Nothing is truncated and nothing is shrunk below the floors.
  */
 function cardRowMetrics(rows, { chrome, base, min = CARD_MIN_ROW }) {
-  const available = Math.max(0, CARD_SIDE - chrome);
+  const available = Math.max(0, CARD_H_PX - chrome);
   const perPage = Math.max(1, Math.floor(available / min));
   const pages = rows > 0 ? Math.ceil(rows / perPage) : 1;
   // Evened out, so a two-page export is not seventeen rows and one.
@@ -4397,7 +4401,11 @@ function cardRowMetrics(rows, { chrome, base, min = CARD_MIN_ROW }) {
     pages,
     rowsPerPage,
     rowH,
-    contentHeight: chrome + rowsPerPage * rowH,
+    // A page always fills the portrait frame. The header sits flush at the
+    // top and the footer flush at the bottom; the slack is breathing room
+    // around the table, not a dark band above the brand.
+    contentHeight: CARD_H_PX,
+    tableHeight: CARD_TABLE_HEAD_H + rowsPerPage * rowH,
     name: Math.max(CARD_TYPE_FLOOR, Math.round(34 * scale)),
     number: Math.max(CARD_TYPE_FLOOR, Math.round(30 * scale)),
     points: Math.max(CARD_TYPE_FLOOR, Math.round(34 * scale)),
@@ -4429,7 +4437,7 @@ function cardRowMetrics(rows, { chrome, base, min = CARD_MIN_ROW }) {
 function weeklyCardGeometry(rows) {
   const fixed = CARD_HEAD_H + CARD_GAP + CARD_GAP + CARD_TABLE_HEAD_H + CARD_GAP + CARD_FOOT_H;
   const heroFor = (count) => Math.max(CARD_HERO_MIN,
-    Math.min(CARD_HERO_H, CARD_SIDE - fixed - count * CARD_MIN_ROW));
+    Math.min(CARD_HERO_H, CARD_H_PX - fixed - count * CARD_MIN_ROW));
   let hero = heroFor(rows);
   let m = cardRowMetrics(rows, { chrome: fixed + hero, base: CARD_ROW_H });
   if (m.pages > 1) {
@@ -4437,6 +4445,19 @@ function weeklyCardGeometry(rows) {
     m = cardRowMetrics(rows, { chrome: fixed + hero, base: CARD_ROW_H });
   }
   return { hero, chrome: fixed + hero, m };
+}
+
+/**
+ * Where the table starts on a portrait page.
+ *
+ * The header is flush to the top and the footer flush to the bottom; whatever
+ * height is left over is split evenly above and below the table, so a
+ * six-member card is a roomy card rather than a small card in a large dark
+ * frame. A full page centres on nothing, because there is nothing spare.
+ */
+function cardTableTop(after, tableHeight) {
+  const room = CARD_H_PX - CARD_FOOT_H - CARD_GAP - after;
+  return after + Math.max(0, (room - tableHeight) / 2);
 }
 
 /** The members on one page, in rank order, each appearing on exactly one. */
@@ -4450,16 +4471,17 @@ const cardPageLabel = (page, pages) => (pages > 1 ? `Page ${page + 1} of ${pages
 
 function cardCanvas(contentHeight) {
   const canvas = document.createElement("canvas");
-  canvas.width = CARD_SIDE;
-  canvas.height = CARD_SIDE;
+  canvas.width = CARD_W_PX;
+  canvas.height = CARD_H_PX;
   const ctx = canvas.getContext("2d");
   ctx.fillStyle = CARD.bg;
-  ctx.fillRect(0, 0, CARD_SIDE, CARD_SIDE);
-  // Fit the 1080-wide design into the square and centre it. k is 1 for anything
-  // that already fits, so the common shapes are drawn exactly as designed.
-  const k = Math.min(1, CARD_SIDE / Math.max(contentHeight, 1));
+  ctx.fillRect(0, 0, CARD_W_PX, CARD_H_PX);
+  // Centre the 1080-wide design in the portrait frame. k is 1 for anything that
+  // already fits — which, with 1920 to spend, is every table the geometry lets
+  // onto a page — so the scale is a guard rather than the adaptation.
+  const k = Math.min(1, CARD_H_PX / Math.max(contentHeight, 1));
   if (ctx.setTransform) {
-    ctx.setTransform(k, 0, 0, k, (CARD_SIDE - CARD_W * k) / 2, (CARD_SIDE - contentHeight * k) / 2);
+    ctx.setTransform(k, 0, 0, k, (CARD_W_PX - CARD_W * k) / 2, (CARD_H_PX - contentHeight * k) / 2);
   }
   return { canvas, ctx, scale: k };
 }
@@ -4681,18 +4703,24 @@ function weeklyCardModel(state, round) {
   };
 }
 
-function drawWeeklyResultCard(state, round) {
+/**
+ * The weekly export, as a plan. The hero and the table are solved together by
+ * weeklyCardGeometry, so the plan carries the hero height each page draws at.
+ */
+function weeklyCardPages(state, round) {
   const model = weeklyCardModel(state, round);
-  // The export carries no rostrum. On a square card the podium repeated the
-  // hero's claim in a second, larger form and left the standings it was meant
-  // to introduce at eleven pixels. The screen keeps its podium; the picture
-  // keeps the table, and the medals still mark the three that matter.
-  const { hero, chrome, m } = weeklyCardGeometry(model.rows.length);
-  void chrome;
-  return Array.from({ length: m.pages }, (_, page) => {
+  // The export carries no rostrum. On a card the podium repeated the hero's
+  // claim in a second, larger form and left the standings it was meant to
+  // introduce at eleven pixels. The screen keeps its podium; the picture keeps
+  // the table, and the medals still mark the three that matter.
+  const { hero, m } = weeklyCardGeometry(model.rows.length);
+  return { pages: m.pages, rows: model.rows.length, page: (page) => drawWeeklyPage(model, hero, m, page) };
+}
+
+function drawWeeklyPage(model, hero, m, page) {
     const { canvas, ctx } = cardCanvas(m.contentHeight);
     drawCardHeader(ctx, model.league, model.headline, cardPageLabel(page, m.pages));
-    const y = CARD_HEAD_H + CARD_GAP + hero + CARD_GAP;
+    const y = cardTableTop(CARD_HEAD_H + CARD_GAP + hero + CARD_GAP, m.tableHeight);
     const top = y + CARD_TABLE_HEAD_H;
     drawCardHero(ctx, CARD_HEAD_H + CARD_GAP, model, hero);
     drawCardTableHead(ctx, y);
@@ -4729,7 +4757,11 @@ function drawWeeklyResultCard(state, round) {
     });
     drawCardFooter(ctx, top + m.rowsPerPage * m.rowH + CARD_GAP, model);
     return canvas;
-  });
+}
+
+function drawWeeklyResultCard(state, round) {
+  const plan = weeklyCardPages(state, round);
+  return Array.from({ length: plan.pages }, (_, page) => plan.page(page));
 }
 
 /**
@@ -4774,14 +4806,22 @@ function cardHonoursFit(ctx, cols, counts, m) {
   return { size, width, x: Math.max(cols.name + 24, right - width) };
 }
 
-function drawSeasonTableCard(state) {
+/**
+ * The season export, as a plan: how many pages, and how to draw any one of
+ * them. A caller that wants them all takes them all; a caller sharing a large
+ * table takes them one at a time, so only one canvas is ever alive.
+ */
+function seasonCardPages(state) {
   const model = seasonCardModel(state);
   const chrome = CARD_HEAD_H + CARD_GAP + CARD_TABLE_HEAD_H + CARD_GAP + CARD_FOOT_H;
   const m = cardRowMetrics(model.rows.length, { chrome, base: CARD_SEASON_ROW_H });
-  return Array.from({ length: m.pages }, (_, page) => {
+  return { pages: m.pages, rows: model.rows.length, page: (page) => drawSeasonPage(model, m, page) };
+}
+
+function drawSeasonPage(model, m, page) {
     const { canvas, ctx } = cardCanvas(m.contentHeight);
     drawCardHeader(ctx, model.league, model.headline, cardPageLabel(page, m.pages));
-    const y = CARD_HEAD_H + CARD_GAP;
+    const y = cardTableTop(CARD_HEAD_H + CARD_GAP, m.tableHeight);
     const top = y + CARD_TABLE_HEAD_H;
     // The headings are repeated on every page, so a page read on its own is
     // still a table rather than a list of numbers.
@@ -4819,7 +4859,11 @@ function drawSeasonTableCard(state) {
     });
     drawCardFooter(ctx, top + m.rowsPerPage * m.rowH + CARD_GAP, model);
     return canvas;
-  });
+}
+
+function drawSeasonTableCard(state) {
+  const plan = seasonCardPages(state);
+  return Array.from({ length: plan.pages }, (_, page) => plan.page(page));
 }
 
 // The caption that travels with the image. WhatsApp shows a picture with no
@@ -5195,26 +5239,59 @@ function shareCardNow(surface = shareSurface()) {
   const roundState = shareRound(surface);
   const at = () => (typeof performance !== "undefined" ? performance.now() : Date.now());
   const t0 = at();
-  const model = weekly ? weeklyCardModel(state, roundState) : seasonCardModel(state);
-  const rows = model.rows?.length ?? 0;
+  const plan = weekly ? weeklyCardPages(state, roundState) : seasonCardPages(state);
+  const rows = plan.rows;
   const t1 = at();
-  traceTap("share-model", { card: weekly ? "weekly" : "season", rows, ms: Math.round(t1 - t0) });
-  const canvases = weekly ? drawWeeklyResultCard(state, roundState) : drawSeasonTableCard(state);
-  const t2 = at();
-  traceTap("share-draw", { rows, pages: canvases.length, side: canvases[0]?.width, ms: Math.round(t2 - t1) });
+  traceTap("share-model", { card: weekly ? "weekly" : "season", rows, pages: plan.pages, ms: Math.round(t1 - t0) });
   const stem = weekly ? "prem-oracle-matchweek" : "prem-oracle-season-table";
-  const pages = canvases.map((canvas, index) => cardPng(canvas,
-    canvases.length > 1 ? `${stem}-${index + 1}-of-${canvases.length}.png` : `${stem}.png`));
-  const t3 = at();
-  traceTap("share-encode", { rows, pages: pages.length,
-    bytes: pages.reduce((sum, png) => sum + png.base64.length, 0), ms: Math.round(t3 - t2) });
-  traceTap("share-handoff", { rows, pages: pages.length, ms: Math.round(at() - t3), total: Math.round(at() - t0) });
+  const nameFor = (index) => (plan.pages > 1
+    ? `${stem}-${index + 1}-of-${plan.pages}.png`
+    : `${stem}.png`);
   // Not "result" until there is one: the title travels with the file into a
   // chat, where it is read before the picture loads.
   const title = weekly
     ? `${state.name} ${weeklyShareStatus(roundState).final ? "matchweek result" : "matchweek standings"}`
     : `${state.name} season table`;
   const text = weekly ? weeklyCardCaption(state, roundState) : leagueTableShareText(state);
+
+  // ONE page is the ordinary case now that a portrait card holds forty-odd
+  // members, and it stays entirely inside the tap: the web share sheet needs
+  // the gesture it was called from, and yielding would have ended it.
+  if (plan.pages === 1) {
+    const png = cardPng(plan.page(0), nameFor(0));
+    const t2 = at();
+    traceTap("share-encode", { rows, pages: 1, bytes: png.base64.length, ms: Math.round(t2 - t1) });
+    traceTap("share-handoff", { rows, pages: 1, total: Math.round(at() - t0) });
+    shareCardFile([png], { title, text });
+    return;
+  }
+  sharePagesSequentially(plan, { nameFor, title, text, rows, startedAt: t0, at });
+}
+
+/**
+ * A table too big for one page, drawn and encoded a page at a time.
+ *
+ * Sequential with a yield between pages, for two reasons: forty rows of canvas
+ * work per page would hold the main thread if they all ran in one task, and
+ * only one canvas needs to be alive at a time — the page just encoded is
+ * released before the next is made, so a six-page export is not six full-size
+ * bitmaps in memory at once.
+ *
+ * The share sheet is still raised once, with every page in it.
+ */
+async function sharePagesSequentially(plan, { nameFor, title, text, rows, startedAt, at }) {
+  const pages = [];
+  for (let index = 0; index < plan.pages; index += 1) {
+    const canvas = plan.page(index);
+    pages.push(cardPng(canvas, nameFor(index)));
+    // The bitmap has been read out as a PNG; the canvas itself is now dead
+    // weight, and zero-sizing it is what actually releases it.
+    canvas.width = 0;
+    canvas.height = 0;
+    traceTap("share-page", { page: index + 1, of: plan.pages });
+    if (index + 1 < plan.pages) await nextPaint();
+  }
+  traceTap("share-handoff", { rows, pages: pages.length, total: Math.round(at() - startedAt) });
   shareCardFile(pages, { title, text });
 }
 

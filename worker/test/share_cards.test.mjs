@@ -115,9 +115,10 @@ function cards({ native = false } = {}) {
     ${lift("function fitText(ctx, text, maxWidth, fontFactory, maxSize, minSize)")}
     ${lift("function ellipsise(ctx, text, maxWidth)")}
     ${lift("function drawFitted(ctx, text, x, y, maxWidth,")}
-    ${liftConst("CARD_SIDE")}
+    ${liftConst("CARD_W_PX")}
     ${lift("function cardRowMetrics(rows, { chrome, base, min = CARD_MIN_ROW })")}
     ${lift("function weeklyCardGeometry(rows)")}
+    ${lift("function cardTableTop(after, tableHeight)")}
     ${lift("function cardCanvas(contentHeight)")}
     ${lift("function drawCardHeader(ctx, league, line, page = \"\")")}
     ${lift("function drawCardHero(ctx, y, model, height = CARD_HERO_H)")}
@@ -144,8 +145,12 @@ function cards({ native = false } = {}) {
     ${lift("function weeklyCardModel(state, round)")}
     ${liftConst("cardPageRows")}
     ${liftConst("cardPageLabel")}
+    ${lift("function weeklyCardPages(state, round)")}
+    ${lift("function drawWeeklyPage(model, hero, m, page)")}
     ${lift("function drawWeeklyResultCard(state, round)")}
     ${lift("function seasonCardModel(state)")}
+    ${lift("function seasonCardPages(state)")}
+    ${lift("function drawSeasonPage(model, m, page)")}
     ${lift("function drawSeasonTableCard(state)")}
     ${lift("function seasonProgressLine(state)")}
     ${lift("function podiumCounts(row)")}
@@ -381,7 +386,9 @@ test("a weekly card from an old worker draws no podium it was never sent", () =>
   full.drawWeekly();
   const lean = app.canvases()[0];
   const whole = full.canvases()[0];
-  assert.equal(lean.width, lean.height, "the export is not square");
+  // Adam's portrait ruling: fixed 1080x1920, never varied by anything.
+  assert.equal(lean.width, 1080, "the export is not 1080 wide");
+  assert.equal(lean.height, 1920, "the export is not 1920 tall");
   assert.equal(lean.height, whole.height, "two exports came out different sizes");
   assert.equal(app.recorded()[0].transform?.a ?? 1, full.recorded()[0].transform?.a ?? 1,
     "a podium in the payload still changed the drawing");
@@ -456,7 +463,8 @@ test("nothing is drawn off the edge of either card", () => {
     const app = build(wide, round, tab);
     app[draw]();
     const { width, height } = app.canvases()[0];
-    assert.equal(width, height, "the export is not square");
+    assert.equal(width, 1080, "the export is not 1080 wide");
+    assert.equal(height, 1920, "the export is not 1920 tall");
     const k = app.recorded()[0].transform?.a ?? 1;
     for (const entry of app.recorded()[0].text) {
       assert.ok(entry.y * k > 0 && entry.y * k <= height,

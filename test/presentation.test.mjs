@@ -33,17 +33,17 @@ function recorder() {
   return { canvas, ctx, marks };
 }
 
-const NAMES = ["drawSeasonTableCard", "drawWeeklyResultCard", "drawCardHeader", "drawCardHero", "drawCardTableHead", "drawCardRowPlate", "drawWeeklyRowBand",
+const NAMES = ["seasonCardPages", "drawSeasonPage", "drawSeasonTableCard", "weeklyCardPages", "drawWeeklyPage", "drawWeeklyResultCard", "drawCardHeader", "drawCardHero", "drawCardTableHead", "drawCardRowPlate", "drawWeeklyRowBand",
   "drawCardRowRule", "weeklyCardGeometry", "drawCardHonours", "drawCardFooter",
   "drawFitted", "fitText", "ellipsise", "roundedRect", "cardCanvas", "cardRowMetrics", "cardFont",
   "cardDate", "sentenceCase", "seasonCardModel",
   "weeklyCardModel", "weeklyCardCaption", "weeklyShareStatus", "weeklyTerminalCount",
   "shareSurface", "shareRound", "sharePeriod", "normaliseView", "LEGACY_VIEWS",
-  "cardPageRows", "cardPageLabel", "CARD_MIN_NAME", "weeklySharePublished", "shareCardState", "seasonShareFreshness", "shareIconButton",
+  "cardPageRows", "cardPageLabel", "cardTableTop", "CARD_MIN_NAME", "weeklySharePublished", "shareCardState", "seasonShareFreshness", "shareIconButton",
   "podiumCounts", "weeklyRanks", "sharedRankByUid", "winnerNames", "noteWeeklyFinalMismatch",
   "weeklyFinalMismatchLines", "finalScore", "isVoidFixture", "isPostponed", "VOID_STATUSES",
   "CARD_TYPE_FLOOR", "CARD_SECOND_FLOOR", "CARD_MIN_ROW", "cardHonoursWidth", "cardHonoursFit", 
-  "CARD", "CARD_W", "CARD_SIDE", "CARD_PAD", "CARD_COL", "CARD_HEAD_H", "CARD_HERO_H",
+  "CARD", "CARD_W", "CARD_W_PX", "CARD_H_PX", "CARD_PAD", "CARD_COL", "CARD_HEAD_H", "CARD_HERO_H",
   "CARD_HERO_MIN", "CARD_RULE_H", "weeklyCardGeometry", "drawWeeklyRowBand", "drawCardRowRule",
   "CARD_TABLE_HEAD_H", "CARD_ROW_H", "CARD_SEASON_ROW_H", "CARD_FOOT_H", "CARD_GAP", "PLACE_NUMBER"];
 
@@ -301,11 +301,11 @@ function layoutOf(box, members, weekly) {
   // function — the test must not carry its own copy of that arithmetic.
   if (weekly) {
     const { hero, chrome, m } = box.weeklyCardGeometry(members);
-    return { m, chrome, hero, k: Math.min(1, box.CARD_SIDE / Math.max(m.contentHeight, 1)) };
+    return { m, chrome, hero, k: Math.min(1, box.CARD_H_PX / Math.max(m.contentHeight, 1)) };
   }
   const chrome = box.CARD_HEAD_H + box.CARD_GAP + box.CARD_TABLE_HEAD_H + box.CARD_GAP + box.CARD_FOOT_H;
   const m = box.cardRowMetrics(members, { chrome, base: box.CARD_SEASON_ROW_H });
-  const k = Math.min(1, box.CARD_SIDE / Math.max(m.contentHeight, 1));
+  const k = Math.min(1, box.CARD_H_PX / Math.max(m.contentHeight, 1));
   return { m, k, chrome };
 }
 
@@ -330,7 +330,7 @@ for (const weekly of [true, false]) {
     for (const members of SIZES) {
       const { m, k } = layoutOf(box, members, weekly);
       assert.equal(k, 1, `${members} members: the card was scaled to ${k.toFixed(3)} instead of laid out`);
-      assert.ok(m.contentHeight <= box.CARD_SIDE + 0.001,
+      assert.ok(m.contentHeight <= box.CARD_H_PX + 0.001,
         `${members} members: content ${m.contentHeight} overflows the square`);
     }
   });
@@ -339,14 +339,19 @@ for (const weekly of [true, false]) {
 test("pages · a table takes a second page only when it needs one", () => {
   const box = paintBox();
   // Adam's ruling: one linear vertical list, never side-by-side columns.
+  // Portrait: everything the ruling named fits one image.
   assert.equal(layoutOf(box, 6, true).m.pages, 1, "a six-member week");
+  assert.equal(layoutOf(box, 11, true).m.pages, 1, "an eleven-member week");
+  assert.equal(layoutOf(box, 20, true).m.pages, 1, "a twenty-member week");
+  assert.equal(layoutOf(box, 30, true).m.pages, 1, "a thirty-member week");
   assert.equal(layoutOf(box, 8, false).m.pages, 1, "the common season table");
-  assert.equal(layoutOf(box, 11, false).m.pages, 1, "an eleven-member league fits one square");
-  // The sizes the ruling named take more.
-  assert.equal(layoutOf(box, 20, true).m.pages, 2, "a twenty-member week");
-  assert.equal(layoutOf(box, 20, false).m.pages, 2, "a twenty-member season");
-  assert.equal(layoutOf(box, 30, false).m.pages, 2, "a thirty-member season");
-  assert.equal(layoutOf(box, 40, false).m.pages, 3, "a forty-member season");
+  assert.equal(layoutOf(box, 11, false).m.pages, 1, "an eleven-member season");
+  assert.equal(layoutOf(box, 20, false).m.pages, 1, "a twenty-member season");
+  assert.equal(layoutOf(box, 30, false).m.pages, 1, "a thirty-member season");
+  assert.equal(layoutOf(box, 40, false).m.pages, 1, "a forty-member season");
+  // And a genuinely large table still pages rather than shrinking.
+  assert.ok(layoutOf(box, 60, false).m.pages >= 2, "sixty members did not page");
+  assert.ok(layoutOf(box, 60, true).m.pages >= 2, "sixty members did not page");
   // And the row never drops below the height an 18px line needs.
   for (const members of SIZES) {
     for (const weekly of [true, false]) {
@@ -384,15 +389,15 @@ test("pages · every member appears exactly once, in rank order, across the page
   }
 });
 
-test("pages · every page is a square, and carries the table's own headings", () => {
-  for (const members of [11, 20, 30, 40]) {
+test("pages · every page is 1080x1920 and carries the table's own headings", () => {
+  for (const members of [11, 20, 30, 40, 60]) {
     const box = paintBox({ leagueTab: "season" });
     const canvases = box.drawSeasonTableCard(seasonState(members));
     const { m } = layoutOf(box, members, false);
     assert.equal(canvases.length, m.pages, `${members}: wrong number of pages`);
     for (const canvas of canvases) {
       assert.equal(canvas.width, 1080);
-      assert.equal(canvas.height, 1080);
+      assert.equal(canvas.height, 1920);
     }
     // One recorder per page: each drew its own PLAYER/EXACT/PTS headings.
     const drawnPages = box.__made.slice(-m.pages).map((made) => made.marks.map((mark) => mark.text));
@@ -410,12 +415,12 @@ test("pages · a multi-page export marks its pages, a single one does not", () =
   assert.equal(box.cardPageLabel(0, 1), "", "a single card claimed to be a page");
   assert.equal(box.cardPageLabel(0, 3), "Page 1 of 3");
   assert.equal(box.cardPageLabel(2, 3), "Page 3 of 3");
-  box.drawSeasonTableCard(seasonState(30));
-  const { m } = layoutOf(box, 30, false);
+  box.drawSeasonTableCard(seasonState(60));
+  const { m } = layoutOf(box, 60, false);
   const marks = box.__made.slice(-m.pages).map((made) => made.marks.map((mark) => mark.text));
   assert.deepEqual(marks.map((drawn) => drawn.find((text) => /^Page \d+ of \d+$/.test(text))),
-    ["Page 1 of 2", "Page 2 of 2"]);
-  // An eleven-member league is one square and says nothing about pages.
+    Array.from({ length: m.pages }, (_, i) => `Page ${i + 1} of ${m.pages}`));
+  // An eleven-member league is one image and says nothing about pages.
   const one = paintBox({ leagueTab: "season" });
   one.drawSeasonTableCard(seasonState(11));
   assert.ok(!texts(one).some((text) => /^Page /.test(text)), "a single square was marked as a page");
@@ -477,14 +482,14 @@ test("podium · dropping the rostrum is what buys the table its size", () => {
   assert.ok(m.name >= 22, `and names at ${m.name}px`);
 });
 
-test("pages · forty members hold every floor, across three squares", () => {
+test("pages · forty members hold every floor, on one portrait image", () => {
   const box = paintBox({ leagueTab: "season" });
   const state = seasonState(40);
   const canvases = box.drawSeasonTableCard(state);
-  assert.equal(canvases.length, 3);
+  assert.equal(canvases.length, 1, "forty members should now be one portrait image");
   const model = box.seasonCardModel(state);
   assert.equal(model.rows.length, 40);
-  const drawn = box.__made.slice(-3).flatMap((made) => made.marks.map((mark) => mark.text));
+  const drawn = box.__made.slice(-1).flatMap((made) => made.marks.map((mark) => mark.text));
   for (const row of model.rows) {
     assert.ok(drawn.includes(row.nick), `${row.nick} was never drawn`);
   }
@@ -507,7 +512,7 @@ test("pages · a weekly export is one list, paged, with every member once", () =
     assert.equal(canvases.length, m.pages, `${members}: wrong page count`);
     for (const canvas of canvases) {
       assert.equal(canvas.width, 1080);
-      assert.equal(canvas.height, 1080);
+      assert.equal(canvas.height, 1920);
     }
     // Every member drawn exactly once, in rank order, across the pages.
     const model = box.weeklyCardModel(weeklyState, round);
@@ -518,40 +523,48 @@ test("pages · a weekly export is one list, paged, with every member once", () =
       `${members}: the ranking was reordered`);
     assert.ok(Math.min(m.name, m.number, m.points) >= box.CARD_TYPE_FLOOR,
       `${members}: a weekly page fell below the type floor`);
-    assert.equal(Math.min(1, box.CARD_SIDE / m.contentHeight), 1,
+    assert.equal(Math.min(1, box.CARD_H_PX / m.contentHeight), 1,
       `${members}: a weekly page was shrunk to fit`);
   }
 });
 
 test("pages · every weekly page repeats the hero, the headings and its number", () => {
   const box = paintBox();
+  const MEMBERS = 60;                       // enough to page a portrait weekly card
   const round = weekRound(3, six(6), { complete: true,
     podium: [{ uid: "w0", place: "gold", nick: "Player 1", pts: 90 }],
-    table: Array.from({ length: 20 }, (_, i) => ({
+    table: Array.from({ length: MEMBERS }, (_, i) => ({
       uid: `w${i}`, rank: i + 1, nick: `Player ${i + 1}`, pts: 90 - i * 2, exact: i % 4 })) });
   const canvases = box.drawWeeklyResultCard(weeklyState, round);
-  assert.equal(canvases.length, 2);
-  const pages = box.__made.slice(-2).map((made) => made.marks.map((mark) => mark.text));
+  const { m } = layoutOf(box, MEMBERS, true);
+  assert.equal(canvases.length, m.pages);
+  assert.ok(m.pages >= 2, "this size should page");
+  const pages = box.__made.slice(-m.pages).map((made) => made.marks.map((mark) => mark.text));
   pages.forEach((drawn, index) => {
     assert.ok(drawn.includes("PLAYER"), `page ${index + 1} lost its headings`);
     assert.ok(drawn.includes("Sunday Six"), `page ${index + 1} lost the league name`);
     assert.ok(drawn.some((text) => text.startsWith("\u{1F3C6} ")), `page ${index + 1} lost the champion`);
-    assert.ok(drawn.includes(`Page ${index + 1} of 2`), `page ${index + 1} is not numbered`);
+    assert.ok(drawn.includes(`Page ${index + 1} of ${pages.length}`), `page ${index + 1} is not numbered`);
   });
-  // Ten and ten, in order, with nothing repeated between the pages.
+  // Every member once, split across the pages, with nothing repeated.
   const named = pages.map((drawn) => drawn.filter((text) => /^Player \d+$/.test(text)));
-  assert.equal(named[0].length, 10);
-  assert.equal(named[1].length, 10);
-  assert.equal(new Set([...named[0], ...named[1]]).size, 20, "a member appears on both pages");
+  assert.equal(named.flat().length, MEMBERS, "a member was lost or duplicated");
+  assert.equal(new Set(named.flat()).size, MEMBERS, "a member appears on two pages");
 });
 
 test("pages · no exported table uses side-by-side columns, weekly or season", () => {
-  for (const fn of ["drawWeeklyResultCard", "drawSeasonTableCard"]) {
+  // No column machinery anywhere on either export path.
+  for (const fn of ["weeklyCardPages", "drawWeeklyPage", "drawWeeklyResultCard",
+                    "seasonCardPages", "drawSeasonPage", "drawSeasonTableCard"]) {
     const src = sourceOf(fn);
     for (const banned of ["cardColumnBox", "cardColumnCols", "cardSlot", "drawCardTableColumns",
       "m.columns", "perColumn", "slot.box", "slot.cols"]) {
       assert.ok(!src.includes(banned), `${fn} reaches ${banned}`);
     }
+  }
+  // The page drawers are the ones that page and number.
+  for (const fn of ["drawWeeklyPage", "drawSeasonPage"]) {
+    const src = sourceOf(fn);
     assert.match(src, /cardPageRows\(model\.rows, page, m\)/, `${fn} does not page`);
     assert.match(src, /cardPageLabel\(page, m\.pages\)/, `${fn} does not number its pages`);
   }
@@ -559,18 +572,19 @@ test("pages · no exported table uses side-by-side columns, weekly or season", (
 
 // --- Adam's build-25 weekly corrections ------------------------------------
 
-test("W1 · eleven members are one square weekly attachment", () => {
+test("W1 · eleven members are one portrait weekly attachment", () => {
   const box = paintBox();
   const { m, hero } = layoutOf(box, 11, true);
   assert.equal(m.pages, 1, `eleven members split into ${m.pages} attachments`);
   assert.equal(m.rowsPerPage, 11, "the page does not carry all eleven");
-  // It fits because the hero gave up the room, not because anything shrank.
-  assert.ok(hero < box.CARD_HERO_H, "the hero did not compact");
-  assert.ok(hero >= box.CARD_HERO_MIN, `the hero fell to ${hero}, below its floor`);
+  // Portrait has room to spare, so the hero keeps its full height AND the rows
+  // keep theirs: the fit no longer costs anything.
+  assert.equal(hero, box.CARD_HERO_H, "the hero compacted when it did not need to");
+  assert.equal(m.rowH, box.CARD_ROW_H, "the rows were compressed when they did not need to be");
   assert.ok(m.rowH >= box.CARD_MIN_ROW, "the rows fell below the row floor");
   assert.ok(Math.min(m.name, m.number, m.points) >= box.CARD_TYPE_FLOOR);
   assert.ok(Math.min(m.second) >= box.CARD_SECOND_FLOOR);
-  assert.equal(Math.min(1, box.CARD_SIDE / m.contentHeight), 1, "the card was shrunk to fit");
+  assert.equal(Math.min(1, box.CARD_H_PX / m.contentHeight), 1, "the card was shrunk to fit");
 });
 
 test("W1 · the eleven names are drawn once each, in rank order, on that one square", () => {
@@ -593,7 +607,9 @@ test("W1 · the hero compacts only as far as the table needs, and no further", (
   const box = paintBox();
   // A small week keeps the roomy hero; a big one is bounded by its floor.
   assert.equal(layoutOf(box, 6, true).hero, box.CARD_HERO_H, "a six-member week lost its hero");
-  assert.ok(layoutOf(box, 11, true).hero < box.CARD_HERO_H);
+  assert.equal(layoutOf(box, 11, true).hero, box.CARD_HERO_H, "an eleven-member week lost its hero");
+  // It only compacts where the table genuinely needs the room.
+  assert.ok(layoutOf(box, 40, true).hero <= box.CARD_HERO_H);
   for (const members of SIZES) {
     const { hero } = layoutOf(box, members, true);
     assert.ok(hero >= box.CARD_HERO_MIN && hero <= box.CARD_HERO_H,
@@ -601,18 +617,18 @@ test("W1 · the hero compacts only as far as the table needs, and no further", (
   }
   // It is a calculation, not a cutoff: the source contains no member count.
   const geometry = sourceOf("weeklyCardGeometry");
-  assert.match(geometry, /CARD_SIDE - fixed - count \* CARD_MIN_ROW/);
+  assert.match(geometry, /CARD_H_PX - fixed - count \* CARD_MIN_ROW/);
   assert.ok(!/\b(11|eleven)\b/.test(geometry), "a member count is hard-coded");
   assert.match(geometry, /cardRowMetrics\(rows, \{ chrome: fixed \+ hero, base: CARD_ROW_H \}\)/);
 });
 
 test("W1 · twenty and thirty page only where the geometry requires it", () => {
   const box = paintBox();
-  for (const [members, pages] of [[6, 1], [11, 1], [12, 1], [20, 2], [30, 3]]) {
+  for (const [members, pages] of [[6, 1], [11, 1], [20, 1], [30, 1], [36, 1], [60, 2]]) {
     const { m } = layoutOf(box, members, true);
     assert.equal(m.pages, pages, `${members} members produced ${m.pages} attachments`);
     // A page never carries more rows than a readable row height allows.
-    assert.ok(m.rowsPerPage * box.CARD_MIN_ROW <= box.CARD_SIDE - layoutOf(box, members, true).chrome + 0.5,
+    assert.ok(m.rowsPerPage * box.CARD_MIN_ROW <= box.CARD_H_PX - layoutOf(box, members, true).chrome + 0.5,
       `${members}: a page is overfilled`);
   }
   // And no size is ever truncated.
@@ -629,7 +645,7 @@ test("W2 · a weekly row's divider is drawn once, straight, across the table", (
   assert.match(rule, /ctx\.fillRect\(CARD_PAD, Math\.round\(y\), CARD_W - CARD_PAD \* 2, CARD_RULE_H\)/);
   assert.match(rule, /ctx\.fillStyle = CARD\.line;/);
   assert.equal((rule.match(/fillRect/g) || []).length, 1, "the divider is drawn more than once");
-  const draw = sourceOf("drawWeeklyResultCard");
+  const draw = sourceOf("drawWeeklyPage");
   assert.match(draw, /if \(index < rows\.length - 1\) drawCardRowRule\(ctx, rowTop \+ m\.rowH - CARD_RULE_H\);/);
   // The weekly card no longer uses the rounded plate at all.
   assert.ok(!draw.includes("drawCardRowPlate"), "the weekly row still draws a rounded plate");
@@ -655,7 +671,7 @@ test("W2 · every row gets exactly one divider, and the last row gets none", () 
 test("W2 · two-digit points and a medal do not move the divider", () => {
   // The divider's y comes from the row, not from what is drawn in it, so a
   // medal and a two-digit total cannot shift it.
-  const draw = sourceOf("drawWeeklyResultCard");
+  const draw = sourceOf("drawWeeklyPage");
   const ruleAt = /drawCardRowRule\(ctx, rowTop \+ m\.rowH - CARD_RULE_H\)/;
   assert.match(draw, ruleAt);
   const rule = draw.slice(draw.search(ruleAt));
@@ -665,7 +681,7 @@ test("W2 · two-digit points and a medal do not move the divider", () => {
 });
 
 test("W2 · the Season export is untouched by the weekly corrections", () => {
-  const season = sourceOf("drawSeasonTableCard");
+  const season = sourceOf("drawSeasonPage");
   assert.match(season, /drawCardRowPlate\(ctx, rowTop, m\.rowH, index, null\)/, "the season plate changed");
   for (const weeklyOnly of ["drawCardRowRule", "drawWeeklyRowBand", "weeklyCardGeometry", "drawCardHero"]) {
     assert.ok(!season.includes(weeklyOnly), `the season card now uses ${weeklyOnly}`);
@@ -673,7 +689,7 @@ test("W2 · the Season export is untouched by the weekly corrections", () => {
   // Its geometry is the same chrome it always had.
   const box = paintBox({ leagueTab: "season" });
   assert.equal(layoutOf(box, 11, false).m.pages, 1);
-  assert.equal(layoutOf(box, 20, false).m.pages, 2);
-  assert.equal(layoutOf(box, 30, false).m.pages, 2);
-  assert.equal(layoutOf(box, 40, false).m.pages, 3);
+  assert.equal(layoutOf(box, 20, false).m.pages, 1);
+  assert.equal(layoutOf(box, 30, false).m.pages, 1);
+  assert.equal(layoutOf(box, 40, false).m.pages, 1);
 });

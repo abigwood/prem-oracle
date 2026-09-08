@@ -471,7 +471,7 @@ test("D8 · a 30-member season card is built without truncation", () => {
 
 // --- Sol's Slice C corrections, executed ------------------------------------
 
-const CARD_NAMES = ["CARD_SIDE", "CARD_W", "CARD_HEAD_H", "CARD_HERO_H", "CARD_TABLE_HEAD_H",
+const CARD_NAMES = ["CARD_W_PX", "CARD_H_PX", "CARD_W", "CARD_HEAD_H", "CARD_HERO_H", "CARD_TABLE_HEAD_H",
   "CARD_ROW_H", "CARD_SEASON_ROW_H", "CARD_FOOT_H", "CARD_GAP", "cardRowMetrics", "cardCanvas",
   "seasonCardModel", "weeklyCardModel", "weeklyShareStatus", "weeklyTerminalCount",
   "weeklyFinalMismatchLines", "noteWeeklyFinalMismatch", "seasonShareFreshness", "weeklySharePublished", "shareCardState",
@@ -479,7 +479,7 @@ const CARD_NAMES = ["CARD_SIDE", "CARD_W", "CARD_HEAD_H", "CARD_HERO_H", "CARD_T
   "finalScore", "isVoidFixture", "isPostponed", "VOID_STATUSES",
   "CARD", "CARD_PAD", "cardFont", "cardDate", "sentenceCase",
   "CARD_TYPE_FLOOR", "CARD_SECOND_FLOOR", "CARD_MIN_ROW", "cardHonoursWidth", "cardHonoursFit", 
-  "CARD_COL", "CARD_MIN_NAME", "cardPageRows", "cardPageLabel", "drawSeasonTableCard", "drawWeeklyResultCard"];
+  "CARD_COL", "CARD_MIN_NAME", "cardPageRows", "cardPageLabel", "cardTableTop", "seasonCardPages", "drawSeasonPage", "drawSeasonTableCard", "weeklyCardPages", "drawWeeklyPage", "drawWeeklyResultCard"];
 
 /** A canvas that records only what a geometry check needs. */
 function stubCanvas() {
@@ -531,7 +531,7 @@ const table = (n) => Array.from({ length: n }, (_, i) => ({
 
 // --- A · both exports are square, complete and adaptive ---------------------
 
-test("C-A · every supported table size produces a SQUARE canvas", () => {
+test("C-A · every supported table size produces a 1080x1920 PORTRAIT canvas", () => {
   for (const n of [1, 3, 6, 12, 20, 30]) {
     const s = cardBox();
     const state = { code: "AAA", name: "Sunday Six", table: table(n), currentMatchday: 9, currentMatchdayHasResults: true };
@@ -539,8 +539,11 @@ test("C-A · every supported table size produces a SQUARE canvas", () => {
     void season;
     const m = s.cardRowMetrics(n, { chrome: s.CARD_HEAD_H + s.CARD_GAP + s.CARD_TABLE_HEAD_H + s.CARD_GAP + s.CARD_FOOT_H, base: s.CARD_SEASON_ROW_H });
     const { canvas } = s.cardCanvas(m.contentHeight);
-    assert.equal(canvas.width, canvas.height, `${n} rows produced ${canvas.width}x${canvas.height}`);
-    assert.equal(canvas.width, s.CARD_SIDE);
+    // Adam's portrait ruling: fixed 1080x1920, never varied by device.
+    assert.equal(canvas.width, s.CARD_W_PX, `${n} rows produced ${canvas.width}x${canvas.height}`);
+    assert.equal(canvas.height, s.CARD_H_PX, `${n} rows produced ${canvas.width}x${canvas.height}`);
+    assert.equal(canvas.width, 1080);
+    assert.equal(canvas.height, 1920);
   }
 });
 
@@ -551,7 +554,7 @@ test("C-A · the complete table always fits inside the square", () => {
     const m = s.cardRowMetrics(n, { chrome, base: s.CARD_SEASON_ROW_H });
     const { scale } = s.cardCanvas(m.contentHeight);
     const drawn = m.contentHeight * scale;
-    assert.ok(drawn <= s.CARD_SIDE + 0.5, `${n} rows need ${drawn.toFixed(0)} of ${s.CARD_SIDE}`);
+    assert.ok(drawn <= s.CARD_H_PX + 0.5, `${n} rows need ${drawn.toFixed(0)} of ${s.CARD_H_PX}`);
     // Rows shrink; they never vanish.
     assert.ok(m.rowH >= 26, `${n} rows fell below the readable floor at ${m.rowH}`);
     assert.ok(m.rowH <= s.CARD_SEASON_ROW_H);
@@ -717,18 +720,21 @@ test("C-D · the mismatch reaches the diagnostics the dialog copies", () => {
 
 // --- E · the real share path, staged ----------------------------------------
 
-test("C-E · every synchronous stage of the share path is traced", () => {
+test("C-E · every stage of the share path is traced", () => {
   const fn = sourceOf("shareCardNow");
-  for (const stage of ["share-model", "share-draw", "share-encode", "share-handoff"]) {
+  for (const stage of ["share-model", "share-encode", "share-handoff"]) {
     assert.ok(fn.includes(stage), `${stage} is not traced`);
   }
-  // Timed around the real work, not around the model alone.
-  assert.match(fn, /const canvases = weekly \? drawWeeklyResultCard/);
-  assert.match(fn, /cardPng\(canvas,/);
-  assert.match(fn, /side: canvases\[0\]\?\.width/);
-  // And the trace says how many squares left the app, because one table
-  // arriving as three pictures is the thing a reader needs explained.
-  assert.match(fn, /pages: pages\.length/);
+  // A single-page export — every realistic size, now that a portrait card
+  // holds forty-odd members — stays entirely inside the tap.
+  assert.match(fn, /if \(plan\.pages === 1\) \{/);
+  assert.match(fn, /cardPng\(plan\.page\(0\), nameFor\(0\)\)/);
+  assert.ok(!/\bawait\b/.test(fn), "the single-page path awaits and would lose the sheet");
+  // The multi-page path is where the yields are, and it traces each page.
+  const many = sourceOf("sharePagesSequentially");
+  assert.match(many, /share-page/);
+  assert.match(many, /await nextPaint\(\)/);
+  assert.match(many, /pages: pages\.length/);
 });
 
 test("C-E · model and draw are measured at common and maximum tables", () => {

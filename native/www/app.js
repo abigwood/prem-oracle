@@ -1,6 +1,6 @@
 const SEASON_START = new Date("2026-08-21T20:00:00+01:00");
 const SEASON_START_DATE = "2026-08-21";
-const APP_BUILD = "20260908d";
+const APP_BUILD = "20260908e";
 const API = window.PREM_API || null;
 // Canonical public home of the web app. Inside the Capacitor shell the page is
 // served from premoracle://localhost, so location.origin can never be used to
@@ -3073,11 +3073,44 @@ function revealCard(reveal) {
   </div>`;
 }
 
+/**
+ * What a movement value MEANS: direction, magnitude, glyph and words.
+ *
+ * The screen and the export both ask this; neither works it out for itself.
+ * The glyph carries the direction on its own, so the answer survives
+ * greyscale, a colour-blind reader and a screenshot of a screenshot — colour
+ * is confirmation here, never the message (A1).
+ */
+function movementMark(value) {
+  const move = Number(value || 0);
+  if (move > 0) return { dir: "up", magnitude: move, glyph: "\u25B2",
+    label: `Up ${move} place${move === 1 ? "" : "s"}` };
+  if (move < 0) return { dir: "down", magnitude: Math.abs(move), glyph: "\u25BC",
+    label: `Down ${Math.abs(move)} place${Math.abs(move) === 1 ? "" : "s"}` };
+  return { dir: "flat", magnitude: 0, glyph: "\u2013", label: "No change" };
+}
+
+/**
+ * The movement a season row has to show, or null when it has none.
+ *
+ * `previousRank` is the worker's own record of whether a comparison exists at
+ * all: it is null until a second window has completed, and null for a member
+ * who was not in the previous table. That is the difference the screen and the
+ * card both need. A zero WITH a previous rank is a real result — the player
+ * held position — and reads as a dash. A zero WITHOUT one is not a result, and
+ * reads as nothing at all: an empty cell says "no comparison yet", where a
+ * dash would claim a player had held a position nobody has measured.
+ *
+ * Read, never derived. Both renderers ask this and neither works it out.
+ */
+const seasonMovement = (row) => (row?.previousRank == null ? null : Number(row.movement || 0));
+
 function movementBadge(row) {
-  const value = Number(row.movement || 0);
-  if (value > 0) return `<span class="movement movement-up" aria-label="Up ${value} place${value === 1 ? "" : "s"}">▲</span>`;
-  if (value < 0) return `<span class="movement movement-down" aria-label="Down ${Math.abs(value)} place${Math.abs(value) === 1 ? "" : "s"}">▼</span>`;
-  return `<span class="movement movement-flat" aria-label="No position change">-</span>`;
+  const value = seasonMovement(row);
+  // Nothing to compare against yet: no marker, and no badge holding its place.
+  if (value == null) return "";
+  const mark = movementMark(value);
+  return `<span class="movement movement-${mark.dir}" role="img" aria-label="${mark.label}">${mark.glyph}</span>`;
 }
 
 /** Every competition a league plays, named. A mixed league is both, not the first. */
@@ -3845,11 +3878,19 @@ function weeklyMovementBadge(value) {
  */
 const weeklyRanks = (table) => sharedRankByUid(table || []);
 
+/**
+ * The fixtures a round's movement is scoped to, or null for the whole reveal.
+ *
+ * Extracted because the export asks the same question. Two copies of this
+ * would be two answers the moment a slate changed shape.
+ */
+const slateIdsOf = (round) => (round?.slate?.fixtureIds
+  ? new Set(round.slate.fixtureIds.map(String))
+  : null);
+
 function roundTableHtml(round) {
   const awards = new Map((round.complete ? round.podium || [] : []).map((entry) => [entry.uid, entry.place]));
-  const slateIds = round.slate?.fixtureIds
-    ? new Set(round.slate.fixtureIds.map(String))
-    : null;
+  const slateIds = slateIdsOf(round);
   const ranks = weeklyRanks(round.table);
   const movement = weeklyMovement(round.table, round.reveal, slateIds);
   return `<table class="table round-standings"><thead><tr><th>Player</th><th>Pts</th><th>Exact</th></tr></thead>
@@ -4295,6 +4336,8 @@ const CARD = {
   row: "#26002E",
   rowAlt: "#2E0038",
   line: "rgba(255, 255, 255, .10)",
+  rise: "#00FF87",
+  fall: "#FF6B7A",
   gold: "#FFC94A",
   goldWash: "rgba(255, 201, 74, .13)",
   goldEdge: "rgba(255, 201, 74, .45)",
@@ -4311,6 +4354,8 @@ const CARD_HERO_MIN = 150;
 const CARD_RULE_H = 2;
 // The most air a page will put between its headings and its first row.
 const CARD_TABLE_LEAD = 40;
+// The air between a name and the movement marker that follows it.
+const CARD_MOVE_GAP = 10;
 const CARD_TABLE_HEAD_H = 56;
 const CARD_ROW_H = 74;
 // The floors Sol set for an exported table, in post-transform pixels: names,
@@ -4354,8 +4399,13 @@ function drawFitted(ctx, text, x, y, maxWidth, { weight = 900, max = 48, min = 2
   ctx.textAlign = align;
   ctx.fillStyle = colour;
   fitText(ctx, text, maxWidth, (size) => cardFont(weight, size), max, min);
-  ctx.fillText(ellipsise(ctx, text, maxWidth), x, y);
+  const shown = ellipsise(ctx, text, maxWidth);
+  ctx.fillText(shown, x, y);
+  // What was actually drawn, so a marker can sit beside the name rather than
+  // beside where a full-length name would have ended.
+  const drawn = ctx.measureText(shown).width;
   ctx.textAlign = "left";
+  return drawn;
 }
 
 /**
@@ -4703,6 +4753,9 @@ function weeklyCardModel(state, round) {
     .filter((group) => group.entries.length);
   const champions = groups.find((group) => group.place === "gold")?.entries || [];
   const ranks = weeklyRanks(round.table);
+  // The identical call the on-screen table makes, on the identical inputs —
+  // so the picture and the panel it was shared from cannot disagree.
+  const movement = weeklyMovement(round.table, round.reveal, slateIdsOf(round));
   const names = winnerNames(round) || champions.map((entry) => entry.nick).join(" & ");
   const pts = champions[0]?.pts ?? (round.table || [])[0]?.pts ?? 0;
   const status = weeklyShareStatus(round);
@@ -4736,6 +4789,10 @@ function weeklyCardModel(state, round) {
       nick: row.nick,
       pts: row.pts,
       exact: row.exact,
+      // null, not zero: before the first window completes the screen shows no
+      // marker at all, and a card full of dashes would be inventing a
+      // comparison that has not happened yet (W5).
+      movement: movement.has(row.uid) ? Number(movement.get(row.uid) || 0) : null,
       place: awards.get(row.uid) || null,
     })),
     code: state.code,
@@ -4774,8 +4831,17 @@ function drawWeeklyPage(model, hero, m, page) {
       ctx.font = cardFont(900, m.number);
       ctx.fillText(String(row.rank), CARD_COL.rank, baseline);
       ctx.textAlign = "left";
-      drawFitted(ctx, row.nick, CARD_COL.name, baseline, CARD_COL.exact - CARD_COL.name - 20,
+      // Same rule as the season card: the marker follows the name and stops
+      // short of the exact column, so it is never read as a score.
+      const moveSize = m.second;
+      const moveRoom = cardMovementWidth(ctx, row.movement, moveSize);
+      const cell = CARD_COL.exact - CARD_COL.name - 20;
+      const nameRoom = cell - (moveRoom ? moveRoom + CARD_MOVE_GAP : 0);
+      const drawn = drawFitted(ctx, row.nick, CARD_COL.name, baseline, nameRoom,
         { max: m.name, min: Math.min(CARD_TYPE_FLOOR, m.name) });
+      drawCardMovement(ctx,
+        Math.min(CARD_COL.name + drawn + CARD_MOVE_GAP, CARD_COL.name + cell - moveRoom),
+        baseline, row.movement, moveSize);
       ctx.textAlign = "right";
       ctx.fillStyle = CARD.muted;
       ctx.font = cardFont(800, m.second);
@@ -4818,6 +4884,9 @@ function seasonCardModel(state) {
       pts: row.pts,
       exact: row.exact,
       honours: podiumCounts(row),
+      // The same reader the on-screen badge uses, on the same row — including
+      // its null, which is how "no comparison yet" survives into the picture.
+      movement: seasonMovement(row),
     })),
     code: state.code,
     link: inviteLinkFor(state.code),
@@ -4831,6 +4900,45 @@ function seasonCardModel(state) {
  * than three one-digit ones. Honours are never dropped and never leave the
  * cell, so the TYPE gives way — down to the readability floor, not past it.
  */
+/**
+ * The movement marker on a card: arrow, magnitude, colour.
+ *
+ * Three signals for one fact, because a shared picture has no screen reader
+ * and no hover: the ARROW gives the direction, the NUMBER gives the size of
+ * the move, and the colour only agrees with them. Printed in greyscale it
+ * still reads. A flat marker carries no number — "no change by nought places"
+ * is not a thing anyone says.
+ *
+ * `null` means the table has nothing to compare against yet, and nothing is
+ * drawn — the same silence the screen keeps (W5).
+ */
+const CARD_MOVE_COLOUR = { up: "rise", down: "fall", flat: "muted" };
+
+function cardMovementText(value) {
+  if (value == null) return "";
+  const mark = movementMark(value);
+  return mark.magnitude ? mark.glyph + String(mark.magnitude) : mark.glyph;
+}
+
+function cardMovementWidth(ctx, value, size) {
+  const text = cardMovementText(value);
+  if (!text) return 0;
+  const previous = ctx.font;
+  ctx.font = cardFont(900, size);
+  const width = ctx.measureText(text).width;
+  ctx.font = previous;
+  return width;
+}
+
+function drawCardMovement(ctx, x, baseline, value, size) {
+  const text = cardMovementText(value);
+  if (!text) return 0;
+  ctx.font = cardFont(900, size);
+  ctx.fillStyle = CARD[CARD_MOVE_COLOUR[movementMark(value).dir]];
+  ctx.fillText(text, x, baseline);
+  return ctx.measureText(text).width;
+}
+
 function cardHonoursSize(ctx, counts, size, room) {
   let fitted = size;
   while (fitted > CARD_SECOND_FLOOR && cardHonoursWidth(ctx, counts, fitted) > room) fitted -= 1;
@@ -4871,9 +4979,18 @@ function drawSeasonPage(model, m, page) {
       // The name and the tally are one cell: same left edge, same width, the
       // tally on its own line beneath the name. Capped at twenty rows a page,
       // a season row is never short enough to need them side by side.
+      // The marker follows the name, inside the Player cell and on the NAME's
+      // line — never on the tally's, where it would read as a fourth medal.
+      // Its room is taken out of the name's before the name is fitted, so a
+      // long name is shortened rather than drawn underneath it.
+      const moveSize = m.second;
+      const moveRoom = cardMovementWidth(ctx, row.movement, moveSize);
       const cell = CARD_COL.player - CARD_COL.name;
-      drawFitted(ctx, row.nick, CARD_COL.name, mid + m.nameDy, cell,
+      const nameRoom = cell - (moveRoom ? moveRoom + CARD_MOVE_GAP : 0);
+      const drawn = drawFitted(ctx, row.nick, CARD_COL.name, mid + m.nameDy, nameRoom,
         { max: m.name, min: Math.min(CARD_TYPE_FLOOR, m.name) });
+      drawCardMovement(ctx, Math.min(CARD_COL.name + drawn + CARD_MOVE_GAP, CARD_COL.player - moveRoom),
+        mid + m.nameDy, row.movement, moveSize);
       drawCardHonours(ctx, CARD_COL.name, mid + m.honoursDy, row.honours,
         { size: cardHonoursSize(ctx, row.honours, m.honoursSize, cell) });
       ctx.textAlign = "right";

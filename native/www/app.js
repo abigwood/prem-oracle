@@ -1,6 +1,6 @@
 const SEASON_START = new Date("2026-08-21T20:00:00+01:00");
 const SEASON_START_DATE = "2026-08-21";
-const APP_BUILD = "20260908e";
+const APP_BUILD = "20260908f";
 const API = window.PREM_API || null;
 // Canonical public home of the web app. Inside the Capacitor shell the page is
 // served from premoracle://localhost, so location.origin can never be used to
@@ -4621,17 +4621,23 @@ function drawCardHero(ctx, y, model, height = CARD_HERO_H) {
 }
 
 
+// PLAYER | MOVE | EXACT | PTS.
+//
 // `player` is where the Player CELL ends — not where the next column starts.
-// The name and the medal tally are both held inside it, and `split` is the
-// rule drawn between it and EXACT, so a tally can never read as a score.
-const CARD_COL = { rank: 112, name: 168, player: 632, split: 656, exact: 730, pts: 880, medal: 962 };
+// The name and the medal tally both live inside it, on one line, and `split`
+// is the rule drawn at its edge so neither can read as a movement or a score.
+// `move` is a CENTRE: a narrow column of markers reads as a column only if
+// every marker in it shares an axis, whatever its magnitude.
+const CARD_COL = { rank: 112, name: 168, player: 600, split: 620, move: 668,
+  exact: 800, pts: 925, medal: 995 };
 
 /**
- * The rule between the Player cell and the scoring columns.
+ * The rule at the edge of the Player cell.
  *
- * Season rows carry a medal tally under the name. Without a boundary the eye
- * has only whitespace to tell it the tally belongs to the player rather than
- * to EXACT — and a bronze count sitting loose in that gap reads as a score.
+ * A season row carries a medal tally beside the name. Without a boundary the
+ * eye has only whitespace to tell it the tally belongs to the player rather
+ * than to the column after it — and a loose bronze count reads as a number
+ * that was scored rather than a medal that was won.
  */
 function drawCardCellSplit(ctx, y, height) {
   ctx.fillStyle = CARD.line;
@@ -4642,6 +4648,9 @@ function drawCardTableHead(ctx, y) {
   ctx.fillStyle = CARD.muted;
   ctx.font = cardFont(800, 22);
   ctx.fillText("PLAYER", CARD_COL.name, y + 36);
+  // Centred on its own column, over the markers it names.
+  ctx.textAlign = "center";
+  ctx.fillText("MOVE", CARD_COL.move, y + 36);
   ctx.textAlign = "right";
   ctx.fillText("EXACT", CARD_COL.exact, y + 36);
   ctx.fillText("PTS", CARD_COL.pts, y + 36);
@@ -4693,30 +4702,46 @@ function drawCardRowPlate(ctx, y, height, index, place) {
  * instead of a second line — smaller, never absent.
  */
 /** How wide a tally will be, so it can be placed instead of hoped for. */
+/**
+ * The medals a player actually has, in order, as [glyph, count] pairs.
+ *
+ * Zeros are DROPPED rather than muted. A tally is a record of what somebody
+ * won; three greyed-out noughts is a record of nothing, and it cost the same
+ * width as a real one on every row that had no medals at all.
+ */
+const cardHonoursParts = (counts) =>
+  [["\ud83c\udfc6", counts?.gold || 0], ["\ud83e\udd48", counts?.silver || 0], ["\ud83e\udd49", counts?.bronze || 0]]
+    .filter(([, count]) => count > 0);
+
+const CARD_HONOURS_SEP = " \u00b7 ";
+
+/** How wide a tally will be, so it can be placed instead of hoped for. */
 function cardHonoursWidth(ctx, counts, size) {
+  const parts = cardHonoursParts(counts);
+  if (!parts.length) return 0;
   const previous = ctx.font;
   ctx.font = cardFont(800, size);
-  const width = [["🏆", counts.gold], ["🥈", counts.silver], ["🥉", counts.bronze]]
-    .reduce((sum, [emoji, count]) => sum + ctx.measureText(`${emoji} ${count}`).width, 0)
-    + ctx.measureText(" · ").width * 2;
+  const width = parts.reduce((sum, [emoji, count]) => sum + ctx.measureText(emoji + count).width, 0)
+    + ctx.measureText(CARD_HONOURS_SEP).width * (parts.length - 1);
   ctx.font = previous;
   return width;
 }
-
 function drawCardHonours(ctx, x, y, counts, { size = 24 } = {}) {
-  const parts = [["🏆", counts.gold], ["🥈", counts.silver], ["🥉", counts.bronze]];
+  const parts = cardHonoursParts(counts);
+  if (!parts.length) return 0;
   ctx.font = cardFont(800, size);
   let cursor = x;
   parts.forEach(([emoji, count], index) => {
-    const text = `${emoji} ${count}`;
-    ctx.fillStyle = count ? CARD.muted : CARD.faint;
+    const text = emoji + count;
+    ctx.fillStyle = CARD.muted;
     ctx.fillText(text, cursor, y);
     cursor += ctx.measureText(text).width;
     if (index === parts.length - 1) return;
     ctx.fillStyle = CARD.faint;
-    ctx.fillText(" · ", cursor, y);
-    cursor += ctx.measureText(" · ").width;
+    ctx.fillText(CARD_HONOURS_SEP, cursor, y);
+    cursor += ctx.measureText(CARD_HONOURS_SEP).width;
   });
+  return cursor - x;
 }
 
 function drawCardFooter(ctx, y, model) {
@@ -4831,17 +4856,14 @@ function drawWeeklyPage(model, hero, m, page) {
       ctx.font = cardFont(900, m.number);
       ctx.fillText(String(row.rank), CARD_COL.rank, baseline);
       ctx.textAlign = "left";
-      // Same rule as the season card: the marker follows the name and stops
-      // short of the exact column, so it is never read as a score.
-      const moveSize = m.second;
-      const moveRoom = cardMovementWidth(ctx, row.movement, moveSize);
-      const cell = CARD_COL.exact - CARD_COL.name - 20;
-      const nameRoom = cell - (moveRoom ? moveRoom + CARD_MOVE_GAP : 0);
-      const drawn = drawFitted(ctx, row.nick, CARD_COL.name, baseline, nameRoom,
+      // The weekly card carries no tally, so the name has the whole cell.
+      drawFitted(ctx, row.nick, CARD_COL.name, baseline, CARD_COL.player - CARD_COL.name,
         { max: m.name, min: Math.min(CARD_TYPE_FLOOR, m.name) });
-      drawCardMovement(ctx,
-        Math.min(CARD_COL.name + drawn + CARD_MOVE_GAP, CARD_COL.name + cell - moveRoom),
-        baseline, row.movement, moveSize);
+      // Same MOVE column as the season card, in the same place, so the two
+      // exports are read the same way.
+      ctx.textAlign = "center";
+      drawCardMovement(ctx, CARD_COL.move, baseline, row.movement, m.second);
+      ctx.textAlign = "left";
       ctx.textAlign = "right";
       ctx.fillStyle = CARD.muted;
       ctx.font = cardFont(800, m.second);
@@ -4976,23 +4998,41 @@ function drawSeasonPage(model, m, page) {
       ctx.font = cardFont(900, m.number);
       ctx.fillText(String(row.rank), CARD_COL.rank, mid + 4);
       ctx.textAlign = "left";
-      // The name and the tally are one cell: same left edge, same width, the
-      // tally on its own line beneath the name. Capped at twenty rows a page,
-      // a season row is never short enough to need them side by side.
-      // The marker follows the name, inside the Player cell and on the NAME's
-      // line — never on the tally's, where it would read as a fourth medal.
-      // Its room is taken out of the name's before the name is fitted, so a
-      // long name is shortened rather than drawn underneath it.
-      const moveSize = m.second;
-      const moveRoom = cardMovementWidth(ctx, row.movement, moveSize);
+      // One line, one cell: name then tally. The TALLY is measured and its
+      // room taken out of the name's before the name is fitted, so an
+      // over-long name is the thing that gives way — a name can be cut and
+      // still recognised, whereas a tally cut in half is a wrong number.
       const cell = CARD_COL.player - CARD_COL.name;
-      const nameRoom = cell - (moveRoom ? moveRoom + CARD_MOVE_GAP : 0);
-      const drawn = drawFitted(ctx, row.nick, CARD_COL.name, mid + m.nameDy, nameRoom,
-        { max: m.name, min: Math.min(CARD_TYPE_FLOOR, m.name) });
-      drawCardMovement(ctx, Math.min(CARD_COL.name + drawn + CARD_MOVE_GAP, CARD_COL.player - moveRoom),
-        mid + m.nameDy, row.movement, moveSize);
-      drawCardHonours(ctx, CARD_COL.name, mid + m.honoursDy, row.honours,
-        { size: cardHonoursSize(ctx, row.honours, m.honoursSize, cell) });
+      // Who gives way, and in what order. The complete tally is reserved
+      // first — at its floor size if that is what it takes — so the name may
+      // claim everything except that. Within what is left the tally is
+      // COMPRESSED to give the name its full size back, because a smaller
+      // tally still says what it says and a cut name does not. Only a name
+      // longer than the whole remaining cell is truncated.
+      const floorTally = cardHonoursWidth(ctx, row.honours, CARD_SECOND_FLOOR);
+      const nameCap = cell - (floorTally ? floorTally + CARD_MOVE_GAP : 0);
+      ctx.font = cardFont(900, m.name);
+      const wanted = Math.min(ctx.measureText(row.nick).width, nameCap);
+      const tallySize = cardHonoursSize(ctx, row.honours, m.honoursSize,
+        Math.max(0, cell - wanted - CARD_MOVE_GAP));
+      const tally = cardHonoursWidth(ctx, row.honours, tallySize);
+      // A player with no medals reserves nothing: the name simply has the
+      // whole cell, rather than stopping short of a tally that is not there.
+      const nameRoom = cell - (tally ? tally + CARD_MOVE_GAP : 0);
+      // Held at the row's name size rather than allowed to shrink: the rule
+      // is that an over-long name is TRUNCATED, and a name that shrank as
+      // well would be smaller than the tally beside it and still cut short.
+      // Every name down the column is therefore the same size.
+      const drawn = drawFitted(ctx, row.nick, CARD_COL.name, mid + 4, nameRoom,
+        { max: m.name, min: m.name });
+      if (tally) {
+        drawCardHonours(ctx, Math.min(CARD_COL.name + drawn + CARD_MOVE_GAP, CARD_COL.player - tally),
+          mid + 4, row.honours, { size: tallySize });
+      }
+      // The marker has a column of its own now, centred on it whatever its
+      // magnitude, so a page of markers reads down rather than in and out.
+      ctx.textAlign = "center";
+      drawCardMovement(ctx, CARD_COL.move, mid + 4, row.movement, m.second);
       ctx.textAlign = "right";
       ctx.fillStyle = CARD.muted;
       ctx.font = cardFont(800, m.second);

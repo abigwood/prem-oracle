@@ -43,8 +43,8 @@ const VIEW_NAMES = [
   "matchweekRowState", "MATCHWEEK_ROW_LINE",
   "shortKickoff", "closedStatus", "matchOpen", "finalScore",
   "VOID_STATUSES", "isVoidFixture", "isPostponed", "clientLockMs",
-  "picksView", "pickRow", "pickRowBody", "pickRowLabel", "pickJustSaved", "pickListState",
-  "pickShareRow", "pickProgress", "pickDeadlineLine", "expandPick", "pickEditable",
+  "picksView", "pickActionSummary", "pickCounts", "launchBranch", "pickRow", "pickRowBody", "pickRowLabel", "pickJustSaved", "pickListState",
+  "pickShareRow", "pickDeadlineLine", "expandPick", "pickEditable",
   "resultCard", "resultState", "resultPickLine", "resultBadge", "isSettledCard",
   "scorePickLocal", "RESULT_FIRST_STATES",
 ];
@@ -58,6 +58,13 @@ const BASE = {
   matchweekCountMismatches: new Map(),
   periodLabel: (p) => `Matchweek ${p}`,
   pulsingStatus: (m) => `<p class="pulse">${m}</p>`,
+  picksDue: () => [],
+  periodOfFixture: (fixture) => (fixture?.matchday == null ? null : String(fixture.matchday)),
+  installNotice: () => "",
+  slateNotice: () => "",
+  hero: () => "",
+  preseasonState: () => `<div class="preseason"></div>`,
+  inviteCode: "",
   onboardingState: () => `<div class="onboarding"></div>`,
   leagueSwitcher: () => "",
   playerName: "Adam",
@@ -100,15 +107,16 @@ test("D1 · both surfaces render minimum, common and maximum slates", () => {
       leagueState: leagueState({ ids }), leagueStates: {}, leagueCodes: ["AAA"],
     });
     assert.deepEqual(rows(s.picksView()), ids, `My Picks lost order at ${size}`);
-    assert.match(s.picksView(), new RegExp(`0 of ${size} saved`));
+    assert.match(s.picksView(), new RegExp(`${size} predictions? still needed`));
   }
 });
 
 test("D1 · My Picks counts N of M from the slate, not from the calendar", () => {
   const s = box({ ids: [OPEN.id, LOCKED.id, SETTLED.id], picks: { [OPEN.id]: { p1: 1, p2: 0 }, [SETTLED.id]: { p1: 2, p2: 1 } } });
-  assert.match(s.picksView(), /2 of 3 saved/);
-  const progress = s.pickProgress(s.matchweekSlots(s.matchweekSlate()));
-  assert.deepEqual({ ...progress }, { complete: 2, total: 3 });
+  assert.match(s.picksView(), /1 prediction still needed/);
+  // Counted once per fixture: required, made, and what is still outstanding.
+  const counts = s.pickCounts(s.matchweekSlots(s.matchweekSlate()));
+  assert.deepEqual({ ...counts }, { required: 3, made: 2, outstanding: 1 });
 });
 
 // --- D2 · the six card states ----------------------------------------------

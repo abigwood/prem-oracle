@@ -16,11 +16,10 @@ import { load } from "./harness.mjs";
 const NAMES = [
   "matchweekLeagueState", "matchweekLeagueName", "matchweekSlate",
   "matchweekSlots", "matchweekContext", "matchweekEmpty",
-  "matchweekUnavailable", "picksView",
+  "matchweekUnavailable", "picksView", "pickActionSummary", "pickCounts", "launchBranch",
   "noteMatchweekCountMismatch", "matchweekMismatchLines",
   // The REAL row builder, so the measurement is of work that ships.
-  "pickRow", "pickRowBody", "pickRowLabel", "pickJustSaved", "pickProgress",
-  "pickListState", "pickDeadlineLine", "pickEditable", "isSettledCard",
+  "pickRow", "pickRowBody", "pickRowLabel", "pickJustSaved", "pickListState", "pickDeadlineLine", "pickEditable", "isSettledCard",
   "RESULT_FIRST_STATES", "resultState", "shortKickoff",
   // ...and the row-state contract Slice B put behind it.
   "matchweekRowState", "MATCHWEEK_ROW_LINE",
@@ -58,6 +57,14 @@ function box(active, states, { fixtures = SEASON } = {}) {
     matchweekCountMismatches: new Map(),
     periodLabel: (p) => `Matchweek ${p}`,
     pulsingStatus: (m) => m,
+    picksDue: () => [],
+    periodOfFixture: (fixture) => (fixture?.matchday == null ? null : String(fixture.matchday)),
+    currentPeriodKey: () => "3",
+    installNotice: () => "",
+    slateNotice: () => "",
+    hero: () => "",
+    preseasonState: () => `<div class="preseason"></div>`,
+    inviteCode: "",
     onboardingState: () => "",
     leagueSwitcher: () => "",
     // Only reached for an EXPANDED row, and nothing is expanded here.

@@ -94,7 +94,7 @@ function page({ cached = [] } = {}) {
     API: "https://worker.test",
     picks: { [ARSENAL.id]: { p1: 4, p2: 1 }, [HULL.id]: { p1: 1, p2: 1 } },
     fixtures: [ARSENAL, HULL],
-    matesState: null,
+    revealState: null,
     roundState: null,
     // Deliberately the WRONG league: a card must answer from its own section.
     activeLeague: "OTHER1",

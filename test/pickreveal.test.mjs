@@ -85,13 +85,13 @@ const REVEAL_NAMES = [
  * The reveal layer over a chosen world. `activeLeague` is set to the WRONG
  * league on purpose in most cases: the card must answer from its own section.
  */
-function world({ rounds = [], matesState = null, roundState = null, activeLeague = "OTHER1", now } = {}) {
+function world({ rounds = [], revealState = null, roundState = null, activeLeague = "OTHER1", now } = {}) {
   const roundStates = {};
   for (const state of rounds) roundStates[`${state.code}:${state.period}`] = state;
   return load(REVEAL_NAMES, {
     picks: { [ARSENAL.id]: { p1: 4, p2: 1 }, [HULL.id]: { p1: 1, p2: 1 } },
     fixtures: [ARSENAL, HULL],
-    matesState,
+    revealState,
     roundState,
     activeLeague,
     roundStates,
@@ -173,12 +173,12 @@ test("B · REPRODUCTION: the old lookup gives a historic week nothing to draw", 
   // described: matchweek 1 is not the current period, so it matches nothing.
   const box = world({ rounds: [SUNDAY_MW1, SUNDAY_MW2], activeLeague: "SUN123" });
   box.evalIn("globalThis.leagueState = { code: 'SUN123', currentPeriod: '2' };");
-  const usable = load(["matesUsable", "matesPeriod"], {
+  const usable = load(["revealUsable", "revealPeriod"], {
     activeLeague: "SUN123",
     leagueState: { code: "SUN123", currentPeriod: "2" },
   });
-  assert.equal(usable.matesUsable(SUNDAY_MW1), false, "the historic week was treated as current");
-  assert.equal(usable.matesUsable(SUNDAY_MW2), true, "the current week must still be usable");
+  assert.equal(usable.revealUsable(SUNDAY_MW1), false, "the historic week was treated as current");
+  assert.equal(usable.revealUsable(SUNDAY_MW2), true, "the current week must still be usable");
 });
 
 test("B · a settled HISTORIC card gets a disclosure row and a chevron", () => {
@@ -244,7 +244,7 @@ test("B · the active league never decides what a card shows", () => {
 
 test("B · a payload for the wrong league is refused even for the same fixture id", () => {
   // The one that hides: two leagues holding the very same fixture.
-  const box = world({ rounds: [], matesState: BURY_MW1, activeLeague: "BURY99" });
+  const box = world({ rounds: [], revealState: BURY_MW1, activeLeague: "BURY99" });
   assert.equal(box.revealStateFor("SUN123", "1"), null,
     "another league's payload satisfied this league's card");
   assert.equal(box.revealStateFor("BURY99", "1"), BURY_MW1);

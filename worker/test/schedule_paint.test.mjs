@@ -124,7 +124,7 @@ test("arriving at My Picks resets the scroller BEFORE content is added", () => {
   assert.ok(reset < nav.indexOf("render({ scrollTop: true })"), "before the list is built");
   assert.match(nav, /expandedPickId = null;/, "an open row survives the arrival");
   // And the legacy route id lands there rather than on nothing.
-  assert.match(APP, /const LEGACY_VIEWS = \{ schedule: "picks" \};/);
+  assert.match(APP, /const LEGACY_VIEWS = \{ schedule: "picks", today: "picks", mates: "picks" \};/);
   assert.match(nav, /const view = normaliseView\(requested\);/);
 });
 
@@ -847,14 +847,14 @@ test("the Weekly League dropdown still reaches every week", () => {
 });
 
 test("the segments say what they are, and the dropdown reports its state", () => {
-  // v1.6.5: three segments, so the first two shorten to make room —
-  // "Weekly ▾ · Season · Mates' Picks". The week stays in the tooltip.
+  // v1.7.1: two segments — "Weekly ▾ · Season". The third moved onto the
+  // fixture card. The week stays in the tooltip.
   const toggle = lift("function roundToggle()");
   assert.match(toggle, />Weekly ▾</);
   assert.match(toggle, />Season</);
-  assert.match(toggle, />Mates' Picks</);
+  assert.ok(!toggle.includes(">Mates' Picks<"), "the removed segment survived");
   assert.match(toggle, /aria-expanded="\$\{matchdayPickerOpen\}"/);
-  for (const tab of ["matchday", "season", "mates"]) {
+  for (const tab of ["matchday", "season"]) {
     assert.match(toggle, new RegExp(`aria-selected="\\$\\{leagueTab === "${tab}"\\}"`), tab);
   }
 });

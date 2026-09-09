@@ -58,7 +58,7 @@ test("N7 · every failure is a fallback, and each one is distinguishable", () =>
 test("N7 · a thrown handler still opens the app", () => {
   const handler = APP.slice(APP.indexOf('await push.addListener("pushNotificationActionPerformed"'));
   const body = handler.slice(0, handler.indexOf("});") + 3);
-  assert.match(body, /catch \{[\s\S]*currentView = "today";[\s\S]*render\(\{ scrollTop: true \}\);/);
+  assert.match(body, /catch \{[\s\S]*currentView = "picks";[\s\S]*render\(\{ scrollTop: true \}\);/);
 });
 
 // --- N3 · the tap reaches the exact card -----------------------------------

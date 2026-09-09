@@ -71,7 +71,9 @@ function view({ state = roundState(), ownPicks = {}, slate = null, viewer = VIEW
     const api = fetch;
     const fetchState = fetch;
 
-    let matesState = stateIn;
+    let picksRound = null;
+
+    let revealState = stateIn;
     let roundState = null;
     let roundStates = {};
     const roundCacheKey = (code, period) => code + ":" + period;
@@ -94,32 +96,67 @@ function view({ state = roundState(), ownPicks = {}, slate = null, viewer = VIEW
     ${lift("function sharedRankByUid(table)")}
     ${lift("function revealRows(entry, table, viewerUid)")}
     ${lift("function matesFixtureView(fixture, entry, table, viewerUid)")}
-    ${lift("function matesMatrix(state, viewerUid = uid())")}
+    // v1.7.1: the whole-slate matrix went with the League segment. Its
+    // view-model is still exactly what each fixture card is built from, so
+    // the harness assembles that shape from the SHIPPED matesFixtureView and
+    // the SHIPPED context rule — the privacy tests below are unchanged, and
+    // still run against the code My Picks executes.
+    const matesMatrix = (state, viewerUid = uid()) => {
+      if (!revealUsable(state)) return { period: null, total: 0, revealed: 0, cards: [] };
+      const entries = new Map((state?.reveal || []).map((entry) => [String(entry.id), entry]));
+      const ids = (state?.reveal || []).length
+        ? (state.reveal || []).map((entry) => String(entry.id))
+        : slateForPeriod(state?.period)?.fixtureIds?.map(String) || [];
+      const cards = ids.map((id) => ({ id, fixture: fixtureById(id) }))
+        .filter((row) => row.fixture)
+        .map(({ id, fixture }) => ({
+          id, fixture,
+          ...matesFixtureView(fixture, entries.get(id), state?.table, viewerUid),
+        }));
+      return {
+        period: state?.period ?? null,
+        total: cards.length,
+        revealed: cards.filter((c) => c.state !== "locked" && c.state !== "unavailable").length,
+        cards,
+      };
+    };
+    // The same shape fixtureRevealSection draws on My Picks: the state line,
+    // the score once settled, then the body. Written with concatenation
+    // because a nested template would be interpolated by this harness.
+    const matesFixtureCard = (card) => {
+      const match = card.fixture;
+      const score = card.state === "settled" && card.result
+        ? '<span class="mates-score">' + card.result.p1 + '-' + card.result.p2 + '</span>'
+        : "";
+      return '<article class="mates-card mates-' + card.state
+        + '" data-mates-fixture="' + escapeHTML(card.id) + '">'
+        + '<div class="mates-head"><span class="mates-teams">'
+        + escapeHTML(match.player1) + ' v ' + escapeHTML(match.player2) + '</span>' + score + '</div>'
+        + '<p class="mates-state">' + MATES_STATE_LINE[card.state] + '</p>'
+        + matesCardBody(card, !!picks[card.id]) + '</article>';
+    };
     ${lift("function matesPickCell(row)")}
     ${lift("function matesPointsCell(row, card)")}
     ${lift("function matesRow(row, card)")}
     ${lift("function matesRowList(card)")}
     ${lift("function matesCardBody(card, viewerPicked)")}
-    ${lift("function matesFixtureCard(card)")}
-    ${lift("function matesHeader(matrix)")}
     ${lift("function slateForPeriod(period)")}
-    ${liftLine("const matesPeriod =")}
-    ${lift("function matesUsable(state)")}
+    ${liftLine("const revealPeriod =")}
+    ${lift("function revealUsable(state)")}
     ${lift("function currentRoundReveal()")}
     ${lift("function fixtureRevealSection(match)")}
     ${lift("function lockHorizonOf(state)")}
 
     return {
-      matrix: () => matesMatrix(matesState),
-      html: () => matesMatrix(matesState).cards.map(matesFixtureCard).join(""),
-      header: () => matesHeader(matesMatrix(matesState)),
-      cardFor: (id) => matesMatrix(matesState).cards.find((card) => card.id === id),
+      matrix: () => matesMatrix(revealState),
+      html: () => matesMatrix(revealState).cards.map(matesFixtureCard).join(""),
+      cardFor: (id) => matesMatrix(revealState).cards.find((card) => card.id === id),
       section: (id) => fixtureRevealSection(fixtureById(id)),
-      horizon: () => lockHorizonOf(matesState),
+      horizon: () => lockHorizonOf(revealState),
       // The three ways a current-round payload can already be in hand.
-      viaMates: (value) => { matesState = value; },
-      viaRound: (value) => { matesState = null; roundState = value; },
-      viaCache: (value) => { matesState = null; roundState = null; roundStates[roundCacheKey("AAA", value.period)] = value; },
+      viaMates: (value) => { revealState = value; },
+      viaRound: (value) => { revealState = null; roundState = value; },
+      viaCache: (value) => { revealState = null; roundState = null; roundStates[roundCacheKey("AAA", value.period)] = value; },
       setLeague: (code) => { activeLeague = code; },
       requests: () => requests,
     };
@@ -181,9 +218,14 @@ test("a mixed week reveals only the fixtures that kicked off", () => {
 
 // --- the header counter ----------------------------------------------------
 
-test("the header counts revealed fixtures out of the round", () => {
-  assert.match(view({ state: roundState({ revealedCount: 3, total: 10 }) }).header(), /3 of 10 fixtures revealed/);
-  assert.match(view({ state: roundState({ revealedCount: 1, total: 1 }) }).header(), /1 of 1 fixture revealed/);
+test("the round still knows how many of its fixtures have revealed", () => {
+  // The matrix header that said "3 of 10 fixtures revealed" went with the
+  // segment. The count itself is still the view-model's, and each card says
+  // its own state — which is what a per-fixture disclosure needs.
+  assert.equal(view({ state: roundState({ revealedCount: 3, total: 10 }) }).matrix().revealed, 3);
+  assert.equal(view({ state: roundState({ revealedCount: 3, total: 10 }) }).matrix().total, 10);
+  assert.equal(view({ state: roundState({ revealedCount: 1, total: 1 }) }).matrix().revealed, 1);
+  assert.ok(!APP.includes("fixtures revealed"), "the matrix header survived");
 });
 
 // --- ordering --------------------------------------------------------------
@@ -306,7 +348,8 @@ test("an old worker's answer is unavailable after kick-off, normal before it", (
   const state = { code: "AAA", period: "3", table: roundState().table };
   const app = new Function("stateIn", "slateIn", `
     "use strict";
-    let matesState = stateIn;
+    let picksRound = null;
+    let revealState = stateIn;
     let leagueState = { code: "AAA", currentPeriod: "3", currentSlate: slateIn };
     let activeLeague = "AAA";
     const picks = {};
@@ -322,17 +365,54 @@ test("an old worker's answer is unavailable after kick-off, normal before it", (
     ${lift("function sharedRankByUid(table)")}
     ${lift("function revealRows(entry, table, viewerUid)")}
     ${lift("function matesFixtureView(fixture, entry, table, viewerUid)")}
-    ${lift("function matesMatrix(state, viewerUid = uid())")}
+    // v1.7.1: the whole-slate matrix went with the League segment. Its
+    // view-model is still exactly what each fixture card is built from, so
+    // the harness assembles that shape from the SHIPPED matesFixtureView and
+    // the SHIPPED context rule — the privacy tests below are unchanged, and
+    // still run against the code My Picks executes.
+    const matesMatrix = (state, viewerUid = uid()) => {
+      if (!revealUsable(state)) return { period: null, total: 0, revealed: 0, cards: [] };
+      const entries = new Map((state?.reveal || []).map((entry) => [String(entry.id), entry]));
+      const ids = (state?.reveal || []).length
+        ? (state.reveal || []).map((entry) => String(entry.id))
+        : slateForPeriod(state?.period)?.fixtureIds?.map(String) || [];
+      const cards = ids.map((id) => ({ id, fixture: fixtureById(id) }))
+        .filter((row) => row.fixture)
+        .map(({ id, fixture }) => ({
+          id, fixture,
+          ...matesFixtureView(fixture, entries.get(id), state?.table, viewerUid),
+        }));
+      return {
+        period: state?.period ?? null,
+        total: cards.length,
+        revealed: cards.filter((c) => c.state !== "locked" && c.state !== "unavailable").length,
+        cards,
+      };
+    };
+    // The same shape fixtureRevealSection draws on My Picks: the state line,
+    // the score once settled, then the body. Written with concatenation
+    // because a nested template would be interpolated by this harness.
+    const matesFixtureCard = (card) => {
+      const match = card.fixture;
+      const score = card.state === "settled" && card.result
+        ? '<span class="mates-score">' + card.result.p1 + '-' + card.result.p2 + '</span>'
+        : "";
+      return '<article class="mates-card mates-' + card.state
+        + '" data-mates-fixture="' + escapeHTML(card.id) + '">'
+        + '<div class="mates-head"><span class="mates-teams">'
+        + escapeHTML(match.player1) + ' v ' + escapeHTML(match.player2) + '</span>' + score + '</div>'
+        + '<p class="mates-state">' + MATES_STATE_LINE[card.state] + '</p>'
+        + matesCardBody(card, !!picks[card.id]) + '</article>';
+    };
     ${lift("function matesPickCell(row)")}
     ${lift("function matesPointsCell(row, card)")}
     ${lift("function matesRow(row, card)")}
     ${lift("function matesRowList(card)")}
     ${lift("function matesCardBody(card, viewerPicked)")}
-    ${lift("function matesFixtureCard(card)")}
     ${lift("function slateForPeriod(period)")}
-    ${liftLine("const matesPeriod =")}
-    ${lift("function matesUsable(state)")}
-    return { cards: () => matesMatrix(matesState).cards, html: () => matesMatrix(matesState).cards.map(matesFixtureCard).join("") };
+    ${liftLine("const revealPeriod =")}
+    ${lift("function revealUsable(state)")}
+    return { cards: () => matesMatrix(revealState).cards, html: () => matesMatrix(revealState).cards.map(matesFixtureCard).join("") };
   `)(state, slate);
 
   const [past, future] = app.cards();
@@ -456,10 +536,13 @@ test("the worst shape builds well inside a frame", () => {
   assert.ok(ms < 50, `building the worst-shape matrix took ${ms.toFixed(1)}ms`);
 });
 
-test("the matrix is built in bounded chunks, not one blocking pass", () => {
-  const branch = APP.slice(APP.indexOf('if (tab === "mates") {'));
-  const body = branch.slice(0, branch.indexOf('if (tab === "matchday")'));
-  assert.match(body, /index \+= 4/, "four cards at a time");
-  assert.match(body, /await nextPaint\(\)/, "with a real paint between chunks");
-  assert.match(body, /stale\(\)/, "and abandoned if the screen has moved on");
+test("there is no whole-slate matrix left to build at all", () => {
+  // The chunked build existed because the segment drew every fixture at once.
+  // A disclosure draws one, on demand, so the cost it was managing is gone.
+  assert.ok(!APP.includes('if (tab === "mates") {'), "the matrix panel survived");
+  for (const gone of ["matesMatrix", "matesFixtureCard", "matesHeader", "matesAwaitingSlate"]) {
+    assert.ok(!APP.includes(`function ${gone}(`), `${gone} survived`);
+  }
+  // And the one card a disclosure does draw is built where it is opened.
+  assert.match(APP, /function fixtureRevealSection\(match\)/);
 });

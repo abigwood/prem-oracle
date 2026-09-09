@@ -884,7 +884,7 @@ class CustomMixTests(unittest.TestCase):
         self.assertIn("ensurePicksRound();", nav)
         self.assertNotIn("await ensurePicksRound", nav)
         # And a league change drops it at once.
-        self.assertIn("forgetPicksRound();", self.app[self.app.index("function forgetMatesState()"):])
+        self.assertIn("forgetPicksRound();", self.app[self.app.index("function forgetRevealState()"):])
 
     def test_the_weekly_hero_gives_the_table_the_room_it_needs(self):
         # Adam's build-25 correction 1: eleven members fit one weekly square,
@@ -1063,10 +1063,13 @@ class CustomMixTests(unittest.TestCase):
     def test_members_get_a_calm_waiting_state_then_fewer_cards(self):
         self.assertIn("Waiting for ${escapeHTML(hostNickname())} to set this week's fixtures", self.app)
         self.assertNotIn("spinner", self.app)
-        # v1.5: Next is purely the picks this viewer still owes on the published
-        # slate, so the filter is on the slate rather than on today's date.
-        self.assertIn("const due = roundFixtures.filter((fixture) => matchOpen(fixture) && !picks[fixture.id]);", self.app)
-        self.assertIn("You've picked ${pickedCount} of ${roundFixtures.length}", self.app)
+        # v1.7.1: what the viewer still owes is one counted sentence on My
+        # Picks rather than a tab of its own, and it is counted over the
+        # published slate rather than over today's date.
+        counts = self.app[self.app.index("function pickCounts(slots)"):]
+        counts = counts[:counts.index("\n}\n")]
+        self.assertIn("matchOpen(fixture)", counts)
+        self.assertIn("picks[id]", counts)
 
     def test_host_banner_names_the_period(self):
         # A matchweek for a single competition, "Week N · 18–24 Aug" for a mix —
@@ -1412,11 +1415,16 @@ class WeeklyLoopTests(unittest.TestCase):
 
     # --- 5. tabs and launch ------------------------------------------------
 
-    def test_next_is_purely_the_picks_due_this_week(self):
+    def test_the_week_summary_replaces_the_next_tab(self):
         self.assertIn("function picksDue()", self.app)
-        self.assertIn("Your picks due · ${escapeHTML(periodLabel(period))}", self.app)
-        # It no longer shows "today's card" regardless of the league's slate.
+        # Next's whole job is one sentence at the top of My Picks now.
+        summary = self.app[self.app.index("function pickActionSummary(slots"):]
+        summary = summary[:summary.index("\n}\n")]
+        self.assertIn("prediction${outstanding === 1", summary)
+        self.assertIn("All ${required} prediction", summary)
+        self.assertIn("Waiting on your host", summary)
         self.assertNotIn("Today's predictions", self.app)
+        self.assertNotIn("Your picks due · ", self.app)
 
     def test_the_week_on_screen_is_the_one_the_host_published(self):
         # Which week is shown is no longer a browser's open/closed rule: the
@@ -1434,7 +1442,9 @@ class WeeklyLoopTests(unittest.TestCase):
         branch = branch[:branch.index("// True once the viewer has chosen a tab")]
         for name in ("onboarding", "picks", "preseason", "awaiting"):
             self.assertIn(f'"{name}"', branch, name)
-        self.assertIn('currentView = launchBranch() === "awaiting" ? "picks" : "today";', self.app)
+        # Every branch lands on My Picks now; the branch decides what it SHOWS.
+        self.assertIn('currentView = "picks";', self.app)
+        self.assertNotIn('? "picks" : "today"', self.app)
         # A cold install re-evaluates once the league and its period are known,
         # and stops the moment the viewer picks a tab themselves.
         self.assertIn("let launchRouted = false;", self.app)
@@ -1445,7 +1455,10 @@ class WeeklyLoopTests(unittest.TestCase):
         self.assertIn("applyLaunchBranch();", hydrate)
 
     def test_each_launch_branch_carries_the_copy_the_spec_wrote(self):
-        self.assertIn("No picks due yet — fixtures will appear here when your host publishes this week's slate.", self.app)
+        # The "no picks due" card was Next's; My Picks says it in its summary
+        # and its own empty state instead.
+        self.assertIn("Waiting on your host to publish this week", self.app)
+        self.assertIn("No league fixtures selected yet.", self.app)
         self.assertIn("Fixtures are loading for the new season. Picks open when your league's weekly slate is published.", self.app)
         self.assertIn(">Create a league</button>", self.app)
         self.assertIn(">Join a league</button>", self.app)
@@ -1527,14 +1540,17 @@ class WeeklyLoopTests(unittest.TestCase):
         self.assertIn("export const SLATE_MIN = 1;", (ROOT / "worker/src/logic.js").read_text())
         self.assertIn("export const SLATE_MAX = 20;", (ROOT / "worker/src/logic.js").read_text())
 
-    def test_next_is_never_empty(self):
-        today = self.app[self.app.index("function todayView()"):]
-        today = today[:today.index("\n}\n")]
-        # Every path out of the Next tab returns content.
-        self.assertIn('if (branch === "onboarding") return', today)
-        self.assertIn('if (branch === "preseason") return', today)
-        self.assertIn("No picks due yet", today)
-        self.assertIn("All done for", today)
+    def test_my_picks_is_never_empty(self):
+        # v1.7.1: Next is gone and My Picks owns every launch state, so every
+        # path out of it has to return something real.
+        view = self.app[self.app.index("function picksView() {"):]
+        view = view[:view.index("\n}\n")]
+        self.assertIn("if (!leagueCodes.length) return", view)
+        self.assertIn('if (launchBranch() === "preseason") {', view)
+        self.assertIn("matchweekEmpty()", view)
+        self.assertIn("pickActionSummary(slots)", view)
+        # And there is no Next tab left to fall back to.
+        self.assertNotIn("function todayView", self.app)
 
 
 class WeekPickerTests(unittest.TestCase):
@@ -1760,11 +1776,12 @@ class WeekPickerTests(unittest.TestCase):
     # --- the profile -------------------------------------------------------
 
     def test_the_total_and_to_pick_boxes_are_gone(self):
-        picks = self.app[self.app.index("function picksView()"):]
-        picks = picks[:picks.index("function leagueSwitcher")]
-        # v1.7 Slice B: the standalone stat box is replaced by the header's own
-        # dynamic progress line (B3). What must stay gone is what it replaced.
-        self.assertIn("${progress.complete} of ${progress.total} saved", picks)
+        picks = self.app[self.app.index("function picksView() {"):]
+        picks = picks[:picks.index("\n}\n")]
+        # v1.7 Slice B replaced the stat box with the header's own progress
+        # line; v1.7.1 replaced that line with the action summary. What must
+        # stay gone is what the stat box was.
+        self.assertIn('<p class="pick-summary" data-pick-summary>', picks)
         self.assertNotIn("Total fixtures", self.app)
         self.assertNotIn("To pick", self.app)
         self.assertNotIn("fixtures.length - picked.length", self.app)
@@ -1930,16 +1947,18 @@ class MyPredictionsTests(unittest.TestCase):
             self.assertNotIn(destructive, view, destructive)
 
     def test_the_count_is_n_of_m_over_the_published_slate(self):
-        # v1.7 Slice B: N of M, where M is the host's published slot count and
-        # N is how many of them this player has scored (B3).
-        view = self.app[self.app.index("function picksView()"):]
-        view = view[:view.index("function leagueSwitcher")]
-        self.assertIn("const progress = pickProgress(slots);", view)
-        self.assertIn("${progress.complete} of ${progress.total} saved", view)
-        counter = self.app[self.app.index("function pickProgress(slots)"):]
-        counter = counter[:counter.index("\n}")]
-        self.assertIn("const total = slots.length;", counter)
-        self.assertIn("slots.filter((slot) => slot.fixture && picks[slot.fixture.id]).length", counter)
+        # v1.7.1: the count is the action summary, over the host's published
+        # slate, and counted once per FIXTURE so overlapping leagues cannot
+        # ask for the same prediction twice.
+        view = self.app[self.app.index("function picksView() {"):]
+        view = view[:view.index("\n}\n")]
+        self.assertIn("pickActionSummary(slots)", view)
+        counter = self.app[self.app.index("function pickCounts(slots)"):]
+        counter = counter[:counter.index("\n}\n")]
+        for line in ("const required = new Set();", "const made = new Set();",
+                     "const outstanding = new Set();", "required.add(id);"):
+            self.assertIn(line, counter, line)
+        self.assertIn("return { required: required.size, made: made.size, outstanding: outstanding.size };", counter)
 
     def test_the_dropped_set_comes_from_the_version_deltas(self):
         # The app cannot derive 'dropped' from a slate's latest state; the
@@ -2742,23 +2761,29 @@ class MatesPicksTests(unittest.TestCase):
         cls.worker = (ROOT / "worker/src/worker.js").read_text()
         cls.logic = (ROOT / "worker/src/logic.js").read_text()
 
-    def test_the_segment_control_carries_three_labels(self):
-        # §9, binding: Weekly ▾ · Season · Mates' Picks.
+    def test_the_segment_control_carries_two_labels(self):
+        # v1.7.1: Weekly ▾ · Season. The third segment moved onto the card.
         toggle = self.app[self.app.index("function roundToggle()"):]
         toggle = toggle[:toggle.index("\n}")]
-        for label in (">Weekly ▾<", ">Season<", ">Mates' Picks<"):
+        for label in (">Weekly ▾<", ">Season<"):
             self.assertIn(label, toggle, label)
+        self.assertNotIn(">Mates' Picks<", toggle)
+        self.assertNotIn('data-round-tab="mates"', toggle)
         # The long labels are gone from the control itself. They survive in
         # prose about the dropdown, which is not a label.
         self.assertNotIn(">Weekly League", toggle)
         self.assertNotIn(">Season League", toggle)
-        self.assertIn('data-round-tab="mates"', toggle)
+        # And nowhere in the app is that segment still reachable.
+        self.assertNotIn('data-round-tab="mates"', self.app)
 
-    def test_the_view_heading_names_the_feature(self):
-        header = self.app[self.app.index("function matesHeader(matrix)"):]
-        header = header[:header.index("\n}")]
-        self.assertIn("Mates' Picks", header)
-        self.assertIn("fixture${matrix.total === 1 ? \"\" : \"s\"} revealed", header)
+    def test_the_feature_is_named_on_the_card_that_raises_it(self):
+        # The whole-slate matrix is gone; the disclosure on each fixture card
+        # is the single comparison path, and it says what it opens.
+        row = self.app[self.app.index("function pickRow(slot, { expanded })"):]
+        row = row[:row.index("\n}\n")]
+        self.assertIn("Mates&#39; picks", row)
+        for gone in ("matesMatrix", "matesHeader", "matesFixtureCard", "matesAwaitingSlate"):
+            self.assertNotIn(gone, self.app, gone)
 
     def test_the_three_state_lines_are_the_spec_wording(self):
         lines = self.app[self.app.index("const MATES_STATE_LINE = {"):]
@@ -2777,7 +2802,7 @@ class MatesPicksTests(unittest.TestCase):
     def test_no_live_scores_or_minutes_anywhere_in_the_feature(self):
         # §1, ruled 16 Aug: no in-play scores at any phase. A kicked-off,
         # unsettled fixture shows picks and nothing else.
-        section = self.app[self.app.index("// --- Mates' Picks"):self.app.index("function leagueRevealsHtml")]
+        section = self.app[self.app.index("// --- Mates' picks, on the fixture card"):self.app.index("function leagueRevealsHtml")]
         for banned in ("minute", "'", "in-play", "liveScore"):
             if banned == "'":
                 continue
@@ -2840,26 +2865,28 @@ class MatesPicksTests(unittest.TestCase):
             self.assertNotIn(read, reveal, f"{read} inside the reveal would be a new read")
         self.assertIn("picksByMatch: picks", reveal, "it reuses the scoring pass's picks")
 
-    def test_mates_picks_keeps_its_own_state_apart_from_the_weekly_one(self):
-        self.assertIn("let matesState = null;", self.app)
-        self.assertIn("const matesPeriod = () => leagueState?.currentPeriod ?? null;", self.app)
-        loader = self.app[self.app.index("async function loadMatesState"):]
+    def test_the_reveal_keeps_its_own_state_apart_from_the_weekly_one(self):
+        self.assertIn("let revealState = null;", self.app)
+        self.assertIn("const revealPeriod = () => leagueState?.currentPeriod ?? null;", self.app)
+        loader = self.app[self.app.index("async function loadRevealState"):]
         loader = loader[:loader.index("\n}")]
         self.assertNotIn("selectedPeriod", loader)
         self.assertNotIn("roundState =", loader)
 
     def test_freshness_is_bounded_and_never_polled(self):
         self.assertIn('document.addEventListener("visibilitychange"', self.app)
-        fn = self.app[self.app.index("async function refreshMatesOnForeground()"):]
+        fn = self.app[self.app.index("async function refreshRevealOnForeground()"):]
         fn = fn[:fn.index("\n}")]
-        self.assertIn("if (Date.now() < matesLockHorizon) return;", fn)
-        self.assertIn("matesLockHorizon = Infinity;", fn, "one crossing, one revalidation")
+        self.assertIn("if (Date.now() < revealLockHorizon) return;", fn)
+        self.assertIn("revealLockHorizon = Infinity;", fn, "one crossing, one revalidation")
+        # It watches the screen the reveal now lives on, not the League tab.
+        self.assertIn('normaliseView(currentView) !== "picks"', fn)
         # The app's one timer predates this feature and refreshes fixtures, not
         # picks. Mates' Picks adds no timer of its own.
         self.assertEqual(self.app.count("setInterval"), 1)
         timer = self.app[self.app.index("setInterval(async () => {"):]
         self.assertIn("loadFixtures()", timer[:timer.index("}, 180000)")])
-        section = self.app[self.app.index("// --- Mates' Picks"):self.app.index("function leagueRevealsHtml")]
+        section = self.app[self.app.index("// --- Mates' picks, on the fixture card"):self.app.index("function leagueRevealsHtml")]
         self.assertNotIn("setInterval", section)
 
     def test_show_all_uncovers_rows_without_rebuilding_or_asking(self):
@@ -2899,7 +2926,7 @@ class MatesPicksTests(unittest.TestCase):
     def test_the_app_privacy_position_is_unchanged(self):
         # §5: picks are existing league-visible state; nothing new is collected
         # or transmitted, so the feature adds no outbound call of its own.
-        section = self.app[self.app.index("// --- Mates' Picks"):self.app.index("function leagueRevealsHtml")]
+        section = self.app[self.app.index("// --- Mates' picks, on the fixture card"):self.app.index("function leagueRevealsHtml")]
         for banned in ("fetch(", "api(", "navigator.sendBeacon", "XMLHttpRequest"):
             self.assertNotIn(banned, section, banned)
 

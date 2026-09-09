@@ -43,7 +43,7 @@ function picksBox(over = {}) {
     leagueStates: {},
     roundStates: {},
     roundState: null,
-    matesState: null,
+    revealState: null,
     fixtures: [],
     selectedPeriod: null,
     matchweekCountMismatches: new Map(),
@@ -279,11 +279,11 @@ test("P8 · the paint never waits for the table", () => {
   assert.match(picks, /\n    ensurePicksRound\(\);/, "the read is not started on entry");
   assert.ok(!/await ensurePicksRound/.test(picks), "the paint waits for the table");
   // And it is not the fixture list's business either.
-  assert.ok(!sourceOf("picksView").includes("ensurePicksRound"));
+  assert.ok(!sourceOf("picksView", "pickActionSummary", "pickCounts").includes("ensurePicksRound"));
 });
 
 test("P8 · a league change invalidates My Picks' table immediately", () => {
-  assert.match(sourceOf("forgetMatesState"), /forgetPicksRound\(\);/);
+  assert.match(sourceOf("forgetRevealState"), /forgetPicksRound\(\);/);
   assert.match(sourceOf("forgetPicksRound"), /picksRound = null;/);
   assert.match(sourceOf("forgetPicksRound"), /picksRoundFlights\.clear\(\);/);
 });

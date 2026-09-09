@@ -16,18 +16,22 @@ const CSS = readFileSync(new URL("../styles.css", import.meta.url), "utf8");
 
 // --- 1 · the four-item navigation ------------------------------------------
 
-test("N1 · the bar is Next, My Picks, League, Rules — in that order", () => {
+test("N1 · the bar is My Picks, League, Rules — in that order", () => {
   const dom = new JSDOM(HTML);
   const buttons = [...dom.window.document.querySelectorAll(".bottom-nav button")];
-  assert.deepEqual(buttons.map((b) => b.dataset.view), ["today", "picks", "league", "rules"]);
+  assert.deepEqual(buttons.map((b) => b.dataset.view), ["picks", "league", "rules"]);
   assert.deepEqual(buttons.map((b) => b.textContent.replace(/[^A-Za-z ]/g, "").trim()),
-    ["Next", "My Picks", "League", "Rules"]);
+    ["My Picks", "League", "Rules"]);
+  // My Picks is where the app opens, so it is the one marked active in the
+  // document the shell ships with.
+  assert.equal(buttons[0].className, "active");
+  assert.ok(!HTML.includes('data-view="today"'), "the Next tab survives in the bar");
 });
 
-test("N1 · the four items divide the bar evenly", () => {
+test("N1 · the three items divide the bar evenly", () => {
   const nav = CSS.slice(CSS.indexOf(".bottom-nav {"), CSS.indexOf("}", CSS.indexOf(".bottom-nav {")));
-  assert.match(nav, /grid-template-columns: repeat\(4, 1fr\);/,
-    "the bar still divides in five, or unevenly");
+  assert.match(nav, /grid-template-columns: repeat\(3, 1fr\);/,
+    "the bar does not divide evenly in three");
   // Every item is a real target, and the active one is marked.
   assert.match(CSS, /\.bottom-nav button \{[^}]*height: 52px/);
   assert.match(CSS, /\.bottom-nav button\.active \{/);
@@ -58,10 +62,11 @@ test("N2 · nothing in the shipped markup or styles offers Matchweek as a tab", 
 // --- 3 · the old route still lands somewhere ------------------------------
 
 test("N3 · every door translates the legacy view id", () => {
-  assert.equal(constOf("LEGACY_VIEWS"), 'const LEGACY_VIEWS = { schedule: "picks" };');
-  // The three places a stored or sent `schedule` can arrive.
+  assert.equal(constOf("LEGACY_VIEWS"),
+    'const LEGACY_VIEWS = { schedule: "picks", today: "picks", mates: "picks" };');
+  // The three places a stored or sent legacy id can arrive.
   assert.match(sourceOf("navigateToView"), /const view = normaliseView\(requested\);/);
-  assert.match(APP, /const html = \(views\[normaliseView\(currentView\)\] \|\| todayView\)\(\);/);
+  assert.match(APP, /const html = \(views\[normaliseView\(currentView\)\] \|\| picksView\)\(\);/);
   assert.match(sourceOf("markActiveTab"), /const active = normaliseView\(currentView\);/);
 });
 
@@ -85,8 +90,9 @@ test("N3 · a notification for a fixture opens it on My Picks", () => {
 // --- 7 · a fresh launch --------------------------------------------------
 
 test("N7 · a launch that is waiting on the week opens My Picks", () => {
-  assert.match(sourceOf("applyLaunchBranch"),
-    /currentView = launchBranch\(\) === "awaiting" \? "picks" : "today";/);
+  // v1.7.1: there is nowhere else to open. The branch still decides what My
+  // Picks shows, but never where the viewer lands.
+  assert.match(sourceOf("applyLaunchBranch"), /currentView = "picks";/);
   // And the shell it shows is literal — it computes nothing.
   const shells = APP.slice(APP.indexOf("const VIEW_SHELLS = {"), APP.indexOf("const loadingLine ="));
   const picks = shells.slice(shells.indexOf("picks:"), shells.indexOf("league:"));
@@ -100,7 +106,7 @@ test("N7 · a launch that is waiting on the week opens My Picks", () => {
 
 test("N9 · expanding a row makes no request and no global render", () => {
   const fn = sourceOf("expandPick");
-  for (const banned of ["api(", "fetch(", "render(", "loadRoundState", "loadMatesState"]) {
+  for (const banned of ["api(", "fetch(", "render(", "loadRoundState", "loadRevealState"]) {
     assert.ok(!fn.includes(banned), `expandPick reaches ${banned}`);
   }
   // The mates section it mounts reads what the device already holds.
@@ -137,21 +143,21 @@ function shareBox(over = {}) {
   return load(["shareIconButton", "shareCardState", "shareSurface", "shareRound", "sharePeriod",
     "normaliseView", "LEGACY_VIEWS", "weeklySharePublished", "seasonShareFreshness",
     "weeklyShareStatus", "weeklyTerminalCount", "finalScore", "isVoidFixture", "isPostponed",
-    "VOID_STATUSES"], {
+    "VOID_STATUSES", "normaliseLeagueTab", "LEGACY_LEAGUE_TABS"], {
     currentView: "league",
     leagueTab: "season",
     activeLeague: "AAA",
     selectedPeriod: "3",
     roundState: null,
-    matesState: null,
+    revealState: null,
     fixtures: [],
     leagueSupportsRounds: () => true,
     currentPeriodKey: () => "3",
     periodLabel: (p) => `Matchweek ${p}`,
     seasonRounds: () => 38,
     cachedRoundState: () => null,
-    matesPeriod: () => "3",
-    matesUsable: () => false,
+    revealPeriod: () => "3",
+    revealUsable: () => false,
     matchweekLeagueState: () => ({ code: "AAA", currentPeriod: "3" }),
     leagueState: { code: "AAA", name: "Sunday Six", table: [{ uid: "u1", nick: "Adam", pts: 12 }],
       currentMatchday: 8, currentMatchdayHasResults: true },
@@ -199,9 +205,10 @@ test("N11 · one presentation component serves all three surfaces", () => {
 });
 
 test("N11 · a surface with nothing to share renders no control at all", () => {
-  const s = shareBox({ leagueTab: "mates" });
-  assert.equal(s.shareCardState().hidden, true);
-  assert.equal(s.shareIconButton({ code: "AAA" }), "");
+  // The Mates' Picks segment was the surface that shared nothing; it is gone,
+  // and anything still naming it is answered with Weekly rather than with a
+  // segment that does not exist.
+  assert.equal(shareBox({}).normaliseLeagueTab("mates"), "matchday");
   const empty = shareBox({ leagueState: { code: "AAA", name: "Sunday Six", table: [] } });
   assert.equal(empty.shareIconButton({ code: "AAA" }, "season"), "");
 });
@@ -316,7 +323,7 @@ test("N16 · the head is a real 44pt target with a name and a state", () => {
 test("N17 · the week's state is on the header, never repeated on every card", () => {
   assert.ok(!APP.includes("pick-row-status"), "the repeated status element survives");
   assert.ok(!APP.includes("fixture-row-state"), "the repeated state element survives");
-  const view = sourceOf("picksView");
+  const view = sourceOf("picksView", "pickActionSummary", "pickCounts", "launchBranch");
   assert.match(view, /pickListState\(slots\)/);
   const row = sourceOf("pickRow");
   assert.ok(!row.includes("MATCHWEEK_ROW_LINE"), "the row still prints the week's state");
@@ -343,8 +350,9 @@ function journeyBox(picks = {}) {
   const dom = new JSDOM(`<!doctype html><body><div id="app"></div></body>`);
   const { document, CSS: cssApi } = dom.window;
   const requests = { api: 0 };
-  const box = load(["picksView", "pickRow", "pickRowBody", "pickRowLabel", "pickJustSaved",
-    "pickListState", "pickProgress", "pickDeadlineLine", "pickEditable", "expandPick",
+  const box = load(["picksView", "pickActionSummary", "pickCounts", "launchBranch",
+    "pickRow", "pickRowBody", "pickRowLabel", "pickJustSaved",
+    "pickListState", "pickDeadlineLine", "pickEditable", "expandPick",
     "matchweekLeagueState", "matchweekSlate", "matchweekSlots", "matchweekContext",
     "matchweekEmpty", "matchweekUnavailable", "matchweekLeagueName", "matchweekRowState",
     "MATCHWEEK_ROW_LINE", "isSettledCard", "resultState", "RESULT_FIRST_STATES",
@@ -367,6 +375,13 @@ function journeyBox(picks = {}) {
         fixtureIds: [OPEN.id, LOCKED.id, SETTLED.id] } },
     periodLabel: (p) => `Matchweek ${p}`,
     pulsingStatus: (m) => `<p>${m}</p>`,
+    picksDue: () => [],
+    periodOfFixture: (fixture) => (fixture?.matchday == null ? null : String(fixture.matchday)),
+    installNotice: () => "",
+    slateNotice: () => "",
+    hero: () => "",
+    preseasonState: () => `<div class="preseason"></div>`,
+    inviteCode: "",
     onboardingState: () => "",
     leagueSwitcher: () => "",
     scorePicker: (m) => `<div class="score-picker" data-picker="${m.id}"></div>`,
@@ -442,7 +457,7 @@ test("J6 · one disclosure at a time, across all three states", () => {
 test("J6 · the week's state is said once, above the list", () => {
   const app = journeyBox({ [OPEN.id]: { p1: 1, p2: 0 } });
   const head = app.document.querySelector(".section-head").textContent;
-  assert.match(head, /1 of 3 saved/);
+  assert.match(head, /1 prediction still needed/);
   // One fixture still open, two past it.
   assert.match(head, /1 of 3 still open/);
   const list = app.document.querySelector(".pick-list").innerHTML;

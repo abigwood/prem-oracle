@@ -26,8 +26,8 @@ const OPEN = fx("f-open");
 const LOCKED = fx("f-locked", { hours: 3, lockAt: new Date(now - HOUR).toISOString(), h: "Hull City", a: "Man Utd" });
 const SETTLED = fx("f-settled", { hours: -26, result: [2, 1], h: "Brighton", a: "Aston Villa" });
 
-const NAMES = ["picksView", "pickRow", "pickRowBody", "pickRowLabel", "pickJustSaved", "pickListState",
-  "pickProgress", "pickDeadlineLine", "pickEditable", "expandPick", "matchCard", "matchIntelStrip",
+const NAMES = ["picksView", "pickActionSummary", "pickCounts", "launchBranch", "pickRow", "pickRowBody", "pickRowLabel", "pickJustSaved", "pickListState",
+  "pickDeadlineLine", "pickEditable", "expandPick", "matchCard", "matchIntelStrip",
   "resultText", "matchOpen", "isSettledCard", "resultState", "RESULT_FIRST_STATES",
   "matchweekLeagueState", "matchweekSlate", "matchweekSlots", "matchweekContext", "matchweekEmpty",
   "matchweekUnavailable", "matchweekLeagueName", "matchweekRowState", "MATCHWEEK_ROW_LINE",
@@ -54,6 +54,14 @@ function cardBox({ picks = {}, fixtures = [OPEN, LOCKED, SETTLED], ids = null, o
         fixtureIds: (ids || fixtures.map((f) => f.id)), count: (ids || fixtures).length } },
     periodLabel: (p) => `Matchweek ${p}`,
     pulsingStatus: (m) => `<p>${m}</p>`,
+    picksDue: () => [],
+    periodOfFixture: (fixture) => (fixture?.matchday == null ? null : String(fixture.matchday)),
+    currentPeriodKey: () => "3",
+    installNotice: () => "",
+    slateNotice: () => "",
+    hero: () => "",
+    preseasonState: () => `<div class="preseason"></div>`,
+    inviteCode: "",
     onboardingState: () => "",
     leagueSwitcher: () => "",
     pickShareRow: () => "",
@@ -241,7 +249,7 @@ test("C8 · missing venue or form leaves the card usable and honest", () => {
 // --- 9 · league switching --------------------------------------------------
 
 test("C9 · a league switch cannot leave another league's card open", () => {
-  assert.match(sourceOf("forgetMatesState"), /expandedPickId = null;/);
+  assert.match(sourceOf("forgetRevealState"), /expandedPickId = null;/);
   assert.match(sourceOf("setActiveLeague"), /expandedPickId = null;/);
   // And a rebuilt list carries no mounted card until one is asked for.
   const app = cardBox();

@@ -192,7 +192,7 @@ const VENUE_OUTLOOK = {
 };
 
 let fixtures = [];
-let currentView = "today";
+let currentView = "picks";
 // D1: the Schedule opens on what the viewer's leagues actually asked for.
 let picks = readJSON(STORAGE.picks, {});
 let playerName = localStorage.getItem(STORAGE.name) || "";
@@ -210,6 +210,16 @@ let leagueStates = readJSON(STORAGE.leagueStates, {});
 // refresh land underneath. A round read is the second of the two calls a
 // League open makes, and the one that used to leave "Loading Matchweek" up.
 let roundStates = readJSON(STORAGE.roundStates, {});
+// Weekly | Season. "mates" was a third segment until v1.7.1; anything still
+// asking for it — an old link, a restored session, a stale retained node — is
+// answered with Weekly rather than with a segment that no longer exists.
+//
+// The tab has never been persisted, so there is no stored value to migrate;
+// this is the door every assignment goes through instead, which is what
+// actually protects the running app.
+const LEGACY_LEAGUE_TABS = { mates: "matchday" };
+const normaliseLeagueTab = (tab) =>
+  LEGACY_LEAGUE_TABS[tab] || (tab === "season" ? "season" : "matchday");
 let leagueTab = "matchday";
 // The period the round view is showing. A matchweek number for a single-
 // competition league, a window key for a mixed one — the same period abstraction
@@ -220,19 +230,19 @@ let selectedPeriod = null;
 const selectedMatchday = () => (Number(selectedPeriod) || null);
 let roundState = null;
 /**
- * Mates' Picks state, held APART from roundState.
+ * The round payload a fixture card's mates reveal is drawn from, held APART
+ * from roundState.
  *
  * The two answer different questions: roundState is the week the viewer chose
- * to look at, Mates' Picks is always the league's current active round. Sharing
- * one slot would mean opening Mates' Picks silently moved the Weekly tab off
- * the week the viewer had browsed to, and returning to Weekly is supposed to
- * put them back where they were.
+ * to browse on League, the reveal is always the league's current active round.
+ * Sharing one slot would mean opening a card on My Picks silently moved the
+ * Weekly tab off the week the viewer had browsed to.
  */
-let matesState = null;
-let matesRequest = 0;
+let revealState = null;
+let revealRequest = 0;
 // The next kick-off this view is waiting on. A foreground return that crosses
 // it is the one moment the data can have gone stale without anything asking.
-let matesLockHorizon = Infinity;
+let revealLockHorizon = Infinity;
 let matchdayPickerOpen = false;
 let busyMatch = "";
 let flashMessage = "";
@@ -266,6 +276,19 @@ let pickerBusy = false;
 // Invite code from the launch URL (web query string). Mutable because native
 // universal links deliver it later via the Capacitor appUrlOpen event.
 let inviteCode = new URLSearchParams(location.search).get("league")?.toUpperCase() || "";
+/**
+ * A view named by the link, if it names one this build still has.
+ *
+ * `?view=mates` and `?view=today` are the routes v1.7.1 removed; both come
+ * back as "picks". The league context is the `?league=` above, so an old
+ * Mates' Picks link opens My Picks for the league it named.
+ */
+const requestedView = (search = location.search) => {
+  const asked = new URLSearchParams(search).get("view");
+  if (!asked) return null;
+  const view = normaliseView(asked.toLowerCase());
+  return ["picks", "league", "rules"].includes(view) ? view : null;
+};
 
 function readJSON(key, fallback) {
   try { return JSON.parse(localStorage.getItem(key)) ?? fallback; }
@@ -888,7 +911,7 @@ const picksPeriod = () => matchweekLeagueState()?.currentPeriod ?? null;
 /**
  * Whether a payload may be My Picks' table.
  *
- * The same rule the mates matrix applies, for the same reason: two leagues can
+ * The same rule the reveal applies, for the same reason: two leagues can
  * contain the very same fixture, so a payload has to name THIS league and THIS
  * week before anything is drawn from it.
  */
@@ -935,6 +958,13 @@ function ensurePicksRound() {
       // and nothing else: it may not enable the control or draw a card.
       if (code !== activeLeague || String(period) !== String(picksPeriod())) return;
       picksRound = picksRoundUsable(state, code, period);
+      // The same response the reveal needs. Adopting it here is what keeps
+      // "one coalesced read" true while My Picks owns the comparison: the
+      // share control and the fixture cards are served by one request.
+      if (revealUsable(state)) {
+        revealState = state;
+        revealLockHorizon = lockHorizonOf(state);
+      }
       syncShareLabel();
     })
     .catch(() => {
@@ -949,12 +979,12 @@ function ensurePicksRound() {
   return flight;
 }
 
-/** The round Mates' Picks shows: always the league's current active one. */
-const matesPeriod = () => leagueState?.currentPeriod ?? null;
+/** The round a reveal shows: always the league's current active one. */
+const revealPeriod = () => leagueState?.currentPeriod ?? null;
 
 /**
  * The ONE rule that decides whether a round payload may be drawn as this
- * league's Mates' Picks. Every path that could put a name or a prediction on
+ * league's mates reveal. Every path that could put a name or a prediction on
  * screen asks this and nothing else.
  *
  * A global holding one league's picks while the pill has already moved to
@@ -964,8 +994,8 @@ const matesPeriod = () => leagueState?.currentPeriod ?? null;
  * round?" is, and it has to be asked at the moment of drawing rather than
  * trusted from whenever the payload was fetched.
  */
-function matesUsable(state) {
-  const period = matesPeriod();
+function revealUsable(state) {
+  const period = revealPeriod();
   return !!state && !state.error && period != null
     && state.code === activeLeague
     && String(state.period) === String(period);
@@ -973,29 +1003,33 @@ function matesUsable(state) {
 
 /**
  * A current-round payload for the league on screen, from wherever one is
- * already in hand — the Mates' Picks slot, the Weekly tab when it happens to be
- * showing the current round, or that round's cache.
+ * already in hand — the reveal slot, My Picks' own read, the Weekly tab when
+ * it happens to be showing the current round, or that round's cache.
  *
  * This is what lets an expanded fixture card reveal without the viewer ever
- * having opened the Mates' Picks segment: the round response they already
- * loaded carries the field. Every candidate goes through the same context rule,
+ * opening League at all: the round response My Picks already loaded carries
+ * the field. Every candidate goes through the same context rule,
  * so a historic week or another league's round is never one of them.
  */
 function currentRoundReveal() {
-  const cached = activeLeague && matesPeriod() != null
-    ? cachedRoundState(activeLeague, matesPeriod())
+  const cached = activeLeague && revealPeriod() != null
+    ? cachedRoundState(activeLeague, revealPeriod())
     : null;
-  return [matesState, roundState, cached].find(matesUsable) || null;
+  // picksRound is My Picks' own read. Including it is what lets a fresh
+  // launch reveal a kicked-off fixture without the viewer ever opening
+  // League — and it costs no extra request, because that read has happened
+  // anyway for the share control.
+  return [revealState, picksRound, roundState, cached].find(revealUsable) || null;
 }
 
 /**
- * Everything Mates' Picks is holding, dropped. Called the instant the active
+ * Everything the reveal is holding, dropped. Called the instant the active
  * league changes, before anything can be painted under the new name.
  */
-function forgetMatesState() {
-  matesState = null;
-  matesRequest++;              // any in-flight read for the old league is void
-  matesLockHorizon = Infinity;
+function forgetRevealState() {
+  revealState = null;
+  revealRequest++;              // any in-flight read for the old league is void
+  revealLockHorizon = Infinity;
   // My Picks' own table is this league's and this week's, so it goes too.
   forgetPicksRound();
   // The fold choice is per league and per session, and it is keyed by league,
@@ -1005,35 +1039,35 @@ function forgetMatesState() {
 }
 
 /**
- * The new league's matrix from cache, adopted BEFORE any network wait.
+ * The new league's reveal from cache, adopted BEFORE any network wait.
  *
  * `hydrateCachedLeague()` has already restored that league's season state, so
  * its current round is known without asking anybody — which means a league this
- * device has seen before can paint its matrix on the same tick as the pill.
+ * device has seen before can reveal on the same tick as the pill.
  * Waiting for the season refresh to confirm a period we already had cached put
  * a loading shell in front of data that was sitting in storage the whole time.
  *
  * Nothing valid in cache simply leaves the slot empty, and the panel shows the
  * acknowledged shell instead of somebody else's league.
  */
-function hydrateMatesState() {
-  matesState = currentRoundReveal();
-  matesLockHorizon = matesState ? lockHorizonOf(matesState) : Infinity;
+function hydrateRevealState() {
+  revealState = currentRoundReveal();
+  revealLockHorizon = revealState ? lockHorizonOf(revealState) : Infinity;
 }
 
 /**
- * The single round read a league change owes Mates' Picks, once the refreshed
- * season state has confirmed which round is current.
+ * The single round read a league change owes the fixture-card reveal, once the
+ * refreshed season state has confirmed which round is current.
  *
- * Switching league with the segment open is an entry into it for the new
- * league, and gets exactly one revalidation like any other entry — after the
- * season answer, because until then the current period is only a cached guess.
+ * Switching league on My Picks is an entry into the new league's week, and
+ * gets exactly one revalidation — after the season answer, because until then
+ * the current period is only a cached guess.
  */
-async function revalidateMatesAfterSwitch(code) {
-  if (leagueTab !== "mates" || code !== activeLeague) return;
-  await loadMatesState();
-  if (leagueTab !== "mates" || code !== activeLeague) return;
-  await showResultsPanel();
+async function revalidateRevealAfterSwitch(code) {
+  if (normaliseView(currentView) !== "picks" || code !== activeLeague) return;
+  await loadRevealState();
+  if (normaliseView(currentView) !== "picks" || code !== activeLeague) return;
+  render();
 }
 
 /**
@@ -1051,31 +1085,31 @@ function lockHorizonOf(state) {
 /**
  * ONE revalidation of the round endpoint, coalesced.
  *
- * Called on entering the segment and on a foreground return that crossed a
+ * Called on a league switch and on a foreground return that crossed a
  * kick-off — the two moments the answer can have changed without the viewer
  * doing anything. There is no polling behind this: if neither happens, no
- * request happens. `fetchState` folds a concurrent Weekly read for the same
- * week into the same flight, so opening Mates' Picks on the current week costs
- * one request between them rather than one each.
+ * request happens. `fetchState` folds a concurrent read for the same week into
+ * the same flight, so this costs one request between them rather than one
+ * each.
  */
-async function loadMatesState(generation = navGeneration) {
+async function loadRevealState(generation = navGeneration) {
   const code = activeLeague;
-  const period = matesPeriod();
-  if (!code || !API || period == null) { matesState = null; return; }
-  const ticket = ++matesRequest;
+  const period = revealPeriod();
+  if (!code || !API || period == null) { revealState = null; return; }
+  const ticket = ++revealRequest;
   const view = currentView;
   const superseded = () =>
-    ticket !== matesRequest || code !== activeLeague || generation !== navGeneration
-    || view !== currentView || String(period) !== String(matesPeriod());
+    ticket !== revealRequest || code !== activeLeague || generation !== navGeneration
+    || view !== currentView || String(period) !== String(revealPeriod());
 
   // Anything held from another league or another round is dropped before it
   // can be painted, and only a cache that passes the same context rule takes
   // its place. Otherwise the shell stands until the read below lands.
-  if (!matesUsable(matesState)) matesState = null;
+  if (!revealUsable(revealState)) revealState = null;
   const cached = cachedRoundState(code, period);
-  if (!matesState && matesUsable(cached)) {
-    matesState = cached;
-    matesLockHorizon = lockHorizonOf(cached);
+  if (!revealState && revealUsable(cached)) {
+    revealState = cached;
+    revealLockHorizon = lockHorizonOf(cached);
   }
 
   try {
@@ -1084,15 +1118,15 @@ async function loadMatesState(generation = navGeneration) {
     if (superseded()) return;
     // The answer is checked against the screen as it is NOW, not as it was when
     // the request went out — a slow league's reply must not land on a fast one.
-    if (!matesUsable(state)) return;
-    matesState = state;
-    matesLockHorizon = lockHorizonOf(state);
+    if (!revealUsable(state)) return;
+    revealState = state;
+    revealLockHorizon = lockHorizonOf(state);
     bumpStamp(code);
     dropRetainedPanels(code);
   } catch (error) {
     if (superseded()) return;
     // A cached round already on screen beats an error drawn over the top of it.
-    if (!matesState) matesState = { error: error.message };
+    if (!revealState) revealState = { error: error.message };
   }
 }
 
@@ -1103,15 +1137,15 @@ async function loadMatesState(generation = navGeneration) {
  * nothing — the picks it is showing cannot have changed. Crossing the horizon
  * is the single case where they can.
  */
-async function refreshMatesOnForeground() {
-  if (document.hidden || currentView !== "league" || leagueTab !== "mates") return;
+async function refreshRevealOnForeground() {
+  if (document.hidden || normaliseView(currentView) !== "picks") return;
   // A horizon belongs to the context that set it. After a league switch there
   // is nothing to have crossed until the new league's round has been read.
-  if (!matesUsable(matesState)) return;
-  if (Date.now() < matesLockHorizon) return;
-  matesLockHorizon = Infinity;          // one crossing, one revalidation
-  await loadMatesState();
-  await showResultsPanel();
+  if (!revealUsable(revealState)) return;
+  if (Date.now() < revealLockHorizon) return;
+  revealLockHorizon = Infinity;         // one crossing, one revalidation
+  await loadRevealState();
+  render();
 }
 
 async function loadKnownLeagueNames() {
@@ -1264,7 +1298,7 @@ function setActiveLeague(code, refresh = true) {
   activeLeague = next;
   selectedPeriod = null;
   roundState = null;
-  forgetMatesState();
+  forgetRevealState();
   if (activeLeague) localStorage.setItem(STORAGE.activeLeague, activeLeague);
   else localStorage.removeItem(STORAGE.activeLeague);
   // Season, week and that week's table restored together, BEFORE the paint.
@@ -1272,15 +1306,15 @@ function setActiveLeague(code, refresh = true) {
   // with no key to look itself up by, so a switch to a league this device knows
   // perfectly well still showed "Loading matchweek…".
   hydrateCachedLeague();
-  // The same two steps as the pill route, in the same order: the cached matrix
-  // is adopted before the paint, and the one revalidation it owes Mates' Picks
+  // The same two steps as the pill route, in the same order: the cached round
+  // is adopted before the paint, and the one revalidation it owes the reveal
   // waits for the season answer that confirms the current round.
-  hydrateMatesState();
+  hydrateRevealState();
   render();
   if (refresh) {
     refreshLeague().then(async () => {
       render();
-      await revalidateMatesAfterSwitch(next);
+      await revalidateRevealAfterSwitch(next);
     });
   }
 }
@@ -1951,7 +1985,7 @@ const pickRevealDomId = (key) => `pr-${key}`;
 /**
  * A payload that genuinely belongs to THIS league and THIS week.
  *
- * The same context rule matesUsable() applies, but bound to the card's own pair
+ * The same context rule revealUsable() applies, but bound to the card's own pair
  * instead of the active league's current round — and `activeLeague` is
  * deliberately not consulted, because two leagues can contain the very same
  * fixture and "does this payload have an entry for this fixture?" is not a safe
@@ -1961,7 +1995,7 @@ function revealStateFor(code, period) {
   if (!code || period == null) return null;
   const usable = (state) => !!state && !state.error
     && state.code === code && String(state.period) === String(period);
-  return [matesState, roundState, cachedRoundState(code, period)].find(usable) || null;
+  return [revealState, roundState, cachedRoundState(code, period)].find(usable) || null;
 }
 
 /**
@@ -2326,7 +2360,9 @@ let launchRouted = false;
  */
 function applyLaunchBranch() {
   if (launchRouted) return;
-  currentView = launchBranch() === "awaiting" ? "picks" : "today";
+  // Every launch state lives on My Picks now, so there is nowhere else to
+  // send anybody. The branch still decides what that screen SHOWS.
+  currentView = "picks";
 }
 
 function onboardingState() {
@@ -2366,39 +2402,6 @@ function preseasonRow(match) {
  * matchweek — the fixtures this viewer's league published and this viewer still
  * owes a scoreline on.
  */
-function todayView() {
-  const branch = launchBranch();
-  if (branch === "onboarding") return `${installNotice()}${onboardingState()}`;
-  if (branch === "preseason") return `${hero()}${installNotice()}${preseasonState()}`;
-
-  const period = leagueState?.currentPeriod ?? currentPeriodKey();
-  const slate = slateForPeriod(period);
-  const waiting = awaitingSlate(period);
-  const roundFixtures = slate
-    ? fixtures.filter((fixture) => slate.fixtureIds.map(String).includes(String(fixture.id)))
-    : [];
-  const due = roundFixtures.filter((fixture) => matchOpen(fixture) && !picks[fixture.id]);
-  const pickedCount = roundFixtures.filter((fixture) => picks[fixture.id]).length;
-  const invite = inviteCode && !leagueCodes.includes(inviteCode)
-    ? `<div class="notice invite-notice"><span class="notice-icon">🏆</span><div><strong>League invitation: ${inviteCode}</strong><p>Open the League tab to join.</p></div></div>`
-    : "";
-
-  const body = waiting || !slate
-    ? `<div class="launch-card"><p>No picks due yet — fixtures will appear here when your host publishes this week's slate.</p></div>`
-    : due.length
-      ? due.map(matchCard).join("")
-      : `<div class="launch-card"><p>All done for ${escapeHTML(periodLabel(period))} — every pick is in. Sit back.</p></div>`;
-
-  return `${installNotice()}${invite}
-    ${leagueSwitcher()}
-    <div class="section-head">
-      <div><span class="eyebrow">Your picks due · ${escapeHTML(periodLabel(period))}</span>
-      <h2>${escapeHTML(leagueState?.name || "This week")}</h2>
-      ${slate ? `<p class="pick-progress">You've picked ${pickedCount} of ${roundFixtures.length}</p>` : ""}${slateSummary(slate)}</div>
-    </div>
-    ${slateNotice(period)}
-    ${body}`;
-}
 
 /**
  * D1 — every fixture the viewer's leagues have actually asked for.
@@ -2836,11 +2839,6 @@ function pickSection(title, subtitle, groups, contexts, code) {
 let expandedPickId = null;
 
 /** N of M complete, where M is the published slot count and N has a score. */
-function pickProgress(slots) {
-  const total = slots.length;
-  const complete = slots.filter((slot) => slot.fixture && picks[slot.fixture.id]).length;
-  return { complete, total };
-}
 
 /**
  * The lock deadline for the slate, from the fixtures themselves: the earliest
@@ -3012,34 +3010,107 @@ function expandPick(id) {
   expandedPickId = wanted;
 }
 
+/**
+ * What still needs doing this week, counted once per FIXTURE.
+ *
+ * A prediction belongs to a fixture, not to a league: two leagues that both
+ * picked the same game are asking for one prediction between them, and making
+ * it satisfies both. Counting slots rather than fixtures would tell somebody
+ * with overlapping leagues that they owe more predictions than they do.
+ */
+function pickCounts(slots) {
+  const required = new Set();
+  const made = new Set();
+  const outstanding = new Set();
+  for (const slot of slots || []) {
+    const fixture = slot.fixture;
+    if (!fixture) continue;
+    const id = String(fixture.id);
+    required.add(id);
+    if (picks[id]) made.add(id);
+    else if (matchOpen(fixture)) outstanding.add(id);
+  }
+  return { required: required.size, made: made.size, outstanding: outstanding.size };
+}
+
+/**
+ * The one line at the top of My Picks that says what to do next.
+ *
+ * Next used to be a whole tab answering this. It is a sentence, derived from
+ * the fixtures already on the screen below it — not a second list, and not a
+ * second request.
+ */
+function pickActionSummary(slots, { published = true } = {}) {
+  if (!published) return "Waiting on your host to publish this week\u2019s fixtures";
+  const { required, made, outstanding } = pickCounts(slots);
+  if (!required) return "Waiting on your host to publish this week\u2019s fixtures";
+  if (outstanding) {
+    return `${outstanding} prediction${outstanding === 1 ? "" : "s"} still needed`;
+  }
+  if (made === required) {
+    return `All ${required} prediction${required === 1 ? "" : "s"} are in \u2713`;
+  }
+  // Nothing left to do, but not everything got done: the rest locked first,
+  // and saying "all in" would be a claim about picks that were never made.
+  return `${made} of ${required} predictions made \u00b7 the rest have locked`;
+}
+
+/**
+ * My Picks: the whole of what this app asks of you this week.
+ *
+ * Every launch state lands here now — no league, nothing published, nothing
+ * pickable yet, everything picked, everything locked. There is no fallback to
+ * the competition calendar from any of them, because that fallback was the
+ * defect the Matchweek work removed and Next was the last screen still doing
+ * it.
+ */
 function picksView() {
-  const head = (name, progress, lines) =>
+  // No league at all is the first question, and it is only about membership.
+  if (!leagueCodes.length) return `${installNotice()}${onboardingState()}`;
+
+  // An invitation in hand but not yet joined: said once, at the top, on the
+  // screen the viewer actually lands on.
+  const invite = inviteCode && !leagueCodes.includes(inviteCode)
+    ? `<div class="notice invite-notice"><span class="notice-icon">\ud83c\udfc6</span><div><strong>League invitation: ${
+        escapeHTML(inviteCode)}</strong><p>Open the League tab to join.</p></div></div>`
+    : "";
+
+  const head = (name, summary, lines) =>
     `<div class="section-head"><div>
       <span class="eyebrow">${escapeHTML(name || playerName || "Your predictions")}</span>
       <h2>My Picks</h2>
-      ${progress ? `<p>${progress.complete} of ${progress.total} saved${
-        lines.filter(Boolean).map((line) => ` \u00b7 ${escapeHTML(line)}`).join("")}</p>` : ""}
+      <p class="pick-summary" data-pick-summary>${escapeHTML(summary)}</p>
+      ${lines.filter(Boolean).length
+        ? `<p class="pick-detail">${lines.filter(Boolean).map(escapeHTML).join(" \u00b7 ")}</p>`
+        : ""}
     </div></div>`;
-
-  if (!leagueCodes.length) return onboardingState();
 
   const state = matchweekLeagueState();
   if (!state) {
-    return `${head(matchweekLeagueName(), null, [])}
+    return `${installNotice()}${invite}
+      ${head(matchweekLeagueName(), "Loading this week\u2026", [])}
       ${matchweekContext(null)}
       ${pulsingStatus("Loading this week\u2026")}`;
   }
 
   const plan = matchweekSlate(state);
   if (!plan) {
-    return `${head(state.name, null, [])}
+    // Nothing published. Whether that is "the host hasn't chosen yet" or
+    // "there is nothing to choose from yet" is the launch tree's question,
+    // and it is only worth asking once there is no slate to show.
+    if (launchBranch() === "preseason") {
+      return `${hero()}${installNotice()}${preseasonState()}`;
+    }
+    return `${installNotice()}${invite}
+      ${head(state.name, pickActionSummary([], { published: false }), [])}
       ${matchweekContext(state)}
+      ${slateNotice(state.currentPeriod ?? currentPeriodKey())}
       ${matchweekEmpty()}`;
   }
 
   const slots = matchweekSlots(plan);
-  const progress = pickProgress(slots);
-  return `${head(state.name, progress, [pickListState(slots), pickDeadlineLine(slots)])}
+  return `${installNotice()}${invite}
+    ${head(state.name, pickActionSummary(slots), [pickListState(slots), pickDeadlineLine(slots)])}
     ${matchweekContext(state)}
     <div class="pick-list" data-pick-list>${
       slots.map((slot) => pickRow(slot, { expanded: expandedPickId === String(slot.id) })).join("")
@@ -3169,10 +3240,7 @@ const stampFor = (code) => leagueStamps.get(code) ?? 0;
 const bumpStamp = (code) => leagueStamps.set(code, stampFor(code) + 1);
 
 function panelKey(tab, code = activeLeague, period = selectedPeriod) {
-  // Mates' Picks is filed under the round it actually shows — the league's
-  // current one — so a week rolling over cannot leave last week's matrix
-  // reachable under this week's key.
-  const scope = tab === "matchday" ? period : tab === "mates" ? `m${matesPeriod()}` : "-";
+  const scope = tab === "matchday" ? period : "-";
   return `${code}|${stampFor(code)}|${tab}|${scope}`;
 }
 
@@ -3221,39 +3289,6 @@ function seasonStages(state, isOwner) {
  */
 async function fillPanelProgressively(panel, capture) {
   const { state, isOwner, tab, stale } = capture;
-  if (tab === "mates") {
-    // Only this league's current round may be drawn. Anything else — another
-    // league's, another week's, an error — is the acknowledged shell instead.
-    if (!matesUsable(matesState)) {
-      panel.insertAdjacentHTML("beforeend", matesState?.error
-        ? `<div class="empty"><strong>${escapeHTML(matesState.error)}</strong></div>`
-        : pulsingStatus("Loading Mates' Picks…"));
-      return true;
-    }
-    // Nothing is published yet: say so, rather than drawing the whole round.
-    // Twenty-two cards for fixtures nobody has been asked to predict reads as a
-    // week that is already under way, which is the opposite of the truth.
-    if (!slateForPeriod(matesState?.period)) {
-      panel.insertAdjacentHTML("beforeend", matesAwaitingSlate());
-      return !stale();
-    }
-    const matrix = matesMatrix(matesState);
-    panel.insertAdjacentHTML("beforeend", matesHeader(matrix));
-    // A twenty-fixture week is twenty cards. Built four at a time with a real
-    // paint between, so no single task owns the main thread long enough to be
-    // felt — the same bounded-stage rule the Season panel runs on.
-    for (let index = 0; index < matrix.cards.length; index += 4) {
-      if (stale()) { traceTap("panel-discarded", { tab, reason: "mates-chunk" }); return false; }
-      const chunk = matrix.cards.slice(index, index + 4).map(matesFixtureCard).join("");
-      panel.insertAdjacentHTML("beforeend", chunk);
-      traceTap("chunk", { stage: "mates", chars: chunk.length });
-      await nextPaint();
-    }
-    if (!matrix.cards.length) {
-      panel.insertAdjacentHTML("beforeend", `<p class="muted">This week's fixtures aren't set yet.</p>`);
-    }
-    return !stale();
-  }
   if (tab === "matchday") {
     // Small by construction: one banner and one table.
     const html = !roundState
@@ -3333,8 +3368,7 @@ async function showResultsPanel({ status } = {}) {
     && sameContext(code, tab, period);
   if (!valid) {
     node.replaceChildren(pulsingNode(status ?? (tab === "season" ? "Loading season…"
-      : tab === "mates" ? "Loading Mates' Picks…"
-        : `Loading ${weekLabelFor(period)}…`)));
+      : `Loading ${weekLabelFor(period)}…`)));
     traceTap("results-shell-inserted", { tab });
   } else {
     traceTap("results-kept-visible", { tab });
@@ -3458,14 +3492,14 @@ async function switchLeaguePill(code) {
   activeLeague = code;
   selectedPeriod = null;
   roundState = null;
-  // Mates' Picks holds other people's predictions, so it goes in the same
+  // The reveal holds other people's predictions, so it goes in the same
   // breath as the identity change rather than being left to be noticed later.
-  forgetMatesState();
+  forgetRevealState();
   if (activeLeague) localStorage.setItem(STORAGE.activeLeague, activeLeague);
   hydrateCachedLeague();
-  // Straight after the season cache, so the matrix is in hand before the first
+  // Straight after the season cache, so the reveal is in hand before the first
   // paint rather than behind the refresh below.
-  hydrateMatesState();
+  hydrateRevealState();
   panelGeneration++;   // any in-flight panel job for the old league is void
 
   // The WHOLE league-specific card goes, not just the results. Swapping only
@@ -3490,7 +3524,7 @@ async function switchLeaguePill(code) {
     if (code !== activeLeague) return;
     render();
     syncShareLabel();
-    await revalidateMatesAfterSwitch(code);
+    await revalidateRevealAfterSwitch(code);
   });
 }
 
@@ -3526,14 +3560,13 @@ function roundToggle() {
   // different controls.
   const week = weekNumberFor(period);
   const label = week == null ? periodLabel(period) : `Week ${week}`;
-  // Three segments now, so the labels shorten to fit: Weekly ▾ · Season ·
-  // Mates' Picks. The week itself stays in the first segment's tooltip.
-  return `<div class="round-toggle round-toggle-three" role="tablist">
+  // Two segments: Weekly ▾ · Season. Mates' Picks was the third until v1.7.1
+  // moved the comparison onto the fixture card that raises the question.
+  return `<div class="round-toggle" role="tablist">
     <button type="button" role="tab" class="round-seg${leagueTab === "matchday" ? " active" : ""}"
       aria-selected="${leagueTab === "matchday"}" aria-expanded="${matchdayPickerOpen}"
       data-round-tab="matchday" title="${escapeHTML(label)}">Weekly ▾</button>
     <button type="button" role="tab" class="round-seg${leagueTab === "season" ? " active" : ""}" aria-selected="${leagueTab === "season"}" data-round-tab="season">Season</button>
-    <button type="button" role="tab" class="round-seg${leagueTab === "mates" ? " active" : ""}" aria-selected="${leagueTab === "mates"}" data-round-tab="mates">Mates' Picks</button>
   </div>`;
 }
 
@@ -3940,7 +3973,7 @@ function seasonTableHtml(state, isOwner, withWins) {
     ).join("")}</tbody></table>`;
 }
 
-// --- Mates' Picks ----------------------------------------------------------
+// --- Mates' picks, on the fixture card that raises the question -----------
 
 /**
  * How many rows a fixture shows before it offers the rest. Spec §6: a league of
@@ -4029,34 +4062,6 @@ function matesFixtureView(fixture, entry, table, viewerUid) {
   };
 }
 
-/**
- * The whole matrix as data. Pure, so the privacy claim can be tested on the
- * view-model itself rather than inferred from what happened to be painted.
- */
-function matesMatrix(state, viewerUid = uid()) {
-  // The context rule again, at the last point before names and predictions
-  // become a view-model. The panel checks too, but a builder that will render
-  // whatever it is handed is one forgetful caller away from a leak — and the
-  // two leagues sharing a fixture id is exactly the case that hides it.
-  if (!matesUsable(state)) return { period: null, total: 0, revealed: 0, cards: [] };
-  const entries = new Map((state?.reveal || []).map((entry) => [String(entry.id), entry]));
-  const ids = (state?.reveal || []).length
-    ? (state.reveal || []).map((entry) => String(entry.id))
-    : slateForPeriod(state?.period)?.fixtureIds?.map(String) || [];
-  const fixturesShown = ids.map((id) => ({ id, fixture: fixtureById(id) })).filter((row) => row.fixture);
-  const cards = fixturesShown.map(({ id, fixture }) => ({
-    id,
-    fixture,
-    ...matesFixtureView(fixture, entries.get(id), state?.table, viewerUid),
-  }));
-  return {
-    period: state?.period ?? null,
-    total: cards.length,
-    revealed: cards.filter((card) => card.state !== "locked" && card.state !== "unavailable").length,
-    cards,
-  };
-}
-
 const MATES_STATE_LINE = {
   locked: "Mates' picks reveal at kick-off",
   revealed: "Kicked off · Picks revealed",
@@ -4119,44 +4124,12 @@ function matesCardBody(card, viewerPicked) {
   return matesRowList(card);
 }
 
-function matesFixtureCard(card) {
-  const match = card.fixture;
-  const viewerPicked = !!picks[card.id];
-  const score = card.state === "settled" && card.result
-    ? `<span class="mates-score">${card.result.p1}-${card.result.p2}</span>`
-    : "";
-  return `<article class="mates-card mates-${card.state}" data-mates-fixture="${escapeHTML(card.id)}">
-    <div class="mates-head">
-      <span class="mates-teams">${escapeHTML(match.player1)} v ${escapeHTML(match.player2)}</span>
-      ${score}
-    </div>
-    <p class="mates-state">${MATES_STATE_LINE[card.state]}</p>
-    ${matesCardBody(card, viewerPicked)}
-  </article>`;
-}
 
 /**
  * D6 — the pre-publication empty state. The member is told what is happening;
  * the host is told the same thing and handed the control that ends it, because
  * they are the only person who can.
  */
-function matesAwaitingSlate(period = matesState?.period ?? leagueState?.currentPeriod) {
-  const host = isLeagueHost();
-  return `<div class="empty mates-awaiting">
-    <strong>${host
-      ? "Waiting for you to select this week's fixtures."
-      : "Waiting for the host to select this week's fixtures."}</strong>
-    <p>Mates' picks appear here once the line-up is published.</p>
-    ${host && period != null ? `<button class="primary wide" type="button" data-open-picker="${escapeHTML(String(period))}">Select fixtures</button>` : ""}
-  </div>`;
-}
-
-function matesHeader(matrix) {
-  return `<div class="round-banner mates-banner">
-    <strong>Mates' Picks</strong>
-    <span>${matrix.revealed} of ${matrix.total} fixture${matrix.total === 1 ? "" : "s"} revealed</span>
-  </div>`;
-}
 
 /**
  * A section the viewer opens when they want it.
@@ -5331,13 +5304,10 @@ function weeklySharePublished(round, period) {
  * Which card the screen the viewer is on would share, if it shared one.
  *
  * My Picks is the week, so it shares the week. The League tab shares whatever
- * its segment is showing, and Mates' Picks shares nothing — offering to export
- * a season table from under a matrix would be a control that does something
- * other than what the screen is about.
+ * its segment is showing.
  */
 function shareSurface() {
   if (normaliseView(currentView) === "picks") return "weekly";
-  if (leagueTab === "mates") return null;
   if (leagueTab === "matchday" && leagueSupportsRounds(leagueState)) return "weekly";
   return "season";
 }
@@ -6243,7 +6213,7 @@ function safeParseJSON(value) {
  * case the app opens where it always opened.
  */
 async function openNotificationTarget(route) {
-  if (!route) { currentView = "today"; render({ scrollTop: true }); return "fallback:no-route"; }
+  if (!route) { currentView = "picks"; render({ scrollTop: true }); return "fallback:no-route"; }
   const { fixtureId, league } = route;
   if (leagueCodes.includes(league) && activeLeague !== league) {
     setActiveLeague(league, false);
@@ -6488,8 +6458,10 @@ function render(options = {}) {
   // Held, not dropped: the newest request wins and lands when the tap is done.
   if (tapInProgress) { heldRender = options; traceTap("render-held", {}); return; }
   const app = document.getElementById("app");
-  const views = { today: todayView, picks: picksView, league: leagueView, rules: rulesView };
-  const html = (views[normaliseView(currentView)] || todayView)();
+  const views = { picks: picksView, league: leagueView, rules: rulesView };
+  // My Picks is the fallback as well as the default: an unknown route lands
+  // somewhere real rather than on a blank screen.
+  const html = (views[normaliseView(currentView)] || picksView)();
   const changed = html !== renderedHTML;
   if (changed) {
     app.innerHTML = html;
@@ -6547,7 +6519,13 @@ function showUpdatePrompt(registration) {
  * somebody sent before the update. None of those may land on a view that no
  * longer exists, so the id is translated at every door rather than trusted.
  */
-const LEGACY_VIEWS = { schedule: "picks" };
+// Routes that no longer have a tab of their own. `schedule` was renamed to
+// `picks` in v1.7; `today` was Next, whose whole job moved into My Picks in
+// v1.7.1; `mates` was the League segment whose comparison moved onto the
+// fixture card. All three still arrive from stored state, old deep links and
+// notifications, and all three resolve to the screen that now owns the
+// answer — never to a blank or unreachable route.
+const LEGACY_VIEWS = { schedule: "picks", today: "picks", mates: "picks" };
 const normaliseView = (view) => LEGACY_VIEWS[view] || view;
 
 const VIEW_SHELLS = {
@@ -6888,7 +6866,7 @@ window.addEventListener("scroll", () => {
 }, { passive: true });
 
 /**
- * The only clock Mates' Picks keeps.
+ * The only clock the reveal keeps.
  *
  * A phone in a pocket through a 15:00 kick-off comes back to a screen that
  * genuinely is out of date, and nothing else would ever tell it. This is not
@@ -6896,7 +6874,7 @@ window.addEventListener("scroll", () => {
  * crossed a kick-off the view was waiting on.
  */
 document.addEventListener("visibilitychange", () => {
-  if (!document.hidden) refreshMatesOnForeground();
+  if (!document.hidden) refreshRevealOnForeground();
 });
 
 // The keyboard closing shows up here as the visual viewport returning to full
@@ -7115,7 +7093,9 @@ document.addEventListener("click", async (event) => {
     }
     // The segment moves in the SAME task as the tap. Everything after this is
     // allowed to take its time; this is not.
-    leagueTab = wanted;
+    // Normalised on the way in: a retained node or an old link may still
+    // name the removed segment, and it must not become the live tab.
+    leagueTab = normaliseLeagueTab(wanted);
     // The real close path, not just a flag: it voids any pending picker build,
     // clears the island and corrects aria-expanded.
     closeWeeklyPicker();
@@ -7123,21 +7103,10 @@ document.addEventListener("click", async (event) => {
     traceTap("segment-acknowledged", { tab: wanted });
     const needsRound = wanted === "matchday"
       && (!roundState || roundState.error || String(roundState.period) !== String(selectedPeriod));
-    // Entering Mates' Picks: paint whatever is retained or cached first, then
-    // exactly one coalesced revalidation. Not zero — a matrix is only worth
-    // reading if a kick-off since last time is in it.
-    if (wanted === "mates" && !matesState) matesState = cachedRoundState(activeLeague, matesPeriod());
     showResultsPanel({
       status: wanted === "season" ? "Loading season…"
-        : wanted === "mates" ? "Loading Mates' Picks…"
-          : `Loading ${weekLabelFor(selectedPeriod)}…`,
+        : `Loading ${weekLabelFor(selectedPeriod)}…`,
     }).then(async () => {
-      if (wanted === "mates") {
-        await loadMatesState();
-        if (leagueTab !== "mates") return;
-        await showResultsPanel();
-        return;
-      }
       if (!needsRound) return;
       await loadRoundState();
       dropRetainedPanels(activeLeague);
@@ -7570,7 +7539,7 @@ async function setupNativePushNotifications() {
       try {
         await openNotificationTarget(readNotificationRoute(data));
       } catch {
-        currentView = "today";
+        currentView = "picks";
         render({ scrollTop: true });
       }
     });
@@ -7656,8 +7625,12 @@ function hydrateCachedLeague() {
 
 Promise.all([loadFixtures(), hydrateIdentity()]).then(() => {
   // The launch decision tree (§9.7). An invite in the URL always wins — the
-  // viewer arrived to join something — and otherwise the branch decides.
+  // viewer arrived to join something. Then a view the link named, including
+  // the two this build no longer has a tab for, which resolve to My Picks in
+  // the league the same link selected. Otherwise the branch decides.
+  const asked = requestedView();
   if (inviteCode && !leagueCodes.includes(inviteCode)) { launchRouted = true; currentView = "league"; }
+  else if (asked) { launchRouted = true; currentView = asked; }
   else applyLaunchBranch();
   render();
   registerServiceWorker();

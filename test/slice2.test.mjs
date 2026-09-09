@@ -150,12 +150,15 @@ test("R1 · D3 has exactly two surfaces, and Weekly is not one of them", () => {
 
 // --- R2 -------------------------------------------------------------------
 
-test("R2 · Next never asks for the result-first treatment", () => {
-  const today = sourceOf("todayView");
-  assert.match(today, /due\.map\(matchCard\)/);
-  assert.ok(!today.includes("resultFirst"), "Next opted into settled cards");
-  // And Next only ever holds open fixtures anyway.
-  assert.match(today, /matchOpen\(fixture\) && !picks\[fixture\.id\]/);
+test("R2 · the week summary counts open fixtures, and asks for no card at all", () => {
+  // Next was the screen that mapped open fixtures to cards. It is one counted
+  // sentence now, so there is no second list to opt into settled cards.
+  const counts = sourceOf("pickCounts");
+  assert.match(counts, /matchOpen\(fixture\)/);
+  assert.match(counts, /picks\[id\]/);
+  assert.ok(!counts.includes("resultFirst"), "the summary opted into settled cards");
+  assert.ok(!counts.includes("matchCard"), "the summary builds cards");
+  assert.ok(!APP.includes("function todayView"), "the Next view survived its tab");
 });
 
 test("R2 · matchCard is unchanged for every caller that does not opt in", () => {
@@ -177,10 +180,14 @@ test("R2 · matchCard is unchanged for every caller that does not opt in", () =>
   assert.notEqual(bare, s.matchCard(settled, { resultFirst: true }));
 });
 
-test("R2 · Mates' Picks keeps its own card treatment", () => {
-  assert.ok(!sourceOf("matesFixtureCard").includes("resultFirst"));
+test("R2 · the mates reveal keeps its own card treatment", () => {
+  // The whole-slate matrix is gone; what survives is the body drawn inside a
+  // fixture card's disclosure, and it still draws no result card of its own.
   assert.ok(!sourceOf("matesCardBody").includes("resultCard"));
-  assert.ok(!sourceOf("matesMatrix").includes("resultCard"));
+  assert.ok(!sourceOf("matesCardBody").includes("resultFirst"));
+  for (const gone of ["matesMatrix", "matesFixtureCard", "matesHeader"]) {
+    assert.ok(!APP.includes(`function ${gone}(`), `${gone} survived the segment`);
+  }
 });
 
 // --- R3 -------------------------------------------------------------------
@@ -290,31 +297,40 @@ test("L1 · the collapse state is remembered", () => {
 // --- M1 -------------------------------------------------------------------
 
 test("M1 · the member sees the waiting copy and no action", () => {
-  const s = load(["matesAwaitingSlate"], { isLeagueHost: () => false });
-  const html = s.matesAwaitingSlate(7);
-  assert.match(html, /Waiting for the host to select this week's fixtures\./);
-  assert.ok(!html.includes("data-open-picker"));
+  // My Picks' own empty state, which every member reaches — there is no
+  // segment to open and no fixture list to build before publication.
+  assert.match(APP, /No league fixtures selected yet\./);
+  assert.match(APP, /Your league fixtures will appear here when this week's line-up is published\./);
+  const empty = constOf("matchweekEmpty");
+  assert.ok(!empty.includes("data-open-picker"), "the member was offered the host's action");
 });
 
-test("M1 · the host sees host copy and the Select fixtures action", () => {
-  const s = load(["matesAwaitingSlate"], { isLeagueHost: () => true });
-  const html = s.matesAwaitingSlate(7);
-  assert.match(html, /Waiting for you to select this week's fixtures\./);
-  assert.match(html, /data-open-picker="7">Select fixtures</);
+test("M1 · the host still gets the action that ends the wait", () => {
+  // The awaiting-slate card belonged to the removed matrix. My Picks says the
+  // same thing in its own empty state, and the host's action lives on the
+  // League screen where the line-up is actually chosen.
+  assert.ok(!APP.includes("matesAwaitingSlate"), "the matrix's waiting card survived");
+  assert.match(APP, /Waiting on your host to publish this week/);
+  assert.match(APP, /data-open-picker="\$\{escapeHTML\(state\.currentPeriod\)\}">Pick fixtures for/);
 });
 
 test("M1 · no published slate means no cards are built at all", () => {
-  const fill = sourceOf("fillPanelProgressively");
-  const guard = fill.indexOf("if (!slateForPeriod(matesState?.period))");
+  // The guard moved with the feature: My Picks refuses to build a list
+  // before the host has published, and never falls back to the calendar.
+  const view = sourceOf("picksView");
+  const guard = view.indexOf("if (!plan) {");
   assert.ok(guard > 0, "no pre-publication guard");
-  assert.ok(guard < fill.indexOf("const matrix = matesMatrix(matesState);"),
-    "the matrix is built before the guard runs");
-  assert.ok(guard < fill.indexOf("matesFixtureCard"));
+  assert.ok(guard < view.indexOf("matchweekSlots(plan)"),
+    "the list is built before the guard runs");
+  assert.match(view, /matchweekEmpty\(\)/);
 });
 
 test("M1 · after publication only the slate's fixtures render", () => {
-  const matrix = sourceOf("matesMatrix");
-  assert.match(matrix, /slateForPeriod\(state\?\.period\)\?\.fixtureIds\?\.map\(String\)/);
+  // The list is the host's published slate, and the reveal on each card is
+  // scoped to the same slate — never to the competition calendar.
+  assert.match(sourceOf("picksView"), /matchweekSlots\(plan\)/);
+  assert.match(sourceOf("fixtureRevealSection"),
+    /slateForPeriod\(state\.period\)\?\.fixtureIds/);
 });
 
 // --- C1 -------------------------------------------------------------------

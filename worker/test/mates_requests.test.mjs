@@ -37,8 +37,13 @@ function loaders({ delays = {}, cachedRounds = {}, horizon = null } = {}) {
     "use strict";
     let activeLeague = "AAA";
     let leagueState = { code: "AAA", currentPeriod: 3 };
-    let matesState = null, matesRequest = 0, matesLockHorizon = horizonIn === null ? Infinity : horizonIn;
-    let navGeneration = 0, currentView = "league", leagueTab = "mates";
+    let picksRound = null;
+    let revealState = null, revealRequest = 0, revealLockHorizon = horizonIn === null ? Infinity : horizonIn;
+    let navGeneration = 0, currentView = "picks", leagueTab = "matchday";
+    const LEGACY_VIEWS = { schedule: "picks", today: "picks", mates: "picks" };
+    const normaliseView = (view) => LEGACY_VIEWS[view] || view;
+    let paintCount = 0;
+    const render = () => { paintCount += 1; };
     let roundStates = { ...cachedRounds };
     // cacheRoundState keeps only leagues this device still belongs to, and
     // writes through to storage — both of which it needs to be told about.
@@ -52,7 +57,7 @@ function loaders({ delays = {}, cachedRounds = {}, horizon = null } = {}) {
     const document = { hidden: false };
     const uid = () => "u1";
     const panels = [];
-    const showResultsPanel = async () => { panels.push(matesState && matesState.code); };
+    const showResultsPanel = async () => { panels.push(revealState && revealState.code); };
     const traceTap = () => {};
 
     const codeOf = (path) => /code=([A-Z]+)/.exec(path)[1];
@@ -69,12 +74,12 @@ function loaders({ delays = {}, cachedRounds = {}, horizon = null } = {}) {
     const stateFlights = new Map();
     ${lift("function fetchState(path)")}
     ${liftLine("const roundStatePath =")}
-    ${liftLine("const matesPeriod =")}
-    ${lift("function matesUsable(state)")}
+    ${liftLine("const revealPeriod =")}
+    ${lift("function revealUsable(state)")}
     // v1.7 consolidation: a league change also closes the open pick row.
     let expandedPickId = null;
     const forgetPicksRound = () => {};
-    ${lift("function forgetMatesState()")}
+    ${lift("function forgetRevealState()")}
     ${lift("function lockHorizonOf(state)")}
     ${lift("function cacheRoundState(code, period, state)")}
     ${lift("function cachedRoundState(code, period)")}
@@ -82,20 +87,22 @@ function loaders({ delays = {}, cachedRounds = {}, horizon = null } = {}) {
     ${liftLine("const stampFor =")}
     ${liftLine("const bumpStamp =")}
     ${lift("function dropRetainedPanels(code = null)")}
-    ${lift("async function loadMatesState(generation = navGeneration)")}
-    ${lift("async function refreshMatesOnForeground()")}
+    ${lift("async function loadRevealState(generation = navGeneration)")}
+    ${lift("async function refreshRevealOnForeground()")}
 
     return {
-      enter: () => loadMatesState(),
-      foreground: () => refreshMatesOnForeground(),
+      enter: () => loadRevealState(),
+      foreground: () => refreshRevealOnForeground(),
       // What a pill switch does to this state, in the order it does it.
-      setLeague: (code) => { activeLeague = code; leagueState = { code, currentPeriod: 3 }; forgetMatesState(); },
+      setLeague: (code) => { activeLeague = code; leagueState = { code, currentPeriod: 3 }; forgetRevealState(); },
       setHidden: (value) => { document.hidden = value; },
       setTab: (tab) => { leagueTab = tab; },
-      setHorizon: (value) => { matesLockHorizon = value; },
-      horizon: () => matesLockHorizon,
-      state: () => matesState,
+      setView: (view) => { currentView = view; },
+      setHorizon: (value) => { revealLockHorizon = value; },
+      horizon: () => revealLockHorizon,
+      state: () => revealState,
       panels: () => panels,
+      paints: () => paintCount,
       calls: () => calls,
     };
   `);
@@ -123,15 +130,17 @@ test("two entries at once coalesce into one request", async () => {
   assert.equal(app.calls().length, 1);
 });
 
-test("the segment branch asks once and no more", () => {
-  const branch = APP.slice(APP.indexOf('if (wanted === "mates") {'));
-  const body = branch.slice(0, branch.indexOf("if (!needsRound) return;"));
-  assert.equal((body.match(/loadMatesState\(\)/g) || []).length, 1, "one revalidation, not two");
+test("the league-switch branch asks once and no more", () => {
+  // The segment that used to ask on entry is gone. What is left is the one
+  // revalidation a league change owes the reveal.
+  const body = lift("async function revalidateRevealAfterSwitch(code)");
+  assert.equal((body.match(/loadRevealState\(\)/g) || []).length, 1, "one revalidation, not two");
   assert.doesNotMatch(body, /setInterval|setTimeout/, "and nothing that would keep asking");
+  assert.ok(!APP.includes('if (wanted === "mates") {'), "the segment branch survived");
 });
 
 test("nothing anywhere polls for picks", () => {
-  const mates = APP.slice(APP.indexOf("async function loadMatesState"), APP.indexOf("async function loadKnownLeagueNames"));
+  const mates = APP.slice(APP.indexOf("async function loadRevealState"), APP.indexOf("async function loadKnownLeagueNames"));
   assert.doesNotMatch(mates, /setInterval/, "no polling loop");
   assert.doesNotMatch(APP, /setInterval\([^)]*[Mm]ates/, "and nothing schedules one elsewhere");
 });
@@ -165,7 +174,7 @@ test("a return that crossed nothing asks for nothing", async () => {
 });
 
 test("a return to any other screen asks for nothing", async () => {
-  for (const setup of [(app) => app.setTab("season"), (app) => app.setHidden(true)]) {
+  for (const setup of [(app) => app.setView("league"), (app) => app.setHidden(true)]) {
     const app = await watching();
     setup(app);
     app.setHorizon(Date.now() - 1000);
@@ -228,15 +237,15 @@ test("each league's matrix is cached under its own key", async () => {
 
 // --- the real switch sequence -----------------------------------------------
 //
-// loadMatesState() on its own is not the production path. A pill tap forgets
+// loadRevealState() on its own is not the production path. A pill tap forgets
 // the old league, restores the new one's cached season state, paints, and only
 // then — behind a season request that can be slow — revalidates. These drive
 // the actual switchers so a cached matrix is proved to reach the screen ahead
 // of the network rather than behind it.
-function switching({ seasonDelay = 0, roundDelay = 0, cachedRounds = {}, cachedLeagues = {}, tab = "mates" } = {}) {
+function switching({ seasonDelay = 0, roundDelay = 0, cachedRounds = {}, cachedLeagues = {}, tab = "matchday", view = "picks" } = {}) {
   const calls = [];
   const paints = [];
-  const build = new Function("seasonDelay", "roundDelay", "calls", "paints", "cachedRounds", "cachedLeagues", "tab", `
+  const build = new Function("seasonDelay", "roundDelay", "calls", "paints", "cachedRounds", "cachedLeagues", "tab", "view", `
     "use strict";
     let activeLeague = "AAA";
     // v1.7: a real switch closes the open Matchweek card.
@@ -246,8 +255,11 @@ function switching({ seasonDelay = 0, roundDelay = 0, cachedRounds = {}, cachedL
     let leagueStates = { ...cachedLeagues };
     let leagueState = leagueStates.AAA || null;
     let roundStates = { ...cachedRounds };
-    let matesState = null, matesRequest = 0, matesLockHorizon = Infinity;
-    let navGeneration = 0, currentView = "league", panelGeneration = 0, mountedKey = null;
+    let picksRound = null;
+    let revealState = null, revealRequest = 0, revealLockHorizon = Infinity;
+    let navGeneration = 0, currentView = view, panelGeneration = 0, mountedKey = null;
+    const LEGACY_VIEWS = { schedule: "picks", today: "picks", mates: "picks" };
+    const normaliseView = (view) => LEGACY_VIEWS[view] || view;
     let leagueStamps = new Map(), retainedPanels = new Map();
     const leagueCodes = ["AAA", "BBB"];
     const leagueNames = {};
@@ -263,8 +275,8 @@ function switching({ seasonDelay = 0, roundDelay = 0, cachedRounds = {}, cachedL
     const clearFlash = () => {};
     const currentPeriodKey = () => 3;
     const nextPaint = () => Promise.resolve();
-    const render = () => { paints.push({ what: "render", showing: matesState && matesState.code }); };
-    const showResultsPanel = async () => { paints.push({ what: "panel", showing: matesState && matesState.code }); };
+    const render = () => { paints.push({ what: "render", showing: revealState && revealState.code }); };
+    const showResultsPanel = async () => { paints.push({ what: "panel", showing: revealState && revealState.code }); };
     // The season read: deliberately slow, so anything that waits for it shows.
     const refreshLeague = () => new Promise((resolve) => setTimeout(() => {
       calls.push("season:" + activeLeague);
@@ -285,12 +297,12 @@ function switching({ seasonDelay = 0, roundDelay = 0, cachedRounds = {}, cachedL
     const stateFlights = new Map();
     ${lift("function fetchState(path)")}
     ${liftLine("const roundStatePath =")}
-    ${liftLine("const matesPeriod =")}
-    ${lift("function matesUsable(state)")}
+    ${liftLine("const revealPeriod =")}
+    ${lift("function revealUsable(state)")}
     ${lift("function currentRoundReveal()")}
     const forgetPicksRound = () => {};
-    ${lift("function forgetMatesState()")}
-    ${lift("function hydrateMatesState()")}
+    ${lift("function forgetRevealState()")}
+    ${lift("function hydrateRevealState()")}
     ${lift("function lockHorizonOf(state)")}
     ${lift("function cacheRoundState(code, period, state)")}
     ${lift("function cachedRoundState(code, period)")}
@@ -299,23 +311,23 @@ function switching({ seasonDelay = 0, roundDelay = 0, cachedRounds = {}, cachedL
     ${liftLine("const bumpStamp =")}
     ${lift("function dropRetainedPanels(code = null)")}
     ${lift("function hydrateCachedLeague()")}
-    ${lift("async function loadMatesState(generation = navGeneration)")}
-    ${lift("async function revalidateMatesAfterSwitch(code)")}
+    ${lift("async function loadRevealState(generation = navGeneration)")}
+    ${lift("async function revalidateRevealAfterSwitch(code)")}
     ${lift("async function switchLeaguePill(code)")}
     ${lift("function setActiveLeague(code, refresh = true)")}
 
     return {
       pill: (code) => switchLeaguePill(code),
       choose: (code) => setActiveLeague(code),
-      state: () => matesState,
-      period: () => matesPeriod(),
-      horizon: () => matesLockHorizon,
+      state: () => revealState,
+      period: () => revealPeriod(),
+      horizon: () => revealLockHorizon,
       calls: () => calls,
       paints: () => paints,
       roundCalls: () => calls.filter((call) => call.startsWith("/state")),
     };
   `);
-  return build(seasonDelay, roundDelay, calls, paints, cachedRounds, cachedLeagues, tab);
+  return build(seasonDelay, roundDelay, calls, paints, cachedRounds, cachedLeagues, tab, view);
 }
 
 /** Let the un-awaited refresh chain finish, as the app leaves it to. */
@@ -396,28 +408,31 @@ test("neither route ever issues two round reads", async () => {
   }
 });
 
-test("a league change with Mates' Picks closed reads no round at all", async () => {
-  const app = switching({ seasonDelay: 5, tab: "season", cachedLeagues: BBB_SEASON, cachedRounds: BBB_ROUND });
+test("a league change away from My Picks reads no round at all", async () => {
+  // The revalidation belongs to the screen the reveal is on. Switching league
+  // while looking at the League table asks for nothing on its behalf.
+  const app = switching({ seasonDelay: 5, tab: "season", view: "league",
+    cachedLeagues: BBB_SEASON, cachedRounds: BBB_ROUND });
   await app.pill("BBB");
   await settle();
-  assert.deepEqual(app.roundCalls(), [], "the segment that is not showing asks for nothing");
+  assert.deepEqual(app.roundCalls(), [], "a screen that is not showing asks for nothing");
 });
 
 test("both routes hydrate from cache and revalidate through the same two helpers", () => {
   for (const route of ["async function switchLeaguePill(code)", "function setActiveLeague(code, refresh = true)"]) {
     const fn = lift(route);
-    assert.match(fn, /forgetMatesState\(\)/, route);
-    assert.match(fn, /hydrateMatesState\(\)/, route);
-    assert.match(fn, /revalidateMatesAfterSwitch\(/, route);
+    assert.match(fn, /forgetRevealState\(\)/, route);
+    assert.match(fn, /hydrateRevealState\(\)/, route);
+    assert.match(fn, /revalidateRevealAfterSwitch\(/, route);
     // Cache first, network second — in that order, in the source.
-    assert.ok(fn.indexOf("hydrateMatesState()") < fn.indexOf("revalidateMatesAfterSwitch("), route);
-    assert.ok(fn.indexOf("forgetMatesState()") < fn.indexOf("hydrateMatesState()"), route);
+    assert.ok(fn.indexOf("hydrateRevealState()") < fn.indexOf("revalidateRevealAfterSwitch("), route);
+    assert.ok(fn.indexOf("forgetRevealState()") < fn.indexOf("hydrateRevealState()"), route);
   }
   // The cached adoption is the context rule's own answer, and costs nothing.
-  const hydrate = lift("function hydrateMatesState()");
+  const hydrate = lift("function hydrateRevealState()");
   assert.match(hydrate, /currentRoundReveal\(\)/);
   assert.match(hydrate, /lockHorizonOf/);
-  for (const banned of ["await", "fetch", "api(", "loadMatesState"]) {
+  for (const banned of ["await", "fetch", "api(", "loadRevealState"]) {
     assert.ok(!hydrate.includes(banned), `hydrating from cache must not ${banned}`);
   }
 });
@@ -482,34 +497,39 @@ test("a cache belonging to another league is never adopted", async () => {
 });
 
 test("the context rule is one rule, asked wherever a pick could be drawn", () => {
-  const rule = lift("function matesUsable(state)");
+  const rule = lift("function revealUsable(state)");
   assert.match(rule, /state\.code === activeLeague/);
   assert.match(rule, /String\(state\.period\) === String\(period\)/);
   // Every path that can put a name or a prediction on screen goes through it.
-  for (const caller of ["async function loadMatesState(generation = navGeneration)",
-                        "async function refreshMatesOnForeground()",
+  for (const caller of ["async function loadRevealState(generation = navGeneration)",
+                        "async function refreshRevealOnForeground()",
                         "function currentRoundReveal()"]) {
-    assert.match(lift(caller), /matesUsable/, caller);
+    assert.match(lift(caller), /revealUsable/, caller);
   }
-  const panel = APP.slice(APP.indexOf('if (tab === "mates") {'));
-  assert.match(panel.slice(0, panel.indexOf("const matrix")), /matesUsable\(matesState\)/);
+  // The panel that used to draw the matrix is gone; the section that draws a
+  // card is the last place a pick becomes markup, and it asks the same rule.
+  assert.match(lift("function fixtureRevealSection(match)"), /currentRoundReveal\(\)/);
+  assert.ok(!APP.includes('if (tab === "mates") {'), "the matrix panel survived");
   // And both routes that change the active league forget it on the way.
   for (const switcher of ["function setActiveLeague(code, refresh = true)",
                           "async function switchLeaguePill(code)"]) {
-    assert.match(lift(switcher), /forgetMatesState\(\)/, switcher);
+    assert.match(lift(switcher), /forgetRevealState\(\)/, switcher);
   }
 });
 
-test("the matrix is filed under the round it shows, not the week being browsed", () => {
+test("the retained panels are filed under the week being browsed, and nothing else", () => {
+  // The mates scope went with the segment; Weekly is the only tab whose
+  // panel depends on a period at all.
   const key = lift("function panelKey(tab, code = activeLeague, period = selectedPeriod)");
-  assert.match(key, /tab === "mates" \? `m\$\{matesPeriod\(\)\}`/);
+  assert.match(key, /const scope = tab === "matchday" \? period : "-";/);
+  assert.ok(!key.includes("mates"), "the removed segment still has a panel scope");
 });
 
 // --- period behaviour -------------------------------------------------------
 
-test("Mates' Picks reads the current round, never the week being browsed", () => {
-  assert.match(liftLine("const matesPeriod ="), /leagueState\?\.currentPeriod/);
-  const loader = lift("async function loadMatesState(generation = navGeneration)");
+test("the reveal reads the current round, never the week being browsed", () => {
+  assert.match(liftLine("const revealPeriod ="), /leagueState\?\.currentPeriod/);
+  const loader = lift("async function loadRevealState(generation = navGeneration)");
   assert.doesNotMatch(loader, /selectedPeriod/, "the Weekly selection is not consulted");
 });
 
@@ -520,7 +540,7 @@ test("opening Mates' Picks leaves the Weekly selection exactly where it was", ()
   const body = branch.slice(0, branch.indexOf("if (!needsRound) return;"));
   assert.doesNotMatch(body, /selectedPeriod =/);
   assert.doesNotMatch(body, /roundState =/);
-  const loader = lift("async function loadMatesState(generation = navGeneration)");
+  const loader = lift("async function loadRevealState(generation = navGeneration)");
   assert.doesNotMatch(loader, /roundState =/, "and the Weekly state is never overwritten");
-  assert.match(loader, /matesState =/, "Mates' Picks keeps its own");
+  assert.match(loader, /revealState =/, "Mates' Picks keeps its own");
 });

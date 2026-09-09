@@ -25,7 +25,7 @@ function picksBox(over = {}) {
   const { document } = dom.window;
   const reads = [];
   const box = load(["ensurePicksRound", "picksRoundUsable", "forgetPicksRound", "picksPeriod",
-    "picksRoundKey", "shareRound", "sharePeriod", "revealUsable", "revealPeriod", "lockHorizonOf",
+    "picksRoundKey", "claimPicksRound", "releasePicksRound", "shareRound", "sharePeriod", "revealUsable", "revealPeriod", "lockHorizonOf",
     "shareSurface", "shareCardState", "shareIconButton", "syncShareLabel", "normaliseView",
     "LEGACY_VIEWS", "weeklySharePublished", "weeklyShareStatus", "weeklyTerminalCount",
     "seasonShareFreshness", "matchweekLeagueState", "matchweekSlate", "cacheRoundState",
@@ -40,6 +40,7 @@ function picksBox(over = {}) {
     revealLockHorizon: Infinity,
     picksRound: null,
     picksRoundFlights: new Map(),
+    picksRoundClaim: { generation: -1, key: "" },
     currentView: "picks",
     leagueTab: "matchday",
     activeLeague: "AAA",
@@ -149,10 +150,14 @@ test("P3 · a second entry joins the read already running", async () => {
   assert.equal(third, first);
   app.reads[0].resolve(round("AAA", "7"));
   await settle();
-  // Once it has landed the flight is cleared, so a later entry is a new
-  // entry: it paints what it holds and revalidates once, like any other.
+  // Inside the SAME entry, a further call asks nothing: the flight is gone
+  // but the claim is not, which is the whole point of the coordinator.
   app.box.ensurePicksRound();
-  assert.equal(app.reads.length, 2, "a later entry did not revalidate");
+  assert.equal(app.reads.length, 1, "one entry issued a second read");
+  // A genuine later entry is a new generation, and gets its own one read.
+  app.box.evalIn("navGeneration += 1;");
+  app.box.ensurePicksRound();
+  assert.equal(app.reads.length, 2, "a later entry could not revalidate");
 });
 
 test("P3 · while it is in flight the control stays honest, not hidden", () => {
@@ -178,7 +183,11 @@ test("P4 · a failed read leaves the control visible and disabled, not enabled",
   assert.equal(control.disabled, true, "a failed read enabled the control");
   assert.equal(control.getAttribute("aria-busy"), "true");
   assert.equal(app.box.shareCardState("weekly").ready, false);
-  // The flight is released, so a later entry may try once more — but only once.
+  // The failure does not buy a retry inside the same entry...
+  app.box.ensurePicksRound();
+  assert.equal(app.reads.length, 1, "a failure let one entry ask twice");
+  // ...but a genuine later entry may try once more, and only once.
+  app.box.evalIn("navGeneration += 1;");
   app.box.ensurePicksRound();
   assert.equal(app.reads.length, 2);
   app.box.ensurePicksRound();

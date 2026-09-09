@@ -332,13 +332,14 @@ test("T6 · privacy before lock, and no bleed between leagues", () => {
   const rule = sourceOf("revealUsable");
   assert.match(rule, /state\.code === activeLeague/);
   assert.match(rule, /String\(state\.period\) === String\(period\)/);
-  for (const caller of ["loadRevealState", "refreshRevealOnForeground", "currentRoundReveal"]) {
+  for (const caller of ["ensurePicksRound", "refreshRevealOnForeground", "currentRoundReveal"]) {
     assert.match(sourceOf(caller), /revealUsable/, caller);
   }
+  // One reader, so there is one place the rule can be asked from.
+  assert.ok(!APP.includes("async function loadRevealState"), "a second round reader survived");
   // A league change drops the held payload before anything can repaint.
   const forget = sourceOf("forgetRevealState");
   assert.match(forget, /revealState = null;/);
-  assert.match(forget, /revealRequest\+\+;/);
   assert.match(forget, /forgetPicksRound\(\);/);
   assert.match(forget, /expandedPickId = null;/);
   for (const switcher of ["setActiveLeague", "switchLeaguePill"]) {
@@ -404,7 +405,7 @@ function readBox({ cached = null, code = "AAA", codes = ["AAA", "BBB"], view = "
     ...(reveal ? { reveal } : {}),
   });
   const box = load(["ensurePicksRound", "picksRoundUsable", "forgetPicksRound", "picksPeriod",
-    "picksRoundKey", "revealUsable", "revealPeriod", "lockHorizonOf", "currentRoundReveal",
+    "picksRoundKey", "claimPicksRound", "releasePicksRound", "revalidateRevealAfterSwitch", "revealUsable", "revealPeriod", "lockHorizonOf", "currentRoundReveal",
     "cacheRoundState", "cachedRoundState", "roundCacheKey", "roundStatePath",
     "matchweekLeagueState", "matchweekSlate", "syncShareLabel", "shareCardState",
     "shareSurface", "shareRound", "sharePeriod", "shareIconButton", "normaliseView",
@@ -417,6 +418,7 @@ function readBox({ cached = null, code = "AAA", codes = ["AAA", "BBB"], view = "
     render: () => {},
     picksRound: null,
     picksRoundFlights: new Map(),
+    picksRoundClaim: { generation: -1, key: "" },
     revealState: null,
     revealLockHorizon: Infinity,
     roundState: null,
@@ -604,4 +606,129 @@ test("C2 · the stored league's names and picks never paint under the linked one
   app.reads[0].resolve(app.round("AAA", "7", []));
   await settle();
   assert.equal(app.box.currentRoundReveal(), null, "a foreign answer was adopted");
+});
+
+// --- 9 · one entry, one round read (Sol's closing finding) ---------------
+//
+// The flight map is cleared when a read SETTLES, so a fast answer landing
+// before the awaited prefetch work finished left the second ensure point with
+// nothing to join. fetchState could not help: it folds requests that are in
+// the air together, not one that has already landed. The claim outlives the
+// flight, and these are the sequences that proved it was needed.
+
+test("R1 · a fast first answer does not let the second ensure point ask again", async () => {
+  const app = readBox({});
+  // navigateToView's first ensure point.
+  app.box.ensurePicksRound();
+  assert.equal(app.reads.length, 1);
+  // The answer lands while the prefetch work is still going.
+  app.reads[0].resolve(app.round("AAA", "7", []));
+  await settle();
+  // ...and the second ensure point runs, after the prefetch resolves.
+  app.box.ensurePicksRound();
+  assert.equal(app.reads.length, 1, "one entry issued two round reads");
+});
+
+test("R2 · an unknown period claims nothing, so the later attempt still asks", () => {
+  const app = readBox({});
+  // The early attempt: the league's own state has not named a period yet.
+  app.box.evalIn(`leagueState = { code: "AAA", name: "Sunday Six", currentPeriod: null,
+    currentSlate: null };`);
+  assert.equal(app.box.ensurePicksRound(), null, "a read was started with no week");
+  assert.equal(app.reads.length, 0);
+  // The season answer names it, and the later attempt gets its one chance.
+  app.box.evalIn(`leagueState = { code: "AAA", name: "Sunday Six", currentPeriod: "7",
+    currentSlate: { period: "7", matchweek: 7, status: "published", fixtureIds: ["f1"], count: 1 } };`);
+  app.box.ensurePicksRound();
+  assert.equal(app.reads.length, 1, "the week arriving did not buy a read");
+  // And only one.
+  app.box.ensurePicksRound();
+  assert.equal(app.reads.length, 1, "the later attempt asked twice");
+});
+
+test("R3 · a linked-league startup reads the linked league once, and the stored one never", async () => {
+  // Stored AAA, link names BBB. The boot path and setActiveLeague's delayed
+  // reveal refresh both reach the same context; between them, one read.
+  const app = readBox({ code: "BBB", codes: ["AAA", "BBB"] });
+  app.box.ensurePicksRound();                       // the boot path
+  assert.equal(app.reads.length, 1);
+  // BBB's round answers before the season refresh has finished.
+  app.reads[0].resolve(app.round("BBB", "7", []));
+  await settle();
+  // ...and then the delayed switch revalidation runs.
+  await app.box.revalidateRevealAfterSwitch("BBB");
+  assert.equal(app.readsFor("BBB"), 1, "the linked league was read twice");
+  assert.equal(app.readsFor("AAA"), 0, "the stored league was read at all");
+});
+
+test("R4 · a same-tab entry is one read", () => {
+  const app = readBox({});
+  app.box.ensurePicksRound();
+  app.box.ensurePicksRound();
+  app.box.ensurePicksRound();
+  assert.equal(app.reads.length, 1);
+});
+
+test("R5 · leaving during the request caches the answer and repaints nothing", async () => {
+  const app = readBox({});
+  app.box.ensurePicksRound();
+  app.box.evalIn("navGeneration += 1;");            // the viewer moved on
+  app.reads[0].resolve(app.round("AAA", "7", [{ id: "f1", lockAt: "2020-01-01T00:00:00Z",
+    settled: true, picks: [{ uid: "u2", nick: "Bex", p1: 1, p2: 0, pts: 5 }] }]));
+  await settle();
+  assert.equal(app.box.evalIn("picksRound"), null, "a stale answer repainted");
+  // Cached, though — the work is not thrown away.
+  assert.ok(app.box.cachedRoundState("AAA", "7"), "the answer was not cached");
+});
+
+test("R6 · a genuine later entry gets a new generation and one new read", async () => {
+  const app = readBox({});
+  app.box.ensurePicksRound();
+  app.reads[0].resolve(app.round("AAA", "7", []));
+  await settle();
+  app.box.ensurePicksRound();
+  assert.equal(app.reads.length, 1, "the same entry asked twice");
+  // A real navigation to My Picks bumps the generation.
+  app.box.evalIn("navGeneration += 1;");
+  app.box.ensurePicksRound();
+  assert.equal(app.reads.length, 2, "a later entry could not revalidate");
+  app.box.ensurePicksRound();
+  assert.equal(app.reads.length, 2, "the later entry asked twice");
+});
+
+test("R7 · a crossed kick-off releases the claim, and takes it exactly once", () => {
+  // The one case where an entry legitimately asks again: the foreground
+  // return that crossed a boundary the screen was waiting on.
+  const fn = sourceOf("refreshRevealOnForeground");
+  assert.match(fn, /releasePicksRound\(\);/);
+  assert.match(fn, /await ensurePicksRound\(\);/);
+  assert.match(fn, /revealLockHorizon = Infinity;/, "one crossing, one revalidation");
+  // And there is one reader, so there is one place a read can come from.
+  assert.match(sourceOf("revalidateRevealAfterSwitch"), /await ensurePicksRound\(\);/);
+  assert.ok(!APP.includes("async function loadRevealState"), "a second reader survived");
+  // The endpoint is read elsewhere for other screens — loadRoundState is the
+  // Weekly tab's browsed week, ensureRoundState the cabinet's — but nothing
+  // on My Picks reads it except the coordinator.
+  for (const path of ["revalidateRevealAfterSwitch", "refreshRevealOnForeground"]) {
+    assert.ok(!sourceOf(path).includes("fetchState"), `${path} reads the endpoint itself`);
+    assert.match(sourceOf(path), /ensurePicksRound\(\)/, path);
+  }
+  assert.equal((sourceOf("ensurePicksRound").match(/fetchState\(/g) || []).length, 1);
+});
+
+test("R8 · a league switch is a new context, and gets its own single read", () => {
+  const app = readBox({});
+  app.box.ensurePicksRound();
+  assert.equal(app.readsFor("AAA"), 1);
+  // The pill moves. Same generation, different context: one more read, for
+  // the new league only.
+  app.box.evalIn(`activeLeague = "BBB";
+    leagueState = { code: "BBB", name: "Bury Legends", currentPeriod: "7",
+      currentSlate: { period: "7", matchweek: 7, status: "published", fixtureIds: ["f9"], count: 1 } };
+    forgetPicksRound();`);
+  app.box.ensurePicksRound();
+  assert.equal(app.readsFor("BBB"), 1, "the new league was not read");
+  assert.equal(app.readsFor("AAA"), 1, "the old league was read again");
+  app.box.ensurePicksRound();
+  assert.equal(app.readsFor("BBB"), 1, "the new league was read twice");
 });

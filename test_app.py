@@ -2876,10 +2876,15 @@ class MatesPicksTests(unittest.TestCase):
     def test_the_reveal_keeps_its_own_state_apart_from_the_weekly_one(self):
         self.assertIn("let revealState = null;", self.app)
         self.assertIn("const revealPeriod = () => leagueState?.currentPeriod ?? null;", self.app)
-        loader = self.app[self.app.index("async function loadRevealState"):]
-        loader = loader[:loader.index("\n}")]
+        # One reader for the round My Picks needs, so there is one place the
+        # week can come from: the league's CURRENT period, never the week the
+        # Weekly tab happens to be browsing.
+        self.assertNotIn("async function loadRevealState", self.app)
+        loader = self.app[self.app.index("function ensurePicksRound()"):]
+        loader = loader[:loader.index("\n}\n")]
         self.assertNotIn("selectedPeriod", loader)
         self.assertNotIn("roundState =", loader)
+        self.assertIn("const period = picksPeriod();", loader)
 
     def test_freshness_is_bounded_and_never_polled(self):
         self.assertIn('document.addEventListener("visibilitychange"', self.app)

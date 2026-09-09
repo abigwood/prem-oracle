@@ -239,7 +239,6 @@ let roundState = null;
  * Weekly tab off the week the viewer had browsed to.
  */
 let revealState = null;
-let revealRequest = 0;
 // The next kick-off this view is waiting on. A foreground return that crosses
 // it is the one moment the data can have gone stale without anything asking.
 let revealLockHorizon = Infinity;
@@ -922,10 +921,39 @@ function picksRoundUsable(state, code = activeLeague, period = picksPeriod()) {
   return state.table?.length ? state : null;
 }
 
+/**
+ * The one revalidation an entry to My Picks is allowed.
+ *
+ * The flight map alone was not enough. It is cleared the moment a read
+ * SETTLES, so a fast first answer landing before the awaited prefetch work
+ * finished left the second ensure point with nothing to join — and it started
+ * a second request for the same week. fetchState could not help either: it
+ * folds requests that are in the air together, not one that has already
+ * landed. So the claim is recorded against the navigation generation and the
+ * context, and it outlives the flight.
+ *
+ * A generation is one entry. A different league or week inside the same entry
+ * is a different context and gets its own claim, which is what lets a league
+ * switch revalidate. An attempt made before the period is known claims
+ * nothing, so the later attempt still gets its chance.
+ */
+let picksRoundClaim = { generation: -1, key: "" };
+
+function claimPicksRound(code, period) {
+  const key = picksRoundKey(code, period);
+  if (picksRoundClaim.generation === navGeneration && picksRoundClaim.key === key) return false;
+  picksRoundClaim = { generation: navGeneration, key };
+  return true;
+}
+
+/** A new reason to ask, inside the same entry: a crossed kick-off. */
+const releasePicksRound = () => { picksRoundClaim = { generation: -1, key: "" }; };
+
 /** A league or period change makes anything held foreign. It goes at once. */
 function forgetPicksRound() {
   picksRound = null;
   picksRoundFlights.clear();
+  releasePicksRound();
 }
 
 /**
@@ -945,6 +973,13 @@ function ensurePicksRound() {
     || picksRoundUsable(cachedRoundState(code, period), code, period)
     || picksRoundUsable(currentRoundReveal(), code, period);
   if (held) picksRound = held;
+  // The reveal takes the cache directly too. picksRoundUsable insists on a
+  // table, which the share control needs and a reveal does not.
+  const cachedRound = cachedRoundState(code, period);
+  if (!revealUsable(revealState) && revealUsable(cachedRound)) {
+    revealState = cachedRound;
+    revealLockHorizon = lockHorizonOf(cachedRound);
+  }
   // ...and it is painted, not trusted. A cache captured BEFORE kick-off is a
   // complete, in-context, perfectly valid round that contains no mates'
   // predictions at all, because there were none to send. Returning early on
@@ -958,6 +993,8 @@ function ensurePicksRound() {
   // true now that entry always asks.
   const flying = picksRoundFlights.get(key);
   if (flying) return flying;
+  // Nothing in the air — but this entry may already have had its answer.
+  if (!claimPicksRound(code, period)) return null;
   if (!API) return null;
   const generation = navGeneration;
   const flight = fetchState(roundStatePath(code, period))
@@ -1043,7 +1080,9 @@ function currentRoundReveal() {
  */
 function forgetRevealState() {
   revealState = null;
-  revealRequest++;              // any in-flight read for the old league is void
+  // Any in-flight read for the old league is voided by forgetPicksRound()
+  // below: it clears the flight map and releases the entry's claim, and the
+  // read's own league, period and generation guards refuse it on arrival.
   revealLockHorizon = Infinity;
   // My Picks' own table is this league's and this week's, so it goes too.
   forgetPicksRound();
@@ -1080,7 +1119,10 @@ function hydrateRevealState() {
  */
 async function revalidateRevealAfterSwitch(code) {
   if (normaliseView(currentView) !== "picks" || code !== activeLeague) return;
-  await loadRevealState();
+  // Through the coordinator, not around it. On a linked-league startup the
+  // boot path has already reached the same context; whichever arrives second
+  // finds the claim taken and does nothing.
+  await ensurePicksRound();
   if (normaliseView(currentView) !== "picks" || code !== activeLeague) return;
   render();
 }
@@ -1097,53 +1139,6 @@ function lockHorizonOf(state) {
   return upcoming.length ? Math.min(...upcoming) : Infinity;
 }
 
-/**
- * ONE revalidation of the round endpoint, coalesced.
- *
- * Called on a league switch and on a foreground return that crossed a
- * kick-off — the two moments the answer can have changed without the viewer
- * doing anything. There is no polling behind this: if neither happens, no
- * request happens. `fetchState` folds a concurrent read for the same week into
- * the same flight, so this costs one request between them rather than one
- * each.
- */
-async function loadRevealState(generation = navGeneration) {
-  const code = activeLeague;
-  const period = revealPeriod();
-  if (!code || !API || period == null) { revealState = null; return; }
-  const ticket = ++revealRequest;
-  const view = currentView;
-  const superseded = () =>
-    ticket !== revealRequest || code !== activeLeague || generation !== navGeneration
-    || view !== currentView || String(period) !== String(revealPeriod());
-
-  // Anything held from another league or another round is dropped before it
-  // can be painted, and only a cache that passes the same context rule takes
-  // its place. Otherwise the shell stands until the read below lands.
-  if (!revealUsable(revealState)) revealState = null;
-  const cached = cachedRoundState(code, period);
-  if (!revealState && revealUsable(cached)) {
-    revealState = cached;
-    revealLockHorizon = lockHorizonOf(cached);
-  }
-
-  try {
-    const state = await fetchState(roundStatePath(code, period));
-    cacheRoundState(code, period, state);
-    if (superseded()) return;
-    // The answer is checked against the screen as it is NOW, not as it was when
-    // the request went out — a slow league's reply must not land on a fast one.
-    if (!revealUsable(state)) return;
-    revealState = state;
-    revealLockHorizon = lockHorizonOf(state);
-    bumpStamp(code);
-    dropRetainedPanels(code);
-  } catch (error) {
-    if (superseded()) return;
-    // A cached round already on screen beats an error drawn over the top of it.
-    if (!revealState) revealState = { error: error.message };
-  }
-}
 
 /**
  * A return to the app that crossed a kick-off, and nothing else.
@@ -1159,7 +1154,10 @@ async function refreshRevealOnForeground() {
   if (!revealUsable(revealState)) return;
   if (Date.now() < revealLockHorizon) return;
   revealLockHorizon = Infinity;         // one crossing, one revalidation
-  await loadRevealState();
+  // A crossing is a new reason to ask, even inside the entry that already
+  // asked — so the claim is released, and then taken exactly once.
+  releasePicksRound();
+  await ensurePicksRound();
   render();
 }
 

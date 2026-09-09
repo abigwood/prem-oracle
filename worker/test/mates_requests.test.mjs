@@ -38,7 +38,14 @@ function loaders({ delays = {}, cachedRounds = {}, horizon = null } = {}) {
     let activeLeague = "AAA";
     let leagueState = { code: "AAA", currentPeriod: 3 };
     let picksRound = null;
-    let revealState = null, revealRequest = 0, revealLockHorizon = horizonIn === null ? Infinity : horizonIn;
+    const picksRoundFlights = new Map();
+    let picksRoundClaim = { generation: -1, key: "" };
+    // My Picks' week is the league's current period, which this harness sets
+    // on leagueState — the same source the shipped helper reads.
+    const matchweekLeagueState = () => leagueState;
+    const syncShareLabel = () => {};
+    const currentRoundReveal = () => revealState;
+    let revealState = null, revealLockHorizon = horizonIn === null ? Infinity : horizonIn;
     let navGeneration = 0, currentView = "picks", leagueTab = "matchday";
     const LEGACY_VIEWS = { schedule: "picks", today: "picks", mates: "picks" };
     const normaliseView = (view) => LEGACY_VIEWS[view] || view;
@@ -78,7 +85,6 @@ function loaders({ delays = {}, cachedRounds = {}, horizon = null } = {}) {
     ${lift("function revealUsable(state)")}
     // v1.7 consolidation: a league change also closes the open pick row.
     let expandedPickId = null;
-    const forgetPicksRound = () => {};
     ${lift("function forgetRevealState()")}
     ${lift("function lockHorizonOf(state)")}
     ${lift("function cacheRoundState(code, period, state)")}
@@ -87,11 +93,17 @@ function loaders({ delays = {}, cachedRounds = {}, horizon = null } = {}) {
     ${liftLine("const stampFor =")}
     ${liftLine("const bumpStamp =")}
     ${lift("function dropRetainedPanels(code = null)")}
-    ${lift("async function loadRevealState(generation = navGeneration)")}
+    ${lift("function picksRoundUsable(state, code = activeLeague, period = picksPeriod())")}
+    ${liftLine("const picksRoundKey =")}
+    ${liftLine("const picksPeriod =")}
+    ${lift("function claimPicksRound(code, period)")}
+    ${liftLine("const releasePicksRound =")}
+    ${lift("function forgetPicksRound()")}
+    ${lift("function ensurePicksRound()")}
     ${lift("async function refreshRevealOnForeground()")}
 
     return {
-      enter: () => loadRevealState(),
+      enter: () => ensurePicksRound(),
       foreground: () => refreshRevealOnForeground(),
       // What a pill switch does to this state, in the order it does it.
       setLeague: (code) => { activeLeague = code; leagueState = { code, currentPeriod: 3 }; forgetRevealState(); },
@@ -134,13 +146,13 @@ test("the league-switch branch asks once and no more", () => {
   // The segment that used to ask on entry is gone. What is left is the one
   // revalidation a league change owes the reveal.
   const body = lift("async function revalidateRevealAfterSwitch(code)");
-  assert.equal((body.match(/loadRevealState\(\)/g) || []).length, 1, "one revalidation, not two");
+  assert.equal((body.match(/ensurePicksRound\(\)/g) || []).length, 1, "one revalidation, not two");
   assert.doesNotMatch(body, /setInterval|setTimeout/, "and nothing that would keep asking");
   assert.ok(!APP.includes('if (wanted === "mates") {'), "the segment branch survived");
 });
 
 test("nothing anywhere polls for picks", () => {
-  const mates = APP.slice(APP.indexOf("async function loadRevealState"), APP.indexOf("async function loadKnownLeagueNames"));
+  const mates = APP.slice(APP.indexOf("function ensurePicksRound()"), APP.indexOf("async function loadKnownLeagueNames"));
   assert.doesNotMatch(mates, /setInterval/, "no polling loop");
   assert.doesNotMatch(APP, /setInterval\([^)]*[Mm]ates/, "and nothing schedules one elsewhere");
 });
@@ -256,7 +268,12 @@ function switching({ seasonDelay = 0, roundDelay = 0, cachedRounds = {}, cachedL
     let leagueState = leagueStates.AAA || null;
     let roundStates = { ...cachedRounds };
     let picksRound = null;
-    let revealState = null, revealRequest = 0, revealLockHorizon = Infinity;
+    const picksRoundFlights = new Map();
+    let picksRoundClaim = { generation: -1, key: "" };
+    // My Picks' week is the league's current period, which this harness sets
+    // on leagueState — the same source the shipped helper reads.
+    const matchweekLeagueState = () => leagueState;
+    let revealState = null, revealLockHorizon = Infinity;
     let navGeneration = 0, currentView = view, panelGeneration = 0, mountedKey = null;
     const LEGACY_VIEWS = { schedule: "picks", today: "picks", mates: "picks" };
     const normaliseView = (view) => LEGACY_VIEWS[view] || view;
@@ -300,7 +317,6 @@ function switching({ seasonDelay = 0, roundDelay = 0, cachedRounds = {}, cachedL
     ${liftLine("const revealPeriod =")}
     ${lift("function revealUsable(state)")}
     ${lift("function currentRoundReveal()")}
-    const forgetPicksRound = () => {};
     ${lift("function forgetRevealState()")}
     ${lift("function hydrateRevealState()")}
     ${lift("function lockHorizonOf(state)")}
@@ -311,7 +327,13 @@ function switching({ seasonDelay = 0, roundDelay = 0, cachedRounds = {}, cachedL
     ${liftLine("const bumpStamp =")}
     ${lift("function dropRetainedPanels(code = null)")}
     ${lift("function hydrateCachedLeague()")}
-    ${lift("async function loadRevealState(generation = navGeneration)")}
+    ${lift("function picksRoundUsable(state, code = activeLeague, period = picksPeriod())")}
+    ${liftLine("const picksRoundKey =")}
+    ${liftLine("const picksPeriod =")}
+    ${lift("function claimPicksRound(code, period)")}
+    ${liftLine("const releasePicksRound =")}
+    ${lift("function forgetPicksRound()")}
+    ${lift("function ensurePicksRound()")}
     ${lift("async function revalidateRevealAfterSwitch(code)")}
     ${lift("async function switchLeaguePill(code)")}
     ${lift("function setActiveLeague(code, refresh = true)")}
@@ -432,7 +454,7 @@ test("both routes hydrate from cache and revalidate through the same two helpers
   const hydrate = lift("function hydrateRevealState()");
   assert.match(hydrate, /currentRoundReveal\(\)/);
   assert.match(hydrate, /lockHorizonOf/);
-  for (const banned of ["await", "fetch", "api(", "loadRevealState"]) {
+  for (const banned of ["await", "fetch", "api(", "ensurePicksRound"]) {
     assert.ok(!hydrate.includes(banned), `hydrating from cache must not ${banned}`);
   }
 });
@@ -501,7 +523,7 @@ test("the context rule is one rule, asked wherever a pick could be drawn", () =>
   assert.match(rule, /state\.code === activeLeague/);
   assert.match(rule, /String\(state\.period\) === String\(period\)/);
   // Every path that can put a name or a prediction on screen goes through it.
-  for (const caller of ["async function loadRevealState(generation = navGeneration)",
+  for (const caller of ["function ensurePicksRound()",
                         "async function refreshRevealOnForeground()",
                         "function currentRoundReveal()"]) {
     assert.match(lift(caller), /revealUsable/, caller);
@@ -529,7 +551,7 @@ test("the retained panels are filed under the week being browsed, and nothing el
 
 test("the reveal reads the current round, never the week being browsed", () => {
   assert.match(liftLine("const revealPeriod ="), /leagueState\?\.currentPeriod/);
-  const loader = lift("async function loadRevealState(generation = navGeneration)");
+  const loader = lift("function ensurePicksRound()");
   assert.doesNotMatch(loader, /selectedPeriod/, "the Weekly selection is not consulted");
 });
 
@@ -540,7 +562,7 @@ test("opening Mates' Picks leaves the Weekly selection exactly where it was", ()
   const body = branch.slice(0, branch.indexOf("if (!needsRound) return;"));
   assert.doesNotMatch(body, /selectedPeriod =/);
   assert.doesNotMatch(body, /roundState =/);
-  const loader = lift("async function loadRevealState(generation = navGeneration)");
+  const loader = lift("function ensurePicksRound()");
   assert.doesNotMatch(loader, /roundState =/, "and the Weekly state is never overwritten");
   assert.match(loader, /revealState =/, "Mates' Picks keeps its own");
 });

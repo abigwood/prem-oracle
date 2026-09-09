@@ -134,7 +134,17 @@ test("T3 · anything still naming the removed segment is answered with Weekly", 
     assert.equal(box.normaliseLeagueTab(odd), "matchday", String(odd));
   }
   // And the live tab only ever changes through that door.
-  assert.match(APP, /leagueTab = normaliseLeagueTab\(wanted\);/);
+  // Normalised once, where it is read, so nothing downstream ever sees the
+  // raw value — not the active marker, not the status, not the request.
+  assert.match(APP, /const wanted = normaliseLeagueTab\(roundTab\.dataset\.roundTab\);/);
+  const handler = APP.slice(APP.indexOf("const roundTab = event.target.closest"));
+  const body = handler.slice(0, handler.indexOf("const roundMd ="));
+  // Read once, on the line that normalises it, and never again.
+  assert.equal((body.match(/roundTab\.dataset\.roundTab/g) || []).length, 1,
+    "the raw value is read more than once");
+  for (const downstream of ["markSegment(wanted)", 'wanted === "matchday"', 'wanted === "season"']) {
+    assert.ok(body.includes(downstream), `${downstream} does not use the normalised tab`);
+  }
 });
 
 // --- 4 · one list, counted once -------------------------------------------
@@ -371,8 +381,227 @@ test("T7 · nothing polls, and the removed segment left no timer behind", () => 
 
 test("T7 · My Picks still makes at most one coalesced round read", () => {
   const fn = sourceOf("ensurePicksRound");
-  assert.match(fn, /if \(held\) \{/);
+  // What is held paints at once, and is revalidated anyway.
+  assert.match(fn, /if \(held\) picksRound = held;/);
+  assert.ok(!fn.includes("if (held) {"), "a cached round short-circuits the revalidation");
   assert.match(fn, /const flying = picksRoundFlights\.get\(key\);/);
   assert.match(fn, /if \(flying\) return flying;/);
   assert.match(fn, /if \(code !== activeLeague \|\| String\(period\) !== String\(picksPeriod\(\)\)\) return;/);
+});
+
+// --- 8 · Sol's report-gate findings, in production sequence ---------------
+
+/**
+ * The read layer with the network under the test's control. Mirrors the
+ * picksround harness, kept here so these findings read as one sequence.
+ */
+function readBox({ cached = null, code = "AAA", codes = ["AAA", "BBB"], view = "picks" } = {}) {
+  const dom = new JSDOM(`<!doctype html><body><div id="app"></div></body>`);
+  const reads = [];
+  const round = (c, period, reveal) => ({
+    code: c, period, matchday: Number(period),
+    table: [{ uid: "u1", nick: "Adam", pts: 12, exact: 1 }],
+    ...(reveal ? { reveal } : {}),
+  });
+  const box = load(["ensurePicksRound", "picksRoundUsable", "forgetPicksRound", "picksPeriod",
+    "picksRoundKey", "revealUsable", "revealPeriod", "lockHorizonOf", "currentRoundReveal",
+    "cacheRoundState", "cachedRoundState", "roundCacheKey", "roundStatePath",
+    "matchweekLeagueState", "matchweekSlate", "syncShareLabel", "shareCardState",
+    "shareSurface", "shareRound", "sharePeriod", "shareIconButton", "normaliseView",
+    "LEGACY_VIEWS", "weeklySharePublished", "weeklyShareStatus", "weeklyTerminalCount",
+    "seasonShareFreshness", "finalScore", "isVoidFixture", "isPostponed", "VOID_STATUSES",
+    "noteMatchweekCountMismatch", "matchweekMismatchLines"], {
+    document: dom.window.document,
+    API: "https://api.test",
+    navGeneration: 0,
+    render: () => {},
+    picksRound: null,
+    picksRoundFlights: new Map(),
+    revealState: null,
+    revealLockHorizon: Infinity,
+    roundState: null,
+    roundStates: cached ? { [`${code}:7`]: cached } : {},
+    currentView: view,
+    leagueTab: "matchday",
+    activeLeague: code,
+    leagueCodes: codes,
+    leagueStates: {},
+    fixtures: [],
+    selectedPeriod: null,
+    matchweekCountMismatches: new Map(),
+    currentPeriodKey: () => "7",
+    periodLabel: (p) => `Matchweek ${p}`,
+    uid: () => "u1",
+    leagueState: { code, name: code === "AAA" ? "Sunday Six" : "Bury Legends",
+      currentPeriod: "7",
+      currentSlate: { period: "7", matchweek: 7, status: "published", fixtureIds: ["f1"], count: 1 } },
+    fetchState: (path) => new Promise((resolve, reject) => reads.push({ path, resolve, reject })),
+    api: (path) => new Promise((resolve, reject) => reads.push({ path, resolve, reject })),
+    escapeHTML: (v) => String(v ?? ""),
+  });
+  return { box, reads, round,
+    readsFor: (c) => reads.filter((r) => r.path.includes(`code=${c}`)).length };
+}
+const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+// A · the pre-lock cache that would otherwise never be revalidated ---------
+
+test("A1 · a cold launch on a pre-lock cache paints it, then asks exactly once", async () => {
+  // The exact shape Sol names: a valid, in-context round captured BEFORE
+  // kick-off, so it carries an empty reveal. Nothing about it is stale by the
+  // old test — and it contains none of the picks the viewer came back for.
+  const app = readBox({});
+  const preLock = app.round("AAA", "7", []);
+  app.box.cacheRoundState("AAA", "7", preLock);
+
+  app.box.ensurePicksRound();
+  // It is adopted at once: the table is in hand before any answer lands.
+  assert.ok(app.box.evalIn("picksRound"), "the cache did not paint");
+  // And exactly one revalidation is in flight for it.
+  assert.equal(app.reads.length, 1, `${app.reads.length} reads for one entry`);
+  assert.match(app.reads[0].path, /code=AAA/);
+  assert.match(app.reads[0].path, /period=7/);
+
+  // The answer carries the picks the cache could not have had.
+  app.reads[0].resolve(app.round("AAA", "7", [{ id: "f1", lockAt: "2020-01-01T00:00:00Z",
+    settled: false, picks: [{ uid: "u2", nick: "Bex", p1: 1, p2: 0 }] }]));
+  await settle();
+  assert.equal(app.reads.length, 1, "a second read was issued");
+  assert.ok(app.box.currentRoundReveal(), "the reveal never arrived");
+  assert.equal(app.box.currentRoundReveal().reveal.length, 1);
+});
+
+test("A2 · a warm entry with a valid cache still revalidates exactly once", () => {
+  const app = readBox({});
+  app.box.cacheRoundState("AAA", "7", app.round("AAA", "7", []));
+  app.box.ensurePicksRound();
+  assert.equal(app.reads.length, 1);
+});
+
+test("A3 · an entry with no cache acknowledges first, then asks exactly once", () => {
+  const app = readBox({});
+  assert.equal(app.box.evalIn("picksRound"), null, "an empty entry claimed a table");
+  app.box.ensurePicksRound();
+  assert.equal(app.reads.length, 1);
+});
+
+test("A4 · the share table and the reveal are served by the same request", async () => {
+  const app = readBox({});
+  app.box.ensurePicksRound();
+  assert.equal(app.reads.length, 1);
+  app.reads[0].resolve(app.round("AAA", "7", [{ id: "f1", lockAt: "2020-01-01T00:00:00Z",
+    settled: true, picks: [{ uid: "u2", nick: "Bex", p1: 1, p2: 0, pts: 5 }] }]));
+  await settle();
+  // One answer, both consumers.
+  assert.ok(app.box.evalIn("picksRound"), "the share table did not land");
+  assert.ok(app.box.currentRoundReveal(), "the reveal did not land");
+  assert.equal(app.reads.length, 1, "the two consumers cost two requests");
+});
+
+test("A5 · an answer for a context we have left cannot repaint it", async () => {
+  // Left the league.
+  const gone = readBox({});
+  gone.box.ensurePicksRound();
+  gone.box.evalIn(`activeLeague = "BBB";
+    leagueState = { code: "BBB", name: "Bury Legends", currentPeriod: "7",
+      currentSlate: { period: "7", matchweek: 7, status: "published", fixtureIds: ["f9"], count: 1 } };
+    forgetPicksRound();`);
+  gone.reads[0].resolve(gone.round("AAA", "7", []));
+  await settle();
+  assert.equal(gone.box.evalIn("picksRound"), null, "AAA's answer landed under BBB");
+
+  // Left the screen: the generation moved on while the read was in flight.
+  const away = readBox({});
+  away.box.ensurePicksRound();
+  away.box.evalIn("navGeneration += 1;");
+  away.reads[0].resolve(away.round("AAA", "7", []));
+  await settle();
+  assert.equal(away.box.evalIn("picksRound"), null, "a stale generation repainted");
+});
+
+test("A6 · entry asks, and nothing schedules a second ask", () => {
+  const fn = sourceOf("ensurePicksRound");
+  assert.ok(!fn.includes("setInterval"), "the entry read polls");
+  assert.ok(!fn.includes("setTimeout"), "the entry read schedules a retry");
+  // The boot path owes the same one revalidation a tab entry does.
+  assert.match(APP, /if \(normaliseView\(currentView\) === "picks"\) ensurePicksRound\(\);/);
+});
+
+// B · no competition calendar, in any state -------------------------------
+
+test("B1 · preseason renders the league's own state and zero fixtures", () => {
+  const box = picksBox({ ids: [] });
+  const html = box.picksView();
+  assert.ok(!html.includes("data-pick-row"), "preseason drew fixture cards");
+  assert.ok(!html.includes("proof-row"), "preseason drew calendar rows");
+  // None of the calendar's fixtures reach the screen by any route.
+  for (const name of ["Arsenal", "Chelsea", "Spurs", "Everton", "Leeds", "Wolves"]) {
+    assert.ok(!html.includes(name), `${name} came from the competition calendar`);
+  }
+});
+
+test("B1 · the loading and unpublished states carry no fixtures either", () => {
+  const noSlate = picksBox({ ids: [] }).picksView();
+  assert.ok(!noSlate.includes("data-match-card"), "an unpublished slate drew a card");
+  // And the renderer that used to do it is gone entirely.
+  assert.ok(!APP.includes("function preseasonRow"), "the calendar row survived");
+  assert.ok(!APP.includes("proof-of-life"), "the calendar list survived");
+  const state = sourceOf("preseasonState");
+  assert.ok(!state.includes("fixtures"), "preseason still reads the calendar");
+  assert.ok(!state.includes("teamBadge"), "preseason still draws badges");
+  assert.match(state, /The season hasn’t started for this league\./);
+});
+
+// C · a link naming a league the viewer already plays ----------------------
+
+test("C1 · a linked membership is selected before My Picks renders", () => {
+  // The boot order, read from the source: the switch happens instead of the
+  // ordinary first paint, so nothing of the stored league is drawn first.
+  const boot = APP.slice(APP.indexOf("Promise.all([loadFixtures(), hydrateIdentity()])"));
+  const body = boot.slice(0, boot.indexOf("registerServiceWorker()"));
+  assert.match(body, /const linked = inviteCode && leagueCodes\.includes\(inviteCode\) && inviteCode !== activeLeague/);
+  assert.match(body, /if \(linked\) setActiveLeague\(linked\);/);
+  assert.match(body, /else render\(\);/);
+  // Selected before the paint, not after it.
+  assert.ok(body.indexOf("if (linked) setActiveLeague(linked);") < body.indexOf("ensurePicksRound()"));
+  // A membership is never sent to the join flow.
+  assert.match(body, /if \(inviteCode && !leagueCodes\.includes\(inviteCode\)\) \{ launchRouted = true; currentView = "league"; \}/);
+});
+
+test("C1 · the switch takes the ordinary safe path, with all its guards", () => {
+  const fn = sourceOf("setActiveLeague");
+  assert.match(fn, /forgetRevealState\(\)/, "the held round is not dropped");
+  assert.match(fn, /localStorage\.setItem\(STORAGE\.activeLeague, activeLeague\)/, "not persisted");
+  assert.match(fn, /hydrateCachedLeague\(\)/, "the cache is not hydrated");
+  assert.match(fn, /revalidateRevealAfterSwitch\(/, "no revalidation is owed");
+});
+
+test("C2 · each removed route opens My Picks on the linked league", () => {
+  const box = load(["requestedView", "normaliseView", "LEGACY_VIEWS"], { URLSearchParams });
+  for (const view of ["mates", "today", "schedule"]) {
+    assert.equal(box.requestedView(`?league=BBB&view=${view}`), "picks", view);
+  }
+  // And the league on that link is a membership, so it is selected rather
+  // than offered as an invitation.
+  const app = readBox({ code: "BBB", codes: ["AAA", "BBB"] });
+  assert.equal(app.box.picksPeriod(), "7");
+  app.box.ensurePicksRound();
+  assert.equal(app.readsFor("BBB"), 1, "the linked league was not read");
+  assert.equal(app.readsFor("AAA"), 0, "the stored league was read anyway");
+});
+
+test("C2 · the stored league's names and picks never paint under the linked one", async () => {
+  const app = readBox({ code: "BBB", codes: ["AAA", "BBB"] });
+  // AAA's round is in cache from the previous session. It must not be usable.
+  app.box.cacheRoundState("AAA", "7", app.round("AAA", "7", [{ id: "f1",
+    lockAt: "2020-01-01T00:00:00Z", settled: true,
+    picks: [{ uid: "u9", nick: "SomebodyFromAAA", p1: 3, p2: 3, pts: 5 }] }]));
+  app.box.ensurePicksRound();
+  assert.equal(app.reads.length, 1, "the linked league was not revalidated exactly once");
+  assert.equal(app.box.currentRoundReveal(), null, "AAA's round was adopted under BBB");
+  assert.equal(app.box.evalIn("picksRound"), null, "AAA's table landed under BBB");
+  // Even AAA's own answer, arriving late, is refused for BBB.
+  app.reads[0].resolve(app.round("AAA", "7", []));
+  await settle();
+  assert.equal(app.box.currentRoundReveal(), null, "a foreign answer was adopted");
 });

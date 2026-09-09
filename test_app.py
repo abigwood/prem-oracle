@@ -870,8 +870,12 @@ class CustomMixTests(unittest.TestCase):
     def test_my_picks_makes_at_most_one_coalesced_round_read(self):
         fn = self.app[self.app.index("function ensurePicksRound()"):]
         fn = fn[:fn.index("\n}\n")]
-        # Nothing is asked when this device already holds the week.
-        self.assertIn("if (held) {", fn)
+        # What this device already holds paints at once...
+        self.assertIn("if (held) picksRound = held;", fn)
+        # ...and is revalidated anyway. A cache captured before kick-off is a
+        # valid round with no mates' picks in it, and the horizon after
+        # kick-off is Infinity, so nothing else would ever refresh it.
+        self.assertNotIn("if (held) {", fn)
         # An entry that finds a read already running joins it.
         self.assertIn("const flying = picksRoundFlights.get(key);", fn)
         self.assertIn("if (flying) return flying;", fn)
@@ -1459,11 +1463,15 @@ class WeeklyLoopTests(unittest.TestCase):
         # and its own empty state instead.
         self.assertIn("Waiting on your host to publish this week", self.app)
         self.assertIn("No league fixtures selected yet.", self.app)
-        self.assertIn("Fixtures are loading for the new season. Picks open when your league's weekly slate is published.", self.app)
+        # v1.7.1: the preseason state is the league's, not the competition's.
+        # It carries no fixtures at all, so there is no proof-of-life row and
+        # no calendar copy to check for.
+        self.assertIn("The season hasn\u2019t started for this league.", self.app)
+        self.assertIn("Picks open when your league\u2019s weekly slate is published.", self.app)
         self.assertIn(">Create a league</button>", self.app)
         self.assertIn(">Join a league</button>", self.app)
-        self.assertIn("function preseasonRow(match)", self.app)
-        self.assertIn(".proof-row", self.css)
+        self.assertNotIn("function preseasonRow(match)", self.app)
+        self.assertNotIn("proof-of-life", self.app)
 
     # --- 6. v1.4.1 fixes folded into the release -------------------------
 

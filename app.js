@@ -939,24 +939,35 @@ function ensurePicksRound() {
   const code = activeLeague;
   const period = picksPeriod();
   if (!code || period == null) return null;
-  // Anything this device already holds for this league and this week.
+  // Anything this device already holds for this league and this week goes up
+  // NOW, so the screen is never blank while the read below runs.
   const held = picksRoundUsable(picksRound, code, period)
     || picksRoundUsable(cachedRoundState(code, period), code, period)
     || picksRoundUsable(currentRoundReveal(), code, period);
-  if (held) {
-    picksRound = held;
-    return null;
-  }
+  if (held) picksRound = held;
+  // ...and it is painted, not trusted. A cache captured BEFORE kick-off is a
+  // complete, in-context, perfectly valid round that contains no mates'
+  // predictions at all, because there were none to send. Returning early on
+  // it was the bug: after kick-off the horizon is Infinity — there is no
+  // future boundary left — so the foreground check never fired either, and
+  // the reveal a viewer came back for would never arrive. Entry revalidates
+  // once, every time, whatever is in hand.
   const key = picksRoundKey(code, period);
+  // One read between them. A second entry joins the flight already running
+  // rather than starting another, which is what keeps "never two round reads"
+  // true now that entry always asks.
   const flying = picksRoundFlights.get(key);
   if (flying) return flying;
   if (!API) return null;
+  const generation = navGeneration;
   const flight = fetchState(roundStatePath(code, period))
     .then((state) => {
       cacheRoundState(code, period, state);
-      // A response for a league or a week we have since left is worth caching
-      // and nothing else: it may not enable the control or draw a card.
+      // A response for a league, a week or a screen we have since left is
+      // worth caching and nothing else: it may not enable the control, draw a
+      // card, or repaint anything at all.
       if (code !== activeLeague || String(period) !== String(picksPeriod())) return;
+      if (generation !== navGeneration) return;
       picksRound = picksRoundUsable(state, code, period);
       // The same response the reveal needs. Adopting it here is what keeps
       // "one coalesced read" true while My Picks owns the comparison: the
@@ -964,13 +975,17 @@ function ensurePicksRound() {
       if (revealUsable(state)) {
         revealState = state;
         revealLockHorizon = lockHorizonOf(state);
+        // The picks the viewer came back for may have arrived in this answer.
+        render();
       }
       syncShareLabel();
     })
     .catch(() => {
       if (code !== activeLeague || String(period) !== String(picksPeriod())) return;
-      picksRound = null;
-      syncShareLabel();
+      if (generation !== navGeneration) return;
+      // A cached round already on screen beats an error drawn over the top of
+      // it: the revalidation failing is not a reason to lose what we had.
+      if (!picksRound) syncShareLabel();
     })
     .finally(() => {
       if (picksRoundFlights.get(key) === flight) picksRoundFlights.delete(key);
@@ -2374,27 +2389,24 @@ function onboardingState() {
     </div>`;
 }
 
-/** Proof of life before anything is pickable: real fixtures, badges and dates. */
-function preseasonState() {
-  const upcoming = fixtures
-    .filter((fixture) => Date.parse(fixture.startAt || "") > Date.now())
-    .slice(0, 8);
+/**
+ * Nothing is pickable yet — said in the league's own terms, with no fixtures.
+ *
+ * This used to be "proof of life": up to eight real fixtures pulled from the
+ * competition calendar, with badges and kick-off times. That is the exact
+ * substitution the Matchweek work removed everywhere else — My Picks shows
+ * the selected league's published slate or it shows nothing, and a screen
+ * offering eight games nobody has been asked to predict reads as a week that
+ * is already under way. It is one card and zero fixture rows.
+ */
+function preseasonState(state = matchweekLeagueState()) {
+  const league = matchweekLeagueName(state);
   return `<div class="section-head">
-      <div><span class="eyebrow">${escapeHTML(competitionName())} 2026/27</span><h2>Coming up</h2>
-      <p>Fixtures are loading for the new season. Picks open when your league's weekly slate is published.</p></div>
+      <div><span class="eyebrow">${escapeHTML(league)}</span><h2>My Picks</h2>
+      <p class="pick-summary" data-pick-summary>Nothing to predict yet</p></div>
     </div>
-    ${upcoming.length
-      ? `<div class="proof-of-life">${upcoming.map(preseasonRow).join("")}</div>`
-      : `<div class="empty"><strong>Fixtures on their way</strong><p>Pull down in a moment — the season list is still loading.</p></div>`}`;
-}
-
-function preseasonRow(match) {
-  const code = competitionOfFixture(match.id) || DEFAULT_COMPETITION;
-  return `<div class="proof-row">
-    <span class="proof-teams">${teamBadge(match.player1)}<em>v</em>${teamBadge(match.player2)}</span>
-    <span class="comp-chip comp-chip-${code.toLowerCase()}">${escapeHTML(competitionMeta(code).chip)}</span>
-    <span class="proof-date">${escapeHTML(matchTime(match))}</span>
-  </div>`;
+    <div class="launch-card"><strong>The season hasn’t started for this league.</strong>
+      <p>Picks open when your league’s weekly slate is published.</p></div>`;
 }
 
 /**
@@ -3099,7 +3111,7 @@ function picksView() {
     // "there is nothing to choose from yet" is the launch tree's question,
     // and it is only worth asking once there is no slate to show.
     if (launchBranch() === "preseason") {
-      return `${hero()}${installNotice()}${preseasonState()}`;
+      return `${installNotice()}${invite}${preseasonState(state)}${matchweekContext(state)}`;
     }
     return `${installNotice()}${invite}
       ${head(state.name, pickActionSummary([], { published: false }), [])}
@@ -7083,7 +7095,11 @@ document.addEventListener("click", async (event) => {
   }
   const roundTab = event.target.closest("[data-round-tab]");
   if (roundTab) {
-    const wanted = roundTab.dataset.roundTab;
+    // Normalised the moment it is read, and nothing below ever sees the raw
+    // value. A retained node still carrying the removed segment must behave
+    // exactly as Weekly — same active marker, same status, same request —
+    // rather than as Weekly with a mates-shaped decision path behind it.
+    const wanted = normaliseLeagueTab(roundTab.dataset.roundTab);
     // Reopening the week that is already showing is the picker, not a swap.
     if (wanted === "matchday" && leagueTab === "matchday") {
       // Opening the dropdown is not a screen change. No global render, no
@@ -7093,9 +7109,7 @@ document.addEventListener("click", async (event) => {
     }
     // The segment moves in the SAME task as the tap. Everything after this is
     // allowed to take its time; this is not.
-    // Normalised on the way in: a retained node or an old link may still
-    // name the removed segment, and it must not become the live tab.
-    leagueTab = normaliseLeagueTab(wanted);
+    leagueTab = wanted;
     // The real close path, not just a flag: it voids any pending picker build,
     // clears the island and corrects aria-expanded.
     closeWeeklyPicker();
@@ -7626,13 +7640,28 @@ function hydrateCachedLeague() {
 Promise.all([loadFixtures(), hydrateIdentity()]).then(() => {
   // The launch decision tree (§9.7). An invite in the URL always wins — the
   // viewer arrived to join something. Then a view the link named, including
-  // the two this build no longer has a tab for, which resolve to My Picks in
-  // the league the same link selected. Otherwise the branch decides.
+  // the ones this build no longer has a tab for. Otherwise the branch decides.
   const asked = requestedView();
+  // A link naming a league the viewer ALREADY plays is not an invitation: it
+  // is a link to that league. It has to select it, or the link opens somebody
+  // else's week under the previously stored league's name — the two leagues
+  // sharing a fixture id is exactly the case where that is not merely untidy.
+  // Through setActiveLeague, so it takes the same safe path as a pill: the
+  // held round dropped, the choice persisted, the cache hydrated, and one
+  // revalidation owed — never a join flow.
+  const linked = inviteCode && leagueCodes.includes(inviteCode) && inviteCode !== activeLeague
+    ? inviteCode
+    : null;
   if (inviteCode && !leagueCodes.includes(inviteCode)) { launchRouted = true; currentView = "league"; }
   else if (asked) { launchRouted = true; currentView = asked; }
   else applyLaunchBranch();
-  render();
+  // The switch renders; without one, the ordinary first paint does.
+  if (linked) setActiveLeague(linked);
+  else render();
+  // A cold launch onto My Picks owes the same one revalidation an entry does.
+  // Without this the screen could stand on a cache captured before kick-off
+  // and never ask for the picks that have since been revealed.
+  if (normaliseView(currentView) === "picks") ensurePicksRound();
   registerServiceWorker();
   // A name this device has held since before the server could store one still
   // needs to get there — otherwise everyone already carrying a display name

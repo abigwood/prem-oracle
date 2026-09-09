@@ -25,7 +25,7 @@ function picksBox(over = {}) {
   const { document } = dom.window;
   const reads = [];
   const box = load(["ensurePicksRound", "picksRoundUsable", "forgetPicksRound", "picksPeriod",
-    "picksRoundKey", "shareRound", "sharePeriod",
+    "picksRoundKey", "shareRound", "sharePeriod", "revealUsable", "revealPeriod", "lockHorizonOf",
     "shareSurface", "shareCardState", "shareIconButton", "syncShareLabel", "normaliseView",
     "LEGACY_VIEWS", "weeklySharePublished", "weeklyShareStatus", "weeklyTerminalCount",
     "seasonShareFreshness", "matchweekLeagueState", "matchweekSlate", "cacheRoundState",
@@ -34,6 +34,10 @@ function picksBox(over = {}) {
     document,
     API: "https://api.test",
     // Mutable module state: the sandbox owns it, the lifted functions use it.
+    navGeneration: 0,
+    render: () => {},
+    revealState: null,
+    revealLockHorizon: Infinity,
     picksRound: null,
     picksRoundFlights: new Map(),
     currentView: "picks",
@@ -43,7 +47,6 @@ function picksBox(over = {}) {
     leagueStates: {},
     roundStates: {},
     roundState: null,
-    revealState: null,
     fixtures: [],
     selectedPeriod: null,
     matchweekCountMismatches: new Map(),
@@ -75,20 +78,24 @@ const settle = () => new Promise((resolve) => setImmediate(resolve));
 
 // --- cached: no read at all ------------------------------------------------
 
-test("P1 · a valid cached table is used immediately, and asks nothing", () => {
+test("P1 · a valid cached table paints at once, and is revalidated exactly once", () => {
   const app = picksBox({ roundStates: { "AAA:7": round("AAA", "7") } });
-  assert.equal(app.box.ensurePicksRound(), null, "a read was started anyway");
-  assert.equal(app.reads.length, 0, "the cache was not trusted");
+  app.box.ensurePicksRound();
+  // The cache is on screen immediately — the control is enabled before any
+  // answer comes back, so nothing waits on the network to look right.
   const share = app.box.shareCardState("weekly");
   assert.equal(share.ready, true, "a cached table did not enable the control");
   assert.match(share.label, /^Share Matchweek 7 standings$/);
+  // And it is revalidated anyway. A round cached BEFORE kick-off is valid,
+  // in-context and complete, and contains no mates' picks at all.
+  assert.equal(app.reads.length, 1, "the cache was trusted and never rechecked");
 });
 
-test("P1 · the matrix this device already holds counts as the cache", () => {
+test("P1 · the round this device already holds counts as the cache", () => {
   const app = picksBox({ currentRoundReveal: () => round("AAA", "7") });
-  assert.equal(app.box.ensurePicksRound(), null);
-  assert.equal(app.reads.length, 0);
-  assert.equal(app.box.shareCardState("weekly").ready, true);
+  app.box.ensurePicksRound();
+  assert.equal(app.box.shareCardState("weekly").ready, true, "the held round did not paint");
+  assert.equal(app.reads.length, 1, "one revalidation, whatever is in hand");
 });
 
 // --- cold: exactly one read, and the shell paints first --------------------
@@ -142,9 +149,10 @@ test("P3 · a second entry joins the read already running", async () => {
   assert.equal(third, first);
   app.reads[0].resolve(round("AAA", "7"));
   await settle();
-  // And once it has landed, a further entry asks nothing.
-  assert.equal(app.box.ensurePicksRound(), null);
-  assert.equal(app.reads.length, 1);
+  // Once it has landed the flight is cleared, so a later entry is a new
+  // entry: it paints what it holds and revalidates once, like any other.
+  app.box.ensurePicksRound();
+  assert.equal(app.reads.length, 2, "a later entry did not revalidate");
 });
 
 test("P3 · while it is in flight the control stays honest, not hidden", () => {
@@ -192,9 +200,10 @@ test("P5 · switching league drops the old table at once and asks for the new on
   `);
   assert.equal(app.box.shareCardState("weekly").ready, false, "AAA's table enabled BBB's control");
   assert.equal(app.box.shareRound("weekly"), null, "AAA's table answered for BBB");
+  const aaaBefore = app.reads_for("AAA");
   app.box.ensurePicksRound();
   assert.equal(app.reads_for("BBB"), 1);
-  assert.equal(app.reads_for("AAA"), 0, "the cached league was read again");
+  assert.equal(app.reads_for("AAA"), aaaBefore, "the league we left was read again");
 });
 
 test("P5 · rapid switching makes one read per league, never two for one", () => {

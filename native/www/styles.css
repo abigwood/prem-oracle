@@ -939,7 +939,7 @@ th.wins-col { font-size: .92rem; }
   display: grid;
   /* Four items now that Matchweek has folded into My Picks. Equal columns, so
      the bar divides evenly however wide the phone is. */
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(3, 1fr);
   align-items: center;
   height: var(--nav-total-height);
   min-height: var(--nav-total-height);

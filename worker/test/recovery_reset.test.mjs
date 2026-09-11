@@ -56,6 +56,17 @@ async function derive(secret, requestId, uid) {
   return makeRecovery((n) => mac.subarray(0, n));
 }
 
+// Mirror of deriveResumeTag — a SEPARATE domain, so it is independent of the
+// candidate. Lets the rotation test seed a claim's tag under one secret.
+async function resumeTag(secret, requestId, uid) {
+  const key = await crypto.subtle.importKey(
+    "raw", new TextEncoder().encode(String(secret ?? "")),
+    { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const mac = new Uint8Array(await crypto.subtle.sign("HMAC", key,
+    new TextEncoder().encode(`prem-oracle/recovery-reset-resume/v1\n${requestId}\n${uid}`)));
+  return Array.from(mac, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
 const recoveryFor = (store, uid) => [...store.entries()]
   .filter(([k]) => k.startsWith("recovery:"))
   .filter(([, v]) => JSON.parse(v) === uid)
@@ -212,7 +223,7 @@ function failingKV(store, failAt) {
 }
 
 test("12 · a crash at any mutation stage is a generic 500, and a retry converges", async () => {
-  for (let failAt = 1; failAt <= 6; failAt++) {
+  for (let failAt = 1; failAt <= 5; failAt++) {  // claim, recovery, delete-old, user, finalize
     const { store, code } = await seeded();
     const rid = UUID();
     const oldCode = JSON.parse(store.get("user:gift")).recovery;
@@ -228,6 +239,14 @@ test("12 · a crash at any mutation stage is a generic 500, and a retry converge
     const text = JSON.stringify(crashBody);
     assert.ok(!text.includes("crash") && !text.includes("recovery:") && !text.includes(expected) && !text.includes(SECRET));
 
+    // If the crash was after the claim write, it is a started record with a
+    // stable startedAt and a resume tag.
+    const startedClaim = store.has(`recovery-reset:${rid}`) ? JSON.parse(store.get(`recovery-reset:${rid}`)) : null;
+    if (startedClaim) {
+      assert.equal(startedClaim.status, "started", `failAt=${failAt}: claim not marked started`);
+      assert.ok(startedClaim.resumeTag, `failAt=${failAt}: claim missing resume tag`);
+    }
+
     const envOk = { KV: memoryKV(store), RECOVERY_ADMIN_SECRET: SECRET };
     const done = await call(envOk, { requestId: rid, leagueCode: code, memberUid: "gift" });
     assert.equal(done.status, 200, `failAt=${failAt} retry`);
@@ -237,8 +256,11 @@ test("12 · a crash at any mutation stage is a generic 500, and a retry converge
     assert.equal(JSON.parse(store.get("user:gift")).recovery, expected, `failAt=${failAt}: record not updated`);
     if (oldCode !== expected) assert.equal(store.has(`recovery:${oldCode}`), false, `failAt=${failAt}: old mapping survived`);
     const audit = JSON.parse(store.get(`recovery-reset:${rid}`));
+    assert.equal(audit.status, "completed", `failAt=${failAt}: audit not completed`);
     assert.ok(audit.completedAt, `failAt=${failAt}: audit not finalised`);
     assert.equal(audit.mapped, undefined, `failAt=${failAt}: transient flag leaked into the final audit`);
+    assert.equal(audit.resumeTag, undefined, `failAt=${failAt}: resume tag leaked into completed audit`);
+    if (startedClaim) assert.equal(audit.startedAt, startedClaim.startedAt, `failAt=${failAt}: startedAt not preserved`);
   }
 });
 
@@ -249,10 +271,15 @@ test("13 · the same requestId replays the same code, replayed:true, one rotatio
   const rid = UUID();
   const first = await (await call(env, { requestId: rid, leagueCode: code, memberUid: "gift" })).json();
   assert.equal(first.replayed, false);
+  const auditAfterFirst = JSON.parse(store.get(`recovery-reset:${rid}`));
   const second = await (await call(env, { requestId: rid, leagueCode: code, memberUid: "gift" })).json();
   assert.equal(second.recovery, first.recovery);
   assert.equal(second.replayed, true);
   assert.deepEqual(recoveryFor(store, "gift"), [first.recovery], "a replay minted a second credential");
+  // A replay preserves both timestamps — it does not rewrite the audit at all.
+  const auditAfterReplay = JSON.parse(store.get(`recovery-reset:${rid}`));
+  assert.equal(auditAfterReplay.startedAt, auditAfterFirst.startedAt);
+  assert.equal(auditAfterReplay.completedAt, auditAfterFirst.completedAt);
 });
 
 // --- 14 · a requestId cannot be reused for another target ------------------
@@ -276,7 +303,10 @@ test("15 · the audit record carries the required fields and no credential", asy
   const body = await (await call(env, { requestId: rid, leagueCode: code, memberUid: "gift" })).json();
   const audit = JSON.parse(store.get(`recovery-reset:${rid}`));
   assert.deepEqual(Object.keys(audit).sort(),
-    ["action", "actor", "completedAt", "leagueCode", "requestId", "route", "targetNick", "targetUid"]);
+    ["action", "actor", "completedAt", "leagueCode", "requestId", "route", "startedAt", "status", "targetNick", "targetUid"]);
+  assert.equal(audit.status, "completed");
+  assert.ok(audit.startedAt);
+  assert.equal(audit.resumeTag, undefined);
   assert.equal(audit.action, "recovery-reset");
   assert.equal(audit.route, "/admin/recovery-reset");
   assert.equal(audit.requestId, rid);
@@ -381,29 +411,52 @@ test("A · a completed replay after the secret is rotated refuses, no mutation",
   assert.deepEqual(recoveryFor(store, "gift"), [first.recovery]);
 });
 
-test("A · an incomplete op resumed under a rotated secret does not mint a second code", async () => {
+test("E · mapping written, not completed, secret rotated: retry refuses, no second code", async () => {
   const { store, code } = await seeded();
   const rid = UUID();
-  const oldCode = JSON.parse(store.get("user:gift")).recovery;
-  // Simulate attempt-1 under secret-A: mapping written and flagged, not
-  // completed (crash before the user update).
+  // Attempt-1 under secret-A got as far as: a started claim (resume tag under
+  // secret-A) and the candidate mapping written — but crashed before
+  // completion. This is precisely the gap E names.
   const candA = await derive("secret-A", rid, "gift");
+  const tagA = await resumeTag("secret-A", rid, "gift");
   store.set(`recovery:${candA}`, JSON.stringify("gift"));
   store.set(`recovery-reset:${rid}`, JSON.stringify({
     action: "recovery-reset", route: "/admin/recovery-reset", requestId: rid,
-    leagueCode: code, targetUid: "gift", targetNick: "The Gift", actor: "recovery-admin", mapped: true,
+    leagueCode: code, targetUid: "gift", targetNick: "The Gift", actor: "recovery-admin",
+    status: "started", startedAt: "2026-01-01T00:00:00.000Z", resumeTag: tagA,
   }));
   const before = snapshot(store);
-  // Resume under secret-B.
+  // The secret is rotated, then the same requestId is retried.
   const envB = { KV: memoryKV(store), RECOVERY_ADMIN_SECRET: "secret-B" };
   const res = await call(envB, { requestId: rid, leagueCode: code, memberUid: "gift" }, { auth: "secret-B" });
   assert.equal(res.status, 409);
   assert.match((await res.json()).error, /cannot be safely resumed after a credential change/);
   assert.deepEqual(snapshot(store), before, "the rotated-secret resume mutated state");
-  // No secret-B credential was created; only the secret-A candidate exists.
+  // The original candidate mapping remains; no secret-B credential was created.
+  assert.equal(JSON.parse(store.get(`recovery:${candA}`)), "gift", "the original mapping was disturbed");
   const candB = await derive("secret-B", rid, "gift");
-  assert.equal(store.has(`recovery:${candB}`), false, "a second credential was minted");
-  assert.ok(oldCode); // sanity
+  assert.equal(store.has(`recovery:${candB}`), false, "a second credential was created");
+});
+
+test("F · the audit goes started -> completed, dropping the resume tag", async () => {
+  const { store, code } = await seeded();
+  const rid = UUID();
+  // Stop right after the claim write (op1 = claim, op2 = recovery put fails).
+  const envFail = { KV: failingKV(store, 2), RECOVERY_ADMIN_SECRET: SECRET };
+  await call(envFail, { requestId: rid, leagueCode: code, memberUid: "gift" });
+  const started = JSON.parse(store.get(`recovery-reset:${rid}`));
+  assert.equal(started.status, "started");
+  assert.ok(started.startedAt);
+  assert.ok(started.resumeTag);
+  assert.equal(started.completedAt, undefined);
+  // Complete it; startedAt is preserved and the resume tag is gone.
+  const envOk = { KV: memoryKV(store), RECOVERY_ADMIN_SECRET: SECRET };
+  await call(envOk, { requestId: rid, leagueCode: code, memberUid: "gift" });
+  const done = JSON.parse(store.get(`recovery-reset:${rid}`));
+  assert.equal(done.status, "completed");
+  assert.equal(done.startedAt, started.startedAt, "startedAt not preserved");
+  assert.ok(done.completedAt);
+  assert.equal(done.resumeTag, undefined, "the resume tag survived into the completed audit");
 });
 
 // --- B · candidate ownership is checked on every attempt -------------------
@@ -439,6 +492,10 @@ test("C · malformed or oversized identifiers are refused with no mutation", asy
     { requestId: UUID(), leagueCode: "TOOLONGCODE", memberUid: "gift" },
     { requestId: UUID(), leagueCode: code, memberUid: "u".repeat(200) },
     { requestId: UUID(), leagueCode: code, exactNick: "n".repeat(300) },
+    // 8-4-4-4-12 hex, but an invalid version (6) and variant (1) nibble.
+    { requestId: "12345678-1234-6234-1234-123456789012", leagueCode: code, memberUid: "gift" },
+    // One character past normNick()'s 24 — refused, never truncated to match.
+    { requestId: UUID(), leagueCode: code, exactNick: "n".repeat(25) },
   ];
   for (const body of cases) {
     const res = await call(env, body);

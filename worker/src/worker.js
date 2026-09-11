@@ -1057,13 +1057,17 @@ async function kickMember(env, body) {
 
 const RECOVERY_RESET_DOMAIN = "prem-oracle/recovery-reset/v1";
 const RECOVERY_AUDIT_PREFIX = "recovery-reset:";
-// A caller-generated v-anything UUID; and a league code in the app's own
-// alphabet (makeCode: no I/O/0/1). Bounds on the two free-text identifiers keep
-// an oversized value from ever becoming a KV key or a stored field.
-const REQUEST_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// A caller-generated UUID with valid version (1–5) and variant (8–b) nibbles,
+// not merely 8-4-4-4-12 hex; and a league code in the app's own alphabet
+// (makeCode: no I/O/0/1). exactNick is bounded to normNick()'s own 24, so an
+// over-long value is refused rather than silently truncated into an "exact"
+// match. The two free-text identifiers are length-bounded before use as keys.
+const REQUEST_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const LEAGUE_CODE_RE = /^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{6}$/;
 const MEMBER_UID_MAX = 128;
-const EXACT_NICK_MAX = 200;
+const EXACT_NICK_MAX = 24;
+const EXACT_NICK_RAW_MAX = 256;
+const RESUME_TAG_DOMAIN = "prem-oracle/recovery-reset-resume/v1";
 
 /** Length-aware constant-time compare, so a wrong secret leaks no timing. */
 function safeEqual(a, b) {
@@ -1096,6 +1100,23 @@ async function deriveRecoveryCandidate(secret, requestId, uid) {
   return makeRecovery((n) => mac.subarray(0, n));
 }
 
+/**
+ * A transient resume tag: HMAC-SHA-256 under the admin secret over a SEPARATE
+ * domain and the same (requestId, uid). It is not the recovery candidate, not a
+ * hash of it, and nothing that can reconstruct it — a different domain makes the
+ * two HMACs independent. Stored on the started claim only, it lets a resume
+ * detect a secret rotation (the recomputed tag will not match) and refuse
+ * before deriving or writing any candidate. Removed at completion.
+ */
+async function deriveResumeTag(secret, requestId, uid) {
+  const key = await crypto.subtle.importKey(
+    "raw", new TextEncoder().encode(String(secret ?? "")),
+    { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const mac = new Uint8Array(await crypto.subtle.sign("HMAC", key,
+    new TextEncoder().encode(`${RESUME_TAG_DOMAIN}\n${requestId}\n${uid}`)));
+  return Array.from(mac, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
 async function recoveryReset(env, request, body) {
   const deny = (status, error) => json({ error }, status, env, { "cache-control": "no-store" });
   // Unconfigured or unauthenticated is indistinguishable from a route that is
@@ -1117,8 +1138,11 @@ async function recoveryReset(env, request, body) {
     if (!REQUEST_ID_RE.test(requestId)) return deny(400, "invalid requestId");
     if (!LEAGUE_CODE_RE.test(leagueCode)) return deny(400, "invalid leagueCode");
     if (memberUid.length > MEMBER_UID_MAX) return deny(400, "invalid memberUid");
-    if (exactNickRaw.length > EXACT_NICK_MAX) return deny(400, "invalid exactNick");
+    if (exactNickRaw.length > EXACT_NICK_RAW_MAX) return deny(400, "invalid exactNick");
     const exactNick = exactNickRaw.trim();
+    // Bounded to normNick()'s own 24: an over-long nick is refused, never
+    // truncated into a match it was not.
+    if (exactNick.length > EXACT_NICK_MAX) return deny(400, "invalid exactNick");
     if (!memberUid && !exactNick) return deny(400, "memberUid or exactNick required");
 
     const league = await kvGet(env, `league:${leagueCode}`);
@@ -1163,6 +1187,9 @@ async function recoveryReset(env, request, body) {
     if (prior && (prior.leagueCode !== leagueCode || prior.targetUid !== uid)) {
       return deny(409, "requestId already used for a different target");
     }
+    // The started claim's timestamp is stable across every resume and the
+    // completion; only the run that finishes stamps completedAt.
+    const startedAt = (prior && prior.startedAt) || new Date().toISOString();
 
     const candidate = await deriveRecoveryCandidate(env.RECOVERY_ADMIN_SECRET, requestId, uid);
     // OWNERSHIP CHECK ON EVERY ATTEMPT — initial, resume and replay. A crash
@@ -1173,45 +1200,47 @@ async function recoveryReset(env, request, body) {
       return deny(409, "candidate collides with another account; retry with a new requestId");
     }
 
-    const claim = () => ({
+    const identity = {
       action: "recovery-reset", route: "/admin/recovery-reset", requestId,
       leagueCode, targetUid: uid, targetNick: target.nick, actor: "recovery-admin",
-    });
+    };
     const success = (replayed) => json(
       { ok: true, requestId, leagueCode, memberUid: uid, recovery: candidate, replayed },
       200, env, { "cache-control": "no-store" });
 
-    if (prior && prior.completedAt) {
+    if (prior && prior.status === "completed") {
       // A completed replay is clean ONLY if the freshly derived candidate still
-      // matches the account. If the secret was rotated since, it will not —
-      // refuse rather than mint a fresh, second credential.
+      // matches the account. A rotated secret makes it not — refuse rather than
+      // mint a fresh, second credential. Both timestamps are left as they were.
       if (holder === uid && candidate === currentCode) return success(true);
       return deny(409, "operation cannot be replayed after a credential change");
     }
     if (prior) {
-      // An incomplete op is resumed. If its mapping was already written (mapped)
-      // but the candidate we now derive is not the one owned, the secret
-      // changed mid-operation — refuse rather than leave two live credentials.
-      if (prior.mapped && holder !== uid) {
+      // An incomplete op is resumed. Recompute the resume tag under the CURRENT
+      // secret and constant-time compare it to the one stored at claim time,
+      // BEFORE deriving or writing any candidate. A mismatch means the secret
+      // was rotated since — refuse with zero mutation, which closes the window
+      // where a crash between the mapping write and completion could otherwise
+      // leave a second live credential.
+      const tag = await deriveResumeTag(env.RECOVERY_ADMIN_SECRET, requestId, uid);
+      if (!prior.resumeTag || !safeEqual(tag, prior.resumeTag)) {
         return deny(409, "operation cannot be safely resumed after a credential change");
       }
     } else {
       if (candidate === currentCode) {
         return deny(409, "candidate collides with the current code; retry with a new requestId");
       }
-      // The claim, before any credential change, is what makes a
-      // same-requestId-different-target reuse fail even across a crash.
-      await kvPut(env, auditKey, claim());
+      // The started claim — written before any credential change — carries the
+      // transient resume tag, and makes a same-requestId-different-target reuse
+      // fail even across a crash.
+      const resumeTag = await deriveResumeTag(env.RECOVERY_ADMIN_SECRET, requestId, uid);
+      await kvPut(env, auditKey, { ...identity, status: "started", startedAt, resumeTag });
     }
 
     // Idempotent, crash-safe order — every step tolerates having run before.
     // New mapping first, so the account is reachable by the fresh code before
     // the old one is removed; no ordering leaves it unreachable.
     await kvPut(env, `recovery:${candidate}`, uid);
-    // `mapped` is set only after the mapping exists, so a resume can tell a
-    // written mapping from a claim that never got that far. It is dropped from
-    // the finalised record below.
-    await kvPut(env, auditKey, { ...claim(), mapped: true });
     // Remove the old mapping only if it is real, not the candidate, and still
     // this uid's — so a resume never deletes the new code or a mapping not ours.
     if (currentCode && currentCode !== candidate) {
@@ -1223,9 +1252,9 @@ async function recoveryReset(env, request, body) {
       user.recovery = candidate;
       await kvPut(env, `user:${uid}`, user);
     }
-    // Finalise the audit record: required fields only, no `mapped`, timestamp
-    // fresh on the run that completes the work.
-    await kvPut(env, auditKey, { ...claim(), completedAt: new Date().toISOString() });
+    // Finalise: required fields only — no resumeTag, no derivation material —
+    // preserving the original startedAt and stamping completion.
+    await kvPut(env, auditKey, { ...identity, status: "completed", startedAt, completedAt: new Date().toISOString() });
 
     return success(false);
   } catch {

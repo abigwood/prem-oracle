@@ -1033,6 +1033,161 @@ async function kickMember(env, body) {
   return json({ ok: true, code, removed: memberUid }, 200, env);
 }
 
+// --- Admin: recovery-code reset -------------------------------------------
+//
+// A member who has lost BOTH their device and their recovery code is otherwise
+// locked out for good — the code is the account's only credential and nothing
+// stores a readable copy of it. This lets a maintainer mint them a fresh one.
+// It is a RESET, never a disclosure of the old code: the old mapping is torn
+// down in the same operation.
+//
+// Gated by its own secret (RECOVERY_ADMIN_SECRET) presented as a Bearer token,
+// and idempotent on requestId so a lost response or a crash mid-way is safe to
+// retry. The new code is DERIVED deterministically from (requestId, target
+// uid), so a retry re-derives the same code and a second credential is
+// impossible. Nothing but the recovery credential and one audit record is
+// touched — picks, points, membership, nickname and history are left exactly
+// as they were.
+//
+// KNOWN LIMITATION, inherent to the app today: this invalidates the recovery
+// credential but does NOT revoke a device already signed in on the lost
+// handset — device requests identify themselves by uid, with no server session
+// to revoke. Resetting the code blocks new logins with the old code; it does
+// not sign out a phone that is already in.
+
+const RECOVERY_RESET_DOMAIN = "prem-oracle/recovery-reset/v1";
+const RECOVERY_AUDIT_PREFIX = "recovery-reset:";
+
+/** Length-aware constant-time compare, so a wrong secret leaks no timing. */
+function safeEqual(a, b) {
+  const enc = new TextEncoder();
+  const ab = enc.encode(String(a ?? ""));
+  const bb = enc.encode(String(b ?? ""));
+  let diff = ab.length ^ bb.length;
+  const len = Math.max(ab.length, bb.length);
+  for (let i = 0; i < len; i++) diff |= (ab[i] ?? 0) ^ (bb[i] ?? 0);
+  return diff === 0;
+}
+
+/**
+ * The fresh code for a reset: three client-compatible words derived, not
+ * randomised, from (requestId, target uid) under a domain-separated hash. The
+ * same requestId and target always yield the same code, which is what makes a
+ * retry idempotent and a second credential impossible.
+ */
+async function deriveRecoveryCandidate(requestId, uid) {
+  const material = new TextEncoder().encode(`${RECOVERY_RESET_DOMAIN}\n${requestId}\n${uid}`);
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", material));
+  return makeRecovery((n) => digest.subarray(0, n));
+}
+
+async function recoveryReset(env, request, body) {
+  const deny = (status, error) => json({ error }, status, env, { "cache-control": "no-store" });
+  // Unconfigured or unauthenticated is indistinguishable from a route that is
+  // not here: no hint about whether a league or member exists.
+  if (!env.RECOVERY_ADMIN_SECRET) return deny(404, "not found");
+  const header = request.headers.get("authorization") || "";
+  const presented = header.startsWith("Bearer ") ? header.slice(7) : "";
+  if (!presented || !safeEqual(presented, env.RECOVERY_ADMIN_SECRET)) return deny(404, "not found");
+
+  const requestId = String(body.requestId || "").trim();
+  const leagueCode = String(body.leagueCode || "").trim().toUpperCase();
+  const memberUid = String(body.memberUid || "").trim();
+  const exactNick = body.exactNick == null ? "" : String(body.exactNick);
+  if (!requestId || !leagueCode) return deny(400, "requestId and leagueCode required");
+  if (!memberUid && !exactNick.trim()) return deny(400, "memberUid or exactNick required");
+
+  const league = await kvGet(env, `league:${leagueCode}`);
+  if (!league) return deny(404, "target not found");
+
+  // Resolution is bounded to THIS league's own membership enumeration, through
+  // the canonical helper — no key-schema assumptions reproduced here.
+  const roster = await members(env, league);
+  let target = null;
+  if (exactNick.trim()) {
+    const want = normNick(exactNick);
+    const matches = roster.filter((m) => normNick(m.nick) === want);
+    if (matches.length !== 1) return deny(404, "target not found"); // unknown, or ambiguous nick
+    target = matches[0];
+  }
+  if (memberUid) {
+    const byUid = roster.find((m) => m.uid === memberUid);
+    if (!byUid) return deny(404, "target not found");
+    if (target && target.uid !== byUid.uid) return deny(409, "uid and nickname disagree");
+    target = byUid;
+  }
+  const uid = target.uid;
+
+  // The account must genuinely exist; a credential is reset, never invented.
+  // And a current code, if any, must actually be its own — a mapping pointing
+  // elsewhere is corruption we refuse to touch.
+  const user = await kvGet(env, `user:${uid}`);
+  if (!user || typeof user !== "object") return deny(409, "target account is not restorable");
+  const currentCode = user.recovery || null;
+  if (currentCode) {
+    const owner = await kvGet(env, `recovery:${currentCode}`);
+    if (owner && owner !== uid) return deny(409, "target credential is inconsistent");
+  }
+
+  // Idempotency: the audit record, keyed by requestId, is also the claim. A
+  // second call with the same requestId but a different target is refused; a
+  // matching one resumes or replays.
+  const auditKey = `${RECOVERY_AUDIT_PREFIX}${requestId}`;
+  const prior = await kvGet(env, auditKey);
+  if (prior && (prior.leagueCode !== leagueCode || prior.targetUid !== uid)) {
+    return deny(409, "requestId already used for a different target");
+  }
+  const replayed = !!(prior && prior.completedAt);
+
+  const candidate = await deriveRecoveryCandidate(requestId, uid);
+  // First-attempt collision only: on a resume/replay the candidate already maps
+  // to this uid legitimately, and must not be read as a clash.
+  if (!prior) {
+    if (candidate === currentCode) {
+      return deny(409, "candidate collides with the current code; retry with a new requestId");
+    }
+    const holder = await kvGet(env, `recovery:${candidate}`);
+    if (holder && holder !== uid) {
+      return deny(409, "candidate collides with another account; retry with a new requestId");
+    }
+    // The claim, written before any credential change, is what makes a
+    // same-requestId-different-target reuse fail even across a crash.
+    await kvPut(env, auditKey, {
+      action: "recovery-reset", route: "/admin/recovery-reset", requestId,
+      leagueCode, targetUid: uid, targetNick: target.nick, actor: "recovery-admin",
+    });
+  }
+
+  // Idempotent, crash-safe order — every step tolerates having run before.
+  // New mapping first, so the account is reachable by the fresh code before the
+  // old one is removed; no ordering leaves it unreachable.
+  await kvPut(env, `recovery:${candidate}`, uid);
+  // Remove the old mapping only if it is real, is not the candidate, and still
+  // belongs to this uid — so a resume never deletes the new code and never
+  // touches a mapping that is not ours.
+  if (currentCode && currentCode !== candidate) {
+    const owner = await kvGet(env, `recovery:${currentCode}`);
+    if (owner === uid) await env.KV.delete(`recovery:${currentCode}`);
+  }
+  // Only the recovery field changes; every other byte of the record carries
+  // through untouched.
+  if (user.recovery !== candidate) {
+    user.recovery = candidate;
+    await kvPut(env, `user:${uid}`, user);
+  }
+  // Finalise the audit/idempotency record. Its timestamp is stable across a
+  // genuine replay, fresh when this call is the one that completed the work.
+  await kvPut(env, auditKey, {
+    action: "recovery-reset", route: "/admin/recovery-reset", requestId,
+    leagueCode, targetUid: uid, targetNick: target.nick, actor: "recovery-admin",
+    completedAt: (prior && prior.completedAt) || new Date().toISOString(),
+    ...(replayed ? { replayed: true } : {}),
+  });
+
+  return json({ ok: true, requestId, leagueCode, memberUid: uid, recovery: candidate, replayed },
+    200, env, { "cache-control": "no-store" });
+}
+
 /**
  * The profile display name, and the leagues it should reach.
  *
@@ -2220,6 +2375,7 @@ async function route(request, env) {
       if (path === "/admin/migration") return await migrationAdmin(env, body);
       if (path === "/admin/slate-index") return await slateIndexAdmin(env, body);
       if (path === "/settle") return await settle(env, body);
+      if (path === "/admin/recovery-reset") return await recoveryReset(env, request, body);
     }
     return json({ error: "not found" }, 404, env);
   } catch (error) {

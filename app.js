@@ -7430,9 +7430,19 @@ document.addEventListener("change", (event) => {
  * suggestions, and produces no membership.
  */
 let joinSheetCode = "";
+// Every opening of the sheet is a new "generation". An identification or a
+// submission binds to the generation (and code) that was live when it started;
+// when a later opening, or a close, supersedes it, its async answer applies
+// NOTHING — it never renames the current sheet, shows another league's error,
+// saves the wrong league, or navigates. Closing the sheet supersedes too.
+let joinSheetGeneration = 0;
+let joinSubmitInFlight = false;
 
 function openJoinSheet(code) {
+  const generation = ++joinSheetGeneration; // supersede any in-flight identify/submit
   joinSheetCode = String(code || "").toUpperCase();
+  joinSubmitInFlight = false;
+  const code0 = joinSheetCode;
   const dialog = document.getElementById("joinDialog");
   const nameEl = document.getElementById("joinLeagueName");
   const introEl = document.getElementById("joinIntro");
@@ -7444,14 +7454,19 @@ function openJoinSheet(code) {
   input.value = playerName || "";
   submit.disabled = false;
   if (!dialog.open) dialog.showModal();
+  // True once this sheet has been closed or replaced by a newer opening: a late
+  // answer to it must touch nothing.
+  const superseded = () => generation !== joinSheetGeneration || joinSheetCode !== code0 || !dialog.open;
   // Identify the league by name through the existing read path. Unknown or
   // deleted leagues fail honestly, in the sheet, without a membership attempt.
-  api(`/state?code=${encodeURIComponent(joinSheetCode)}`)
+  api(`/state?code=${encodeURIComponent(code0)}`)
     .then((state) => {
-      if (joinSheetCode !== String(state.code || joinSheetCode).toUpperCase() && state.name == null) return;
-      nameEl.textContent = `Join ${state.name || joinSheetCode}`;
+      if (superseded()) return;
+      if (code0 !== String(state.code || code0).toUpperCase() && state.name == null) return;
+      nameEl.textContent = `Join ${state.name || code0}`;
     })
     .catch(() => {
+      if (superseded()) return;
       nameEl.textContent = "League not found";
       introEl.textContent = "This invitation link is unknown or has expired. Check the code with whoever invited you.";
       input.disabled = true;
@@ -7485,10 +7500,19 @@ function showJoinSuggestions(message, suggestions) {
 }
 
 async function submitJoinSheet() {
+  const dialog = document.getElementById("joinDialog");
   const input = document.getElementById("joinDisplayName");
   const submit = document.getElementById("joinSubmit");
   const nick = String(input.value || "").trim().slice(0, 24);
   if (!nick) { showJoinSuggestions("Add the name your mates will see.", []); return; }
+  if (joinSubmitInFlight) return; // one request per sheet — a double-submit is ignored
+  // Bind this submission to the sheet open right now, and send THAT code — never
+  // the mutable current one — so a sheet that changes mid-flight cannot make us
+  // save or join the wrong league.
+  const generation = joinSheetGeneration;
+  const code0 = joinSheetCode;
+  const superseded = () => generation !== joinSheetGeneration || joinSheetCode !== code0;
+  joinSubmitInFlight = true;
   clearJoinFeedback();
   submit.disabled = true;
   // A brand-new joiner adopts this as their profile name too, so a later league
@@ -7497,12 +7521,23 @@ async function submitJoinSheet() {
   try {
     const response = await fetch(`${API}/join`, {
       method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ uid: uid(), nickname: profileName, nick, code: joinSheetCode }),
+      body: JSON.stringify({ uid: uid(), nickname: profileName, nick, code: code0 }),
     });
     const data = await response.json().catch(() => ({}));
+    // A late answer to a sheet the viewer has moved on from (or closed) applies
+    // nothing: no suggestions in another league's sheet, no save, no navigation.
+    if (superseded()) return;
     if (response.status === 409 && data.taken) {
+      joinSubmitInFlight = false;
       submit.disabled = false;
       showJoinSuggestions(data.error, data.suggestions);
+      return;
+    }
+    if (response.status === 503) {
+      // No atomic authority right now — retryable, and nothing was written.
+      joinSubmitInFlight = false;
+      submit.disabled = false;
+      showJoinSuggestions(data.error || "Joining is busy right now — please try again in a moment.", []);
       return;
     }
     if (!response.ok) throw new Error(data.error || `Request failed (${response.status})`);
@@ -7510,11 +7545,13 @@ async function submitJoinSheet() {
     if (data.recovery) localStorage.setItem(STORAGE.recovery, data.recovery);
     saveLeague(data.code);
     saveLeagueName(data.code, data.name);
-    document.getElementById("joinDialog").close();
+    dialog.close();
     setFlash(`Joined ${data.name}`);
     launchRouted = true;
     await navigateToView("picks");
   } catch (error) {
+    if (superseded()) return;
+    joinSubmitInFlight = false;
     submit.disabled = false;
     showJoinSuggestions(error.message, []);
   }
@@ -7541,7 +7578,13 @@ document.getElementById("joinDialog").addEventListener("click", (event) => {
     navigateToView("league");
   }
 });
-document.getElementById("joinDialog").addEventListener("close", restoreViewport);
+document.getElementById("joinDialog").addEventListener("close", () => {
+  // Closing supersedes any identification or submission still in flight, so a
+  // late answer to a dismissed sheet never reopens, renames or navigates.
+  joinSheetGeneration++;
+  joinSubmitInFlight = false;
+  restoreViewport();
+});
 
 document.getElementById("profileButton").addEventListener("click", () => {
   document.getElementById("playerName").value = playerName;

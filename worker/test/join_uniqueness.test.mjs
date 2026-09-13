@@ -787,3 +787,174 @@ test("C · account delete across leagues — crash mid teardown: retry resumes e
   assert.equal((await post("/join", { uid: "u2", code: a.code, nick: "Keane" })).status, 200);
   assert.equal((await post("/join", { uid: "u3", code: b.code, nick: "Roy" })).status, 200);
 });
+
+// === FOURTH REVIEW ==========================================================
+
+// --- A · a fresh join never mints identity before the commit is confirmed ---
+
+test("A · a definitive commit loss leaves no user, recovery, membership or link", async () => {
+  const commitFalse = commitVerdictRegistrar(() => ({ ok: true, committed: false }));
+  const { post, store, code } = await withLeague({ registrar: commitFalse.namespace });
+  commitFalse.failCommits(1);
+  const res = await post("/join", { uid: "u1", code, nick: "Ghost" });
+  assert.notEqual(res.status, 200, "a lost commit reported success");
+  assert.equal(store.has(`member:${code}:u1`), false, "a visible membership was left behind");
+  assert.equal(store.has("user:u1"), false, "a user record was minted");
+  const recoveries = [...store.keys()].filter((k) => k.startsWith("recovery:"));
+  assert.deepEqual(recoveries.filter((k) => JSON.parse(store.get(k)) === "u1"), [],
+    "an orphaned recovery credential was minted");
+});
+
+test("A · an unknown commit leaves no visible membership and converges on retry", async () => {
+  const ctl = controllableRegistrar();
+  const { post, store, code } = await withLeague({ registrar: ctl.namespace });
+  ctl.failNext("commit", 2); // commit + safe re-read both fail
+  const first = await post("/join", { uid: "u1", code, nick: "Ferdinand" });
+  assert.notEqual(first.status, 200);
+  assert.equal(store.has(`member:${code}:u1`), false, "an unknown commit left a visible membership");
+  assert.equal(store.has("user:u1"), false, "an unknown commit minted a user");
+  // Retry converges: commit lands, identity now minted.
+  assert.equal((await post("/join", { uid: "u1", code, nick: "Ferdinand" })).status, 200);
+  assert.equal(JSON.parse(store.get(`member:${code}:u1`)).nick, "Ferdinand");
+  assert.ok(store.has("user:u1"));
+});
+
+test("A · commit success then a crash before account creation converges on retry", async () => {
+  // The DO commits, but the worker dies before minting the account (a KV crash
+  // on the user write). Nothing visible yet; a retry sees begin -> already
+  // committed and finishes.
+  const { cr, store, post } = await seededCrashWorld();
+  const code = (await (await post("/league", { uid: "host", nickname: "Host" })).json()).code;
+  cr.crashOn("put", "user:u1"); // crash right after the confirmed commit, at account creation
+  const first = await post("/join", { uid: "u1", code, nick: "Ferdinand" });
+  assert.equal(first.status, 500);
+  assert.equal(store.has("user:u1"), false, "the account was created before commit was confirmed");
+  // Retry: begin -> already committed, account + membership finalised.
+  assert.equal((await post("/join", { uid: "u1", code, nick: "Ferdinand" })).status, 200);
+  assert.ok(store.has("user:u1"));
+  assert.equal(JSON.parse(store.get(`member:${code}:u1`)).nick, "Ferdinand");
+});
+
+test("A · another member taking an expired name cannot resurrect an abandoned attempt", async () => {
+  const { post, env, store, code } = await withLeague();
+  const rpc = rpcTo(env, code);
+  const t0 = 50_000_000;
+  // u1 reserves the name but never commits (abandoned); it expires.
+  await rpc("begin", { uid: "u1", nick: "Phantom", roster: [], now: t0 });
+  // u2 takes the freed name for real.
+  assert.equal((await post("/join", { uid: "u2", code, nick: "Phantom" })).status, 200);
+  // u1's abandoned attempt cannot become a member — no membership, no user.
+  assert.equal(store.has(`member:${code}:u1`), false);
+  assert.equal(store.has("user:u1"), false);
+  // And only ONE member holds the name.
+  assert.equal(memberNicks(store, code).filter((n) => normaliseJoinNick(n) === "phantom").length, 1);
+});
+
+// --- B · the teardown fence lives in the DO, not only KV --------------------
+
+test("B · same UID cannot rejoin during a kick (DO fence), and can once it completes", async () => {
+  const ctl = controllableRegistrar();
+  const { post, store, code } = await withLeague({ registrar: ctl.namespace });
+  await post("/join", { uid: "u1", code, nick: "Cantona" });
+  ctl.failNext("release", 1); // kick stalls after the fence is raised and the row removed
+  assert.equal((await post("/league/kick", { uid: "host", code, memberUid: "u1" })).status, 503);
+  // The DO fence is active: u1's own rejoin is refused, recreating nothing.
+  const rejoin = await post("/join", { uid: "u1", code, nick: "Cantona" });
+  assert.notEqual(rejoin.status, 200, "same UID rejoined during a kick");
+  assert.equal(store.has(`member:${code}:u1`), false, "the rejoin recreated the membership");
+  // Complete the kick, then u1 may rejoin (no stranded fence).
+  assert.equal((await post("/league/kick", { uid: "host", code, memberUid: "u1" })).status, 200);
+  assert.equal((await post("/join", { uid: "u1", code, nick: "Cantona" })).status, 200);
+});
+
+test("B · same UID cannot rejoin during account deletion, and can once it completes", async () => {
+  const ctl = controllableRegistrar();
+  const { post, store, code } = await withLeague({ registrar: ctl.namespace });
+  await post("/join", { uid: "u1", code, nick: "Keane" });
+  ctl.failNext("release", 1);
+  assert.equal((await post("/account/delete", { uid: "u1" })).status, 503);
+  const rejoin = await post("/join", { uid: "u1", code, nick: "Keane" });
+  assert.notEqual(rejoin.status, 200, "same UID rejoined during account deletion");
+  assert.equal((await post("/account/delete", { uid: "u1" })).status, 200);
+  // After completion, the name is free for anyone (no stranded fence).
+  assert.equal((await post("/join", { uid: "u2", code, nick: "Keane" })).status, 200);
+});
+
+test("B · during a stalled release: same UID fenced (503), a different UID over-reserved (409)", async () => {
+  const ctl = controllableRegistrar();
+  const { post, code } = await withLeague({ registrar: ctl.namespace });
+  await post("/join", { uid: "u1", code, nick: "Vidic" });
+  ctl.failNext("release", 1);
+  assert.equal((await post("/league/kick", { uid: "host", code, memberUid: "u1" })).status, 503);
+  // Same UID: refused by the member fence.
+  assert.equal((await post("/join", { uid: "u1", code, nick: "Vidic" })).status, 503);
+  // Different UID: refused because the name is still held (over-reservation).
+  assert.equal((await post("/join", { uid: "u2", code, nick: "Vidic" })).status, 409);
+});
+
+test("B · a rename during the member's removal is refused by the fence", async () => {
+  const ctl = controllableRegistrar();
+  const { post, code } = await withLeague({ registrar: ctl.namespace });
+  await post("/join", { uid: "u1", code, nick: "Ronaldo" });
+  ctl.failNext("release", 1);
+  assert.equal((await post("/league/kick", { uid: "host", code, memberUid: "u1" })).status, 503);
+  // u1 tries to rename mid-removal — the DO fence refuses it.
+  assert.notEqual((await post("/league/nick", { uid: "u1", code, nick: "CR7" })).status, 200);
+});
+
+test("B · profile propagation skips a league where the member is being removed", async () => {
+  const ctl = controllableRegistrar();
+  const { post, store, code } = await withLeague({ registrar: ctl.namespace });
+  // u1 is an Anon member (seeded), being kicked.
+  store.set(`member:${code}:u1`, JSON.stringify({ nick: "Anon", since: 1 }));
+  store.set("user:u1", JSON.stringify({ nickname: "", leagues: [code] }));
+  ctl.failNext("release", 1);
+  assert.equal((await post("/league/kick", { uid: "host", code, memberUid: "u1" })).status, 503);
+  // u1 sets a profile name; propagation must not write into the fenced league.
+  const res = await post("/profile", { uid: "u1", nickname: "Tom" });
+  const body = await res.json();
+  assert.ok(!(body.updated || []).includes(code), "propagated a name into a league mid-removal");
+});
+
+test("B · every join during a league deletion is refused (DO fence), including a fresh UID", async () => {
+  const ctl = controllableRegistrar();
+  const { post, code } = await withLeague({ registrar: ctl.namespace });
+  await post("/join", { uid: "u1", code, nick: "Giggs" });
+  ctl.failNext("purge", 1); // deletion stalls after the league fence is raised
+  assert.equal((await post("/league/delete", { uid: "host", code })).status, 503);
+  // The league fence refuses every join, existing or brand-new.
+  assert.equal((await post("/join", { uid: "u1", code, nick: "Giggs" })).status, 404);
+  assert.equal((await post("/join", { uid: "u9", code, nick: "Rookie" })).status, 404);
+});
+
+test("B · the DO fence is the barrier even when the KV intent is not visible", async () => {
+  // Raise the fence DIRECTLY in the registrar, writing NO KV intent — production
+  // KV lag. The join must still be refused, proving the DO (not KV) is the barrier.
+  const { post, env, store, code } = await withLeague();
+  const rpc = rpcTo(env, code);
+  await rpc("fenceLeague", { now: Date.now() });
+  assert.equal(store.has(leagueIntent(code)), false, "test invariant: no KV intent written");
+  assert.equal((await post("/join", { uid: "u1", code, nick: "Anyone" })).status, 404,
+    "a join slipped through while only the DO league fence was active");
+  // A member fence with no KV intent likewise blocks that uid's join.
+  const other = await (await post("/league", { uid: "hb", nickname: "HB" })).json();
+  const rpc2 = rpcTo(env, other.code);
+  await rpc2("fenceMember", { uid: "u1", kind: "kick", now: Date.now() });
+  assert.notEqual((await post("/join", { uid: "u1", code: other.code, nick: "Someone" })).status, 200,
+    "a member-fenced UID joined while only the DO fence was active");
+});
+
+test("B · crash after the DO fence, before live removal: rejoin still refused, retry completes", async () => {
+  const { cr, store, post } = await seededCrashWorld();
+  const code = (await (await post("/league", { uid: "host", nickname: "Host" })).json()).code;
+  await post("/join", { uid: "u1", code, nick: "Scholes" });
+  // Crash immediately after the fence is raised — at the first live-removal write.
+  cr.crashOn("put", `league:${code}`);
+  assert.equal((await post("/league/kick", { uid: "host", code, memberUid: "u1" })).status, 500);
+  // The DO fence is already up, so u1 cannot rejoin during the incomplete teardown.
+  assert.notEqual((await post("/join", { uid: "u1", code, nick: "Scholes" })).status, 200);
+  // Retry completes with no stranded fence.
+  assert.equal((await post("/league/kick", { uid: "host", code, memberUid: "u1" })).status, 200);
+  assert.ok(!store.has(kickIntent(code, "u1")));
+  assert.equal((await post("/join", { uid: "u1", code, nick: "Scholes" })).status, 200);
+});

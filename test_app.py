@@ -2450,15 +2450,20 @@ class NamesAndViewportTests(unittest.TestCase):
         self.assertIn("if (!registrarEnabled(env)) return registrarUnavailable(env);", fn)
         self.assertLess(fn.index("registrarEnabled(env)) return registrarUnavailable"),
                         fn.index("await members(env, league)"))
-        # C: reserve (begin) BEFORE the account and membership writes; commit AFTER
-        # (via resolveCommit, which fences and safely re-reads the verdict).
+        # A: commit-first — the fenced name is CONFIRMED (begin then resolveCommit)
+        # BEFORE the account is minted or any membership is written, so a lost or
+        # rejected join leaves no user, recovery mapping or membership.
         self.assertIn('registrarCall(env, code, "begin"', fn)
         self.assertIn("resolveCommit(env, code, { uid, norm: begin.norm, fence: begin.fence })", fn)
-        self.assertLess(fn.index('registrarCall(env, code, "begin"'), fn.index("ensureUser(env, uid"))
-        self.assertLess(fn.index('registrarCall(env, code, "begin"'), fn.index("leagueMemberKey(code, uid), {"))
-        self.assertLess(fn.index("leagueMemberKey(code, uid), {"), fn.index("resolveCommit(env, code"))
-        # A: an unknown commit outcome (resolveCommit -> null) is never a 200.
+        self.assertLess(fn.index('registrarCall(env, code, "begin"'), fn.index("resolveCommit(env, code"))
+        self.assertLess(fn.index("resolveCommit(env, code"), fn.index("ensureUser(env, uid"))
+        self.assertLess(fn.index("resolveCommit(env, code"), fn.index("leagueMemberKey(code, uid), {"))
+        # A: an unknown commit outcome (resolveCommit -> null) is never a 200, and
+        # nothing is minted on a definitive loss either.
         self.assertIn("if (!commit) return registrarUnavailable(env);", fn)
+        self.assertLess(fn.index("if (!commit) return registrarUnavailable"), fn.index("ensureUser(env, uid"))
+        # B: an active teardown fence refuses the join (never rejoins over a removal).
+        self.assertIn("if (begin.fenced)", fn)
         # The membership stores the offered name, normalised — never a raw or Anon guess.
         self.assertIn("nick: normNick(offered),", fn)
         # The old best-effort fallback is gone: no non-atomic claim path remains.

@@ -1004,16 +1004,16 @@ async function joinLeague(env, body) {
   if (!uid || !code) return json({ error: "uid and code required" }, 400, env);
   const league = await kvGet(env, `league:${code}`);
   if (!league) return json({ error: "league not found" }, 404, env);
-  const user = await ensureUser(env, uid, body.nickname);
   const existing = await kvGet(env, leagueMemberKey(code, uid));
   // The name the joiner gave for this league wins, then their profile name,
   // then whatever they already had. "Anon" only remains when nobody has ever
   // offered a name at all.
   const offered = String(body.nick || body.nickname || "").trim();
 
-  // Uniqueness is arbitrated BEFORE any membership write, so a taken name
-  // produces no partial membership. The registrar is seeded with the current
-  // roster so it knows about members who predate it.
+  // Uniqueness is arbitrated BEFORE any account or membership write, so a taken
+  // name mints no account, no recovery credential and no partial membership —
+  // it changes nothing at all. The registrar is seeded with the current roster
+  // so it knows about members who predate it.
   const roster = await members(env, league);
   const claim = await claimLeagueNick(env, code, uid, offered, roster);
   if (!claim.ok) {
@@ -1021,6 +1021,9 @@ async function joinLeague(env, body) {
       suggestions: claim.suggestions || [] }, 409, env);
   }
 
+  // Only now that the name is secured: ensure the account (mints recovery on
+  // first contact, idempotent on retry) and write the membership.
+  const user = await ensureUser(env, uid, body.nickname);
   await kvPut(env, leagueMemberKey(code, uid), {
     nick: claim.nick || (offered ? normNick(offered) : (user.nickname || existing?.nick || DEFAULT_NICK)),
     since: existing?.since || league.joinedAt?.[uid] || Date.now(),

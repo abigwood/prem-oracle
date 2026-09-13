@@ -3081,8 +3081,8 @@ function picksView() {
   // An invitation in hand but not yet joined: said once, at the top, on the
   // screen the viewer actually lands on.
   const invite = inviteCode && !leagueCodes.includes(inviteCode)
-    ? `<div class="notice invite-notice"><span class="notice-icon">\ud83c\udfc6</span><div><strong>League invitation: ${
-        escapeHTML(inviteCode)}</strong><p>Open the League tab to join.</p></div></div>`
+    ? `<button class="notice invite-notice" type="button" data-open-join="${escapeHTML(inviteCode)}"><span class="notice-icon">\ud83c\udfc6</span><div><strong>League invitation: ${
+        escapeHTML(inviteCode)}</strong><p>Tap to choose your name and join.</p></div></button>`
     : "";
 
   const head = (name, summary, lines) =>
@@ -7024,6 +7024,8 @@ document.addEventListener("click", async (event) => {
   // Navigation answers on the tap. It used to sit behind two awaited handlers,
   // and an await is only free when the main thread is idle — which, on the tap
   // that opens the heaviest screen in the app, is exactly when it is not.
+  const joinNotice = event.target.closest("[data-open-join]");
+  if (joinNotice) { openJoinSheet(joinNotice.dataset.openJoin); return; }
   const nav = event.target.closest("[data-view]");
   if (nav) {
     // The onboarding CTA lands on the League tab with the wizard already open.
@@ -7417,6 +7419,130 @@ document.addEventListener("change", (event) => {
   saveNotificationPrefs();
 });
 
+/**
+ * The one-step invitation join sheet (v1.8 Slice A).
+ *
+ * An invite that names a league the viewer is not yet in opens this sheet with
+ * the league already identified, so the only thing asked is one display name.
+ * It extends the existing ?league= route and the /join endpoint — no parallel
+ * joining mechanism — and on success safe-switches to the joined league and
+ * lands on My Picks. A taken name is reported inline, with the worker's
+ * suggestions, and produces no membership.
+ */
+let joinSheetCode = "";
+
+function openJoinSheet(code) {
+  joinSheetCode = String(code || "").toUpperCase();
+  const dialog = document.getElementById("joinDialog");
+  const nameEl = document.getElementById("joinLeagueName");
+  const introEl = document.getElementById("joinIntro");
+  const input = document.getElementById("joinDisplayName");
+  const submit = document.getElementById("joinSubmit");
+  clearJoinFeedback();
+  nameEl.textContent = "Joining league…";
+  introEl.textContent = "Pick the name your mates will see, then you're in.";
+  input.value = playerName || "";
+  submit.disabled = false;
+  if (!dialog.open) dialog.showModal();
+  // Identify the league by name through the existing read path. Unknown or
+  // deleted leagues fail honestly, in the sheet, without a membership attempt.
+  api(`/state?code=${encodeURIComponent(joinSheetCode)}`)
+    .then((state) => {
+      if (joinSheetCode !== String(state.code || joinSheetCode).toUpperCase() && state.name == null) return;
+      nameEl.textContent = `Join ${state.name || joinSheetCode}`;
+    })
+    .catch(() => {
+      nameEl.textContent = "League not found";
+      introEl.textContent = "This invitation link is unknown or has expired. Check the code with whoever invited you.";
+      input.disabled = true;
+      submit.disabled = true;
+    });
+}
+
+function clearJoinFeedback() {
+  const taken = document.getElementById("joinTaken");
+  const suggestions = document.getElementById("joinSuggestions");
+  taken.hidden = true; taken.textContent = "";
+  suggestions.hidden = true; suggestions.replaceChildren();
+  document.getElementById("joinDisplayName").disabled = false;
+}
+
+function showJoinSuggestions(message, suggestions) {
+  const taken = document.getElementById("joinTaken");
+  const box = document.getElementById("joinSuggestions");
+  taken.textContent = message || "That name is taken in this league.";
+  taken.hidden = false;
+  box.replaceChildren();
+  for (const name of suggestions || []) {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "join-suggestion";
+    chip.dataset.joinSuggestion = name;
+    chip.textContent = name;
+    box.appendChild(chip);
+  }
+  box.hidden = !(suggestions && suggestions.length);
+}
+
+async function submitJoinSheet() {
+  const input = document.getElementById("joinDisplayName");
+  const submit = document.getElementById("joinSubmit");
+  const nick = String(input.value || "").trim().slice(0, 24);
+  if (!nick) { showJoinSuggestions("Add the name your mates will see.", []); return; }
+  clearJoinFeedback();
+  submit.disabled = true;
+  // A brand-new joiner adopts this as their profile name too, so a later league
+  // is prefilled — mirrors the existing manual join.
+  const profileName = playerName || nick;
+  try {
+    const response = await fetch(`${API}/join`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ uid: uid(), nickname: profileName, nick, code: joinSheetCode }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (response.status === 409 && data.taken) {
+      submit.disabled = false;
+      showJoinSuggestions(data.error, data.suggestions);
+      return;
+    }
+    if (!response.ok) throw new Error(data.error || `Request failed (${response.status})`);
+    if (!playerName) { playerName = nick; localStorage.setItem(STORAGE.name, playerName); }
+    if (data.recovery) localStorage.setItem(STORAGE.recovery, data.recovery);
+    saveLeague(data.code);
+    saveLeagueName(data.code, data.name);
+    document.getElementById("joinDialog").close();
+    setFlash(`Joined ${data.name}`);
+    launchRouted = true;
+    await navigateToView("picks");
+  } catch (error) {
+    submit.disabled = false;
+    showJoinSuggestions(error.message, []);
+  }
+}
+
+document.getElementById("joinForm").addEventListener("submit", (event) => {
+  event.preventDefault();
+  submitJoinSheet();
+});
+document.getElementById("joinDialog").addEventListener("click", (event) => {
+  const chip = event.target.closest("[data-join-suggestion]");
+  if (chip) {
+    document.getElementById("joinDisplayName").value = chip.dataset.joinSuggestion;
+    clearJoinFeedback();
+    return;
+  }
+  if (event.target.closest("[data-join-cancel]")) {
+    document.getElementById("joinDialog").close();
+    return;
+  }
+  if (event.target.closest("[data-join-recover]")) {
+    // Returning players go to the existing restore surface, not a new route.
+    document.getElementById("joinDialog").close();
+    navigateToView("league");
+  }
+});
+document.getElementById("joinDialog").addEventListener("close", restoreViewport);
+
 document.getElementById("profileButton").addEventListener("click", () => {
   document.getElementById("playerName").value = playerName;
   renderNotificationPrefs();
@@ -7650,12 +7776,16 @@ Promise.all([loadFixtures(), hydrateIdentity()]).then(() => {
   const linked = inviteCode && leagueCodes.includes(inviteCode) && inviteCode !== activeLeague
     ? inviteCode
     : null;
-  if (inviteCode && !leagueCodes.includes(inviteCode)) { launchRouted = true; currentView = "league"; }
-  else if (asked) { launchRouted = true; currentView = asked; }
+  // An invite to a league the viewer is not in opens the one-step join sheet
+  // over their normal landing screen, rather than dropping them on the League
+  // tab to hunt for a form. The launch branch still decides that landing.
+  const joinInvite = inviteCode && !leagueCodes.includes(inviteCode) ? inviteCode : null;
+  if (asked) { launchRouted = true; currentView = asked; }
   else applyLaunchBranch();
   // The switch renders; without one, the ordinary first paint does.
   if (linked) setActiveLeague(linked);
   else render();
+  if (joinInvite && API) openJoinSheet(joinInvite);
   // A cold launch onto My Picks owes the same one revalidation an entry does.
   // Without this the screen could stand on a cache captured before kick-off
   // and never ask for the picks that have since been revealed.

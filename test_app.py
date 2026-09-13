@@ -2443,7 +2443,12 @@ class NamesAndViewportTests(unittest.TestCase):
         fn = self.worker[self.worker.index("async function joinLeague(env, body)"):]
         fn = fn[:fn.index("\n}")]
         self.assertIn('const offered = String(body.nick || body.nickname || "").trim();', fn)
-        self.assertIn("nick: offered ? normNick(offered) : (user.nickname || existing?.nick || DEFAULT_NICK),", fn)
+        # v1.8 Slice A: the registrar's arbitrated name wins; the v1.7.1
+        # offered-name / profile / existing / Anon fallback is preserved behind it.
+        self.assertIn("nick: claim.nick || (offered ? normNick(offered) : (user.nickname || existing?.nick || DEFAULT_NICK)),", fn)
+        # Uniqueness is arbitrated before any account or membership is written.
+        self.assertLess(fn.index("claimLeagueNick(env, code, uid, offered, roster)"), fn.index("ensureUser(env, uid"))
+        self.assertLess(fn.index("claimLeagueNick(env, code, uid, offered, roster)"), fn.index("leagueMemberKey(code, uid), {"))
 
     def test_renaming_uses_a_real_field_not_a_prompt(self):
         # prompt() returns null both when WKWebView declines to show it and when

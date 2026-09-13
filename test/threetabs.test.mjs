@@ -87,7 +87,9 @@ test("T2 · a link naming a removed view opens My Picks in its league context", 
   // The league on the same link is what selects the context, and it is read
   // by the code that already existed for invitations.
   assert.match(APP, /new URLSearchParams\(location\.search\)\.get\("league"\)/);
-  assert.match(APP, /else if \(asked\) \{ launchRouted = true; currentView = asked; \}/);
+  // v1.8 Slice A moved the invite onto a join sheet, so the invite branch no
+  // longer sets currentView; the requested-view branch is now the leading if.
+  assert.match(APP, /if \(asked\) \{ launchRouted = true; currentView = asked; \}/);
 });
 
 test("T2 · notifications still open the fixture on My Picks", () => {
@@ -566,8 +568,12 @@ test("C1 · a linked membership is selected before My Picks renders", () => {
   assert.match(body, /else render\(\);/);
   // Selected before the paint, not after it.
   assert.ok(body.indexOf("if (linked) setActiveLeague(linked);") < body.indexOf("ensurePicksRound()"));
-  // A membership is never sent to the join flow.
-  assert.match(body, /if \(inviteCode && !leagueCodes\.includes\(inviteCode\)\) \{ launchRouted = true; currentView = "league"; \}/);
+  // A membership is never sent to the join flow — that stays the linked path.
+  // v1.8 Slice A: a NON-member invite opens the one-step join sheet instead of
+  // routing to the League tab.
+  assert.match(body, /const joinInvite = inviteCode && !leagueCodes\.includes\(inviteCode\) \? inviteCode : null;/);
+  assert.match(body, /if \(joinInvite && API\) openJoinSheet\(joinInvite\);/);
+  assert.ok(!body.includes('currentView = "league"'), "a non-member invite still routes to the League tab");
 });
 
 test("C1 · the switch takes the ordinary safe path, with all its guards", () => {

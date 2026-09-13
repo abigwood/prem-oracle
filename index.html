@@ -63,6 +63,25 @@
     </form>
   </dialog>
 
+  <dialog id="joinDialog">
+    <form method="dialog" id="joinForm">
+      <div class="dialog-head">
+        <div>
+          <span class="eyebrow">You're invited</span>
+          <h2 id="joinLeagueName">Join the league</h2>
+        </div>
+        <button class="icon-button" value="cancel" aria-label="Close" data-join-cancel>×</button>
+      </div>
+      <p class="field-hint" id="joinIntro">Pick the name your mates will see, then you're in.</p>
+      <label for="joinDisplayName">Display name</label>
+      <input id="joinDisplayName" name="joinDisplayName" maxlength="24" autocomplete="nickname" placeholder="Your name" required>
+      <p class="join-taken" id="joinTaken" hidden></p>
+      <div class="join-suggestions" id="joinSuggestions" hidden></div>
+      <button class="primary wide" id="joinSubmit" value="join">Join league</button>
+      <button class="link-quiet" type="button" value="cancel" data-join-recover>Returning player? Restore with your code</button>
+    </form>
+  </dialog>
+
   <dialog id="nickDialog">
     <form method="dialog" id="nickForm">
       <div class="dialog-head">

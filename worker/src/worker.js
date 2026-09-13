@@ -569,7 +569,7 @@ async function createLeague(env, body) {
   if (registrarEnabled(env)) {
     try {
       const seed = await registrarCall(env, code, "begin", { uid, nick: hostNick, roster: [], now });
-      if (seed.ok) await registrarCall(env, code, "commit", { uid, norm: seed.norm });
+      if (seed.ok && !seed.committed) await registrarCall(env, code, "commit", { uid, norm: seed.norm, fence: seed.fence, now });
     } catch { /* reconciled from the roster on first join */ }
   }
   return json({
@@ -930,6 +930,17 @@ async function deleteAccount(env, body) {
   if (!uid) return json({ error: "uid required" }, 400, env);
   const user = await kvGet(env, `user:${uid}`);
   const codes = [...new Set(user?.leagues || [])];
+
+  // Free the account's name in every league FIRST, and fail closed if any
+  // release cannot complete. The user record — the only authoritative list of
+  // which leagues to clean — is left intact on failure, so a retry resumes every
+  // league's cleanup; release is idempotent, so a retry after a partial teardown
+  // still converges (Slice A/D).
+  if (registrarEnabled(env)) {
+    try { for (const code of codes) await registrarRelease(env, code, uid); }
+    catch { return json({ error: "Could not delete the account — please try again.", retryable: true }, 503, env); }
+  }
+
   const succession = [];
   const closed = [];
   for (const code of codes) {
@@ -937,9 +948,6 @@ async function deleteAccount(env, body) {
     if (!league) continue;
     const remaining = (await members(env, league)).filter((member) => member.uid !== uid);
     await env.KV.delete(leagueMemberKey(code, uid));
-    // The departing account's name is free again in every league it was in
-    // (Slice A/D).
-    await registrarReleaseSafe(env, code, uid);
     if (league.owner !== uid) continue;
     if (!remaining.length) {
       await env.KV.delete(`league:${code}`);
@@ -973,6 +981,30 @@ async function deleteAccount(env, body) {
  *  binding under this code. */
 const registrarEnabled = (env) => !!env.LEAGUE_REGISTRAR;
 
+/** Operation-specific success shapes. A response that does not match one is
+ *  malformed and must fail closed — an unrecognised begin or a commit with no
+ *  boolean verdict cannot be trusted to mean "it worked". */
+function validRegistrarShape(op, data) {
+  if (!data || typeof data !== "object") return false;
+  switch (op) {
+    case "begin":
+      // Either a refusal (taken / error) or a grant carrying norm + fence.
+      if (data.ok === false) return data.taken === true || typeof data.error === "string";
+      return data.ok === true && (data.committed === true
+        || (typeof data.norm === "string" && typeof data.fence === "string"));
+    case "commit":
+      return typeof data.committed === "boolean";
+    case "release":
+      return typeof data.released === "boolean";
+    case "purge":
+      return data.purged === true || data.ok === true;
+    case "check":
+      return typeof data.available === "boolean";
+    default:
+      return data.ok === true;
+  }
+}
+
 /** One RPC to a league's registrar instance. Throws on transport or shape
  *  failure so every caller can fail closed. */
 async function registrarCall(env, code, op, args = {}) {
@@ -983,16 +1015,17 @@ async function registrarCall(env, code, op, args = {}) {
   });
   if (!response.ok) throw new Error(`registrar ${op} failed: ${response.status}`);
   const data = await response.json();
-  if (!data || typeof data !== "object") throw new Error(`registrar ${op} malformed`);
+  if (!validRegistrarShape(op, data)) throw new Error(`registrar ${op} malformed`);
   return data;
 }
 
-/** Free a member's name where the registrar exists — kick, account or league
- *  teardown. Best-effort: the KV membership is already gone, so a transient
- *  failure over-reserves a name rather than corrupting anything. */
-async function registrarReleaseSafe(env, code, uid) {
+/** Free a member's name. NOT best-effort: throws on failure so the caller can
+ *  refuse to report a final success while the release is still outstanding, and
+ *  a retry (KV membership already gone) still finishes the registrar cleanup —
+ *  release is idempotent on the uid. */
+async function registrarRelease(env, code, uid) {
   if (!registrarEnabled(env)) return;
-  try { await registrarCall(env, code, "release", { uid, now: Date.now() }); } catch { /* over-reserves at worst */ }
+  await registrarCall(env, code, "release", { uid, now: Date.now() });
 }
 
 const registrarUnavailable = (env) => json(
@@ -1018,9 +1051,10 @@ async function joinLeague(env, body) {
   const existing = await kvGet(env, leagueMemberKey(code, uid));
   const roster = await members(env, league);
 
-  // Phase 1 — reserve the name as PENDING, atomically, before any account or
-  // membership write. A taken name mints nothing; a registrar failure fails
-  // closed with nothing written (Slice A/A, A/C).
+  // Phase 1 — reserve the name as a PENDING attempt, atomically, before any
+  // account or membership write. A taken name mints nothing; a registrar
+  // failure or malformed answer fails closed with nothing written (Slice A/A,
+  // A/C, A/E). The attempt's fence must be presented to commit.
   let begin;
   try { begin = await registrarCall(env, code, "begin", { uid, nick: offered, roster, now: Date.now() }); }
   catch { return registrarUnavailable(env); }
@@ -1042,10 +1076,48 @@ async function joinLeague(env, body) {
   user.leagues = [...new Set([...(user.leagues || []), code])];
   await kvPut(env, `user:${uid}`, user);
 
-  // Phase 3 — commit. If this fails, the membership is real and the next
-  // reconcile promotes it from the roster, so the join still succeeds.
-  try { await registrarCall(env, code, "commit", { uid, norm: begin.norm }); } catch { /* self-heals via reconcile */ }
+  // Phase 3 — commit with our fence.
+  //   committed:true  -> success.
+  //   committed:false -> our fence definitively lost authority (the attempt
+  //                      expired, or was superseded/taken). Roll back the
+  //                      provisional write (only while it is still ours) and
+  //                      refuse — never report success (Slice A/C).
+  //   thrown (lost response / malformed) -> ambiguous, but our fresh pending
+  //                      provably held the name, so the membership is valid and
+  //                      reconciliation grants it to us from the roster. Report
+  //                      success rather than roll back a possibly-committed claim.
+  let commit;
+  try { commit = await registrarCall(env, code, "commit", { uid, norm: begin.norm, fence: begin.fence, now: Date.now() }); }
+  catch { return json({ ok: true, code, name: league.name, recovery: user.recovery }, 200, env); }
+  if (!commit.committed) {
+    await rollbackProvisionalJoin(env, code, uid, existing, offered);
+    if (commit.taken) {
+      return json({ error: "That name is taken in this league", taken: true,
+        suggestions: commit.suggestions || [] }, 409, env);
+    }
+    return registrarUnavailable(env);
+  }
   return json({ ok: true, code, name: league.name, recovery: user.recovery }, 200, env);
+}
+
+/**
+ * Undo a join whose commit lost its fence — but only if the provisional write is
+ * still the one we made. A newcomer had no prior membership, so their row is
+ * removed and the league dropped from their list; a later valid write for the
+ * same uid (a concurrent attempt that DID commit under a different name) is left
+ * untouched. `existing` non-null means the caller was already a member (a
+ * rename path handles its own restore), so we leave the membership alone.
+ */
+async function rollbackProvisionalJoin(env, code, uid, existing, offered) {
+  if (existing) return; // not a fresh join — nothing provisional to remove
+  const current = await kvGet(env, leagueMemberKey(code, uid));
+  if (!current || normaliseJoinNick(current.nick) !== normaliseJoinNick(offered)) return; // a later valid write — keep it
+  await env.KV.delete(leagueMemberKey(code, uid));
+  const user = await kvGet(env, `user:${uid}`);
+  if (user?.leagues?.includes(code)) {
+    user.leagues = user.leagues.filter((entry) => entry !== code);
+    await kvPut(env, `user:${uid}`, user);
+  }
 }
 
 async function deleteLeague(env, body) {
@@ -1055,6 +1127,16 @@ async function deleteLeague(env, body) {
   const league = await kvGet(env, `league:${code}`);
   if (!league) return json({ error: "league not found" }, 404, env);
   if (uid !== league.owner) return json({ error: "only the league owner can delete it" }, 403, env);
+
+  // Purge the registrar FIRST, and fail closed if it cannot. The league record
+  // still exists on failure, so a retry knows to purge again (purge is
+  // idempotent); nothing that a retry needs is erased before the purge lands
+  // (Slice A/D).
+  if (registrarEnabled(env)) {
+    try { await registrarCall(env, code, "purge"); }
+    catch { return json({ error: "Could not delete the league — please try again.", retryable: true }, 503, env); }
+  }
+
   const memberList = await members(env, league);
   await Promise.all(memberList.map(async ({ uid: memberUid }) => {
     const user = await kvGet(env, `user:${memberUid}`);
@@ -1078,10 +1160,6 @@ async function deleteLeague(env, body) {
   }
   await updateCustomMixIndex(env, code, false);
   await env.KV.delete(`league:${code}`);
-  // The league is gone; drop every claim its registrar held (Slice A/D).
-  if (registrarEnabled(env)) {
-    try { await registrarCall(env, code, "purge"); } catch { /* orphaned DO storage is harmless */ }
-  }
   return json({ ok: true, code }, 200, env);
 }
 
@@ -1097,6 +1175,17 @@ async function kickMember(env, body) {
   const existing = await kvGet(env, leagueMemberKey(code, memberUid));
   const legacyMember = (league.members || []).includes(memberUid);
   if (!existing && !legacyMember) return json({ error: "member not found" }, 404, env);
+
+  // Free the name FIRST, and fail closed if the registrar cannot. Otherwise a
+  // swallowed failure after the KV delete could reserve a kicked member's name
+  // forever. The membership is untouched on failure, so a retry is clean; and
+  // because release is idempotent, a retry after a partial teardown still
+  // converges (Slice A/D).
+  if (registrarEnabled(env)) {
+    try { await registrarRelease(env, code, memberUid); }
+    catch { return json({ error: "Could not complete removal — please try again.", retryable: true }, 503, env); }
+  }
+
   league.members = (league.members || []).filter((entry) => entry !== memberUid);
   if (league.names) delete league.names[memberUid];
   if (league.joinedAt) delete league.joinedAt[memberUid];
@@ -1109,9 +1198,6 @@ async function kickMember(env, body) {
     env.KV.delete(leagueMemberKey(code, memberUid)),
     user ? kvPut(env, `user:${memberUid}`, user) : Promise.resolve(),
   ]);
-  // The membership is gone; free the name so it can be reused. Tombstoned in the
-  // registrar so a stale roster can never resurrect the old claim (Slice A/D).
-  await registrarReleaseSafe(env, code, memberUid);
   return json({ ok: true, code, removed: memberUid }, 200, env);
 }
 
@@ -1382,8 +1468,22 @@ async function setProfile(env, body) {
     try { claim = await registrarCall(env, code, "begin", { uid, nick: nickname, roster, now: Date.now() }); }
     catch { kept.push(code); continue; }
     if (!claim.ok || claim.taken) { kept.push(code); continue; }
+    // Write, then commit with the fence. A definitive committed:false (the name
+    // was taken here since, or the attempt expired) restores the Anon row —
+    // never a duplicate (Slice A/C). A thrown commit is ambiguous but our fresh
+    // pending held the name, so reconciliation aligns it: treat as propagated.
     await kvPut(env, leagueMemberKey(code, uid), { ...member, nick: nickname });
-    try { await registrarCall(env, code, "commit", { uid, norm: claim.norm }); } catch { /* self-heals via reconcile */ }
+    let commit;
+    try { commit = await registrarCall(env, code, "commit", { uid, norm: claim.norm, fence: claim.fence, now: Date.now() }); }
+    catch { updated.push(code); continue; }
+    if (!commit.committed) {
+      const current = await kvGet(env, leagueMemberKey(code, uid));
+      if (current && normaliseJoinNick(current.nick) === claim.norm) {
+        await kvPut(env, leagueMemberKey(code, uid), { ...member });
+      }
+      kept.push(code);
+      continue;
+    }
     updated.push(code);
   }
   return json({ ok: true, uid, nickname, updated, kept, recovery: user.recovery }, 200, env);
@@ -1408,6 +1508,7 @@ async function updateLeagueNick(env, body) {
   // (Slice A/A, A/D). Renaming to the name you already hold is idempotent.
   if (!registrarEnabled(env)) return registrarUnavailable(env);
   const roster = await members(env, league);
+  const priorNick = existing?.nick ?? league.names?.[uid] ?? null;
   let begin;
   try { begin = await registrarCall(env, code, "begin", { uid, nick, roster, now: Date.now() }); }
   catch { return registrarUnavailable(env); }
@@ -1423,7 +1524,27 @@ async function updateLeagueNick(env, body) {
     delete league.names[uid];
     await kvPut(env, `league:${code}`, league);
   }
-  try { await registrarCall(env, code, "commit", { uid, norm: begin.norm }); } catch { /* self-heals via reconcile */ }
+  // Commit with our fence. A definitive committed:false means another rename
+  // won the name (or our attempt expired): restore the member's PRIOR name so a
+  // crossed rename never leaves them holding a name they do not own, and refuse
+  // (Slice A/C). A stale roster cannot have committed a different name because
+  // reconciliation only promotes a pending claim of the SAME name (Slice A/B).
+  // A thrown commit is ambiguous but our fresh pending held the name, so
+  // reconciliation aligns it — report success rather than restore.
+  let commit;
+  try { commit = await registrarCall(env, code, "commit", { uid, norm: begin.norm, fence: begin.fence, now: Date.now() }); }
+  catch { return json({ ok: true, code, uid, nick }, 200, env); }
+  if (!commit.committed) {
+    const current = await kvGet(env, leagueMemberKey(code, uid));
+    if (current && normaliseJoinNick(current.nick) === begin.norm) {
+      await kvPut(env, leagueMemberKey(code, uid), { nick: normNick(priorNick ?? DEFAULT_NICK), since });
+    }
+    if (commit.taken) {
+      return json({ error: "That name is taken in this league", taken: true,
+        suggestions: commit.suggestions || [] }, 409, env);
+    }
+    return registrarUnavailable(env);
+  }
   return json({ ok: true, code, uid, nick }, 200, env);
 }
 

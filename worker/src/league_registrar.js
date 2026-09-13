@@ -16,11 +16,22 @@
 //
 // A claim has a bounded lifecycle so an abandoned join cannot reserve a name
 // forever:
-//   pending   — an in-flight join holds the name for a short TTL;
+//   pending   — an in-flight attempt holds the name for a short TTL;
 //   committed — the membership write has completed (or a genuine member was
 //               backfilled from the roster);
 //   released  — the member was kicked or deleted; the name is free again, and a
 //               stale roster can never resurrect the claim.
+//
+// Every begin() is a fresh ATTEMPT with an opaque fence. commit() converts a
+// claim only when the uid, normalised name AND fence all still match the active
+// pending attempt, it has not expired, and no other uid has since acquired the
+// name. This fences out three races the first cut missed:
+//   - an expired pending row must contest the name afresh, not be honoured as
+//     an owned reservation (so an old retry after another UID wins is refused);
+//   - a stale roster must never promote or rewrite an in-flight rename to a
+//     different name;
+//   - a delayed commit for an expired or superseded attempt must never convert
+//     the claim, and its caller must not report success.
 //
 // The account UID is the identity throughout and is the table key. The display
 // name is a per-league label the registrar arbitrates; it is never a key.
@@ -33,7 +44,8 @@ CREATE TABLE IF NOT EXISTS claims (
   norm  TEXT NOT NULL,
   nick  TEXT NOT NULL,
   state TEXT NOT NULL,
-  ts    INTEGER NOT NULL
+  ts    INTEGER NOT NULL,
+  fence TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS claims_norm ON claims (norm);
 `;
@@ -65,25 +77,31 @@ export class LeagueRegistrar {
 
   #rows(query, ...binds) { return this.sql.exec(query, ...binds).toArray(); }
 
+  /** An opaque, unguessable fence for one attempt. */
+  #fence() { return crypto.randomUUID(); }
+
+  #row(uid) { return this.#rows("SELECT norm, nick, state, ts, fence FROM claims WHERE uid = ?", uid)[0]; }
+
   /**
    * Backfill members KV already holds — additive only.
    *
    * A registrar instance starts empty and members may predate it, so the worker
-   * passes the current roster. Unknown members are inserted as committed; a
-   * pending row for a member who now has a real membership is promoted to
-   * committed. It NEVER deletes and NEVER touches a released row, so a stale
-   * roster that still lists a kicked member cannot resurrect that claim — the
-   * exact read-after-write lag that makes KV unsafe as the authority.
+   * passes the current roster. Unknown members are inserted as committed. A
+   * PENDING row is promoted to committed ONLY when the roster's normalised name
+   * matches that pending claim — a stale roster still showing an old name must
+   * never rewrite or commit a rename that is in flight to a different name. It
+   * NEVER deletes and NEVER touches a released or committed row, so a lagging
+   * roster cannot resurrect a kicked member's claim.
    */
   #reconcile(roster) {
     for (const m of roster || []) {
       if (!m?.uid) continue;
       const norm = normaliseJoinNick(m.nick);
       if (!norm) continue;
-      this.sql.exec("INSERT OR IGNORE INTO claims (uid, norm, nick, state, ts) VALUES (?, ?, ?, 'committed', 0)",
+      this.sql.exec("INSERT OR IGNORE INTO claims (uid, norm, nick, state, ts, fence) VALUES (?, ?, ?, 'committed', 0, '')",
         m.uid, norm, String(m.nick));
-      this.sql.exec("UPDATE claims SET norm = ?, nick = ?, state = 'committed' WHERE uid = ? AND state = 'pending'",
-        norm, String(m.nick), m.uid);
+      this.sql.exec("UPDATE claims SET state = 'committed' WHERE uid = ? AND state = 'pending' AND norm = ?",
+        m.uid, norm);
     }
   }
 
@@ -102,9 +120,17 @@ export class LeagueRegistrar {
     return suggestFor(display, (n) => !held.has(n));
   }
 
+  /** Is this uid's own claim to `norm` still live (committed, or fresh pending)? */
+  #ownsLive(row, norm, now) {
+    if (!row || row.norm !== norm) return false;
+    if (row.state === "committed") return true;
+    return row.state === "pending" && row.ts > now - PENDING_TTL_MS;
+  }
+
   /**
-   * Reserve a name for a uid as PENDING, atomically. Single-threaded, so the
-   * conflict read and the write cannot interleave with another begin.
+   * Reserve a name for a uid as a fresh PENDING attempt, atomically. Single-
+   * threaded, so the conflict read and the write cannot interleave with another
+   * begin. Returns an opaque fence the caller must present to commit().
    */
   begin({ uid, nick, roster, now = 0 }) {
     uid = String(uid || "");
@@ -113,46 +139,76 @@ export class LeagueRegistrar {
     if (!norm) return { ok: false, error: "name required" };
     this.#reconcile(roster);
     const display = String(nick).trim().slice(0, 24);
+    const mine = this.#row(uid);
 
-    // Already yours (and not a released tombstone): idempotent, refresh pending.
-    const mine = this.#rows("SELECT norm, state FROM claims WHERE uid = ?", uid)[0];
-    if (mine && mine.state !== "released" && mine.norm === norm) {
-      if (mine.state === "pending") this.sql.exec("UPDATE claims SET ts = ?, nick = ? WHERE uid = ?", now, display, uid);
-      return { ok: true, norm, nick: display, own: true };
+    // Already committed to this exact name: a no-op success, no new attempt.
+    if (mine && mine.state === "committed" && mine.norm === norm) {
+      return { ok: true, own: true, committed: true, norm, nick: display, fence: mine.fence };
+    }
+    // A live (fresh) pending under this exact name: an idempotent retry. Issue a
+    // NEW fence, superseding the prior attempt, and refresh the hold.
+    if (mine && mine.state === "pending" && mine.norm === norm && mine.ts > now - PENDING_TTL_MS) {
+      const fence = this.#fence();
+      this.sql.exec("UPDATE claims SET ts = ?, nick = ?, fence = ? WHERE uid = ?", now, display, fence, uid);
+      return { ok: true, own: true, norm, nick: display, fence };
     }
 
+    // An EXPIRED pending row is not an owned reservation — contest the name.
     if (this.#holder(norm, uid, now)) {
       return { ok: false, taken: true, norm, error: "That name is taken in this league",
         suggestions: this.#suggest(display, now) };
     }
 
-    // Free: reserve as pending. UID is the key, so this both inserts a new
-    // joiner and moves an existing member off a previous name in one statement.
-    this.sql.exec("INSERT INTO claims (uid, norm, nick, state, ts) VALUES (?, ?, ?, 'pending', ?) "
-      + "ON CONFLICT(uid) DO UPDATE SET norm = excluded.norm, nick = excluded.nick, state = 'pending', ts = excluded.ts",
-      uid, norm, display, now);
-    return { ok: true, norm, nick: display };
+    // Free: reserve as a fresh pending attempt. UID is the key, so this both
+    // inserts a new joiner and moves an existing member off a previous name.
+    const fence = this.#fence();
+    this.sql.exec("INSERT INTO claims (uid, norm, nick, state, ts, fence) VALUES (?, ?, ?, 'pending', ?, ?) "
+      + "ON CONFLICT(uid) DO UPDATE SET norm = excluded.norm, nick = excluded.nick, "
+      + "state = 'pending', ts = excluded.ts, fence = excluded.fence",
+      uid, norm, display, now, fence);
+    return { ok: true, norm, nick: display, fence };
   }
 
-  /** Promote a uid's pending claim to committed once its membership is written. */
-  commit({ uid, norm }) {
-    const changed = this.sql.exec("UPDATE claims SET state = 'committed' WHERE uid = ? AND norm = ?",
-      String(uid || ""), normaliseJoinNick(norm) || String(norm || "")).rowsWritten;
-    return { ok: true, committed: (changed || 0) > 0 };
+  /**
+   * Convert a uid's pending attempt to committed — but only when it is still the
+   * active, fresh attempt (uid + norm + fence all match, not expired) and no
+   * other uid has acquired the name meanwhile. A stale, expired, superseded or
+   * released attempt returns committed:false and changes nothing, so the caller
+   * knows its fence lost authority and must not report success.
+   */
+  commit({ uid, norm, fence, now = 0 }) {
+    uid = String(uid || "");
+    const want = normaliseJoinNick(norm) || String(norm || "");
+    const row = this.#row(uid);
+    // Already committed to this name: idempotent success (a duplicate commit).
+    if (row && row.state === "committed" && row.norm === want) return { ok: true, committed: true };
+
+    const active = row && row.state === "pending" && row.norm === want
+      && row.fence === String(fence || "") && row.ts > now - PENDING_TTL_MS;
+    if (!active) return { ok: true, committed: false, reason: "superseded" };
+    // The name may have been acquired by another uid since this attempt began.
+    if (this.#holder(want, uid, now)) {
+      return { ok: true, committed: false, taken: true, suggestions: this.#suggest(row.nick, now) };
+    }
+    this.sql.exec("UPDATE claims SET state = 'committed' WHERE uid = ? AND fence = ? AND state = 'pending'",
+      uid, String(fence || ""));
+    return { ok: true, committed: true };
   }
 
   /** Free a member's name — kick or deletion. Tombstoned so a stale roster
-   *  cannot resurrect it; a released name is immediately reusable by anyone. */
+   *  cannot resurrect it; a released name is immediately reusable by anyone.
+   *  Idempotent: releasing an already-released or absent uid is a success, so a
+   *  retry after a failed teardown always converges. */
   release({ uid, now = 0 }) {
-    const changed = this.sql.exec("UPDATE claims SET state = 'released', ts = ? WHERE uid = ?",
+    const changed = this.sql.exec("UPDATE claims SET state = 'released', ts = ?, fence = '' WHERE uid = ? AND state != 'released'",
       now, String(uid || "")).rowsWritten;
     return { ok: true, released: (changed || 0) > 0 };
   }
 
-  /** Drop every claim — league deletion. */
+  /** Drop every claim — league deletion. Idempotent. */
   purge() {
     this.sql.exec("DELETE FROM claims");
-    return { ok: true };
+    return { ok: true, purged: true };
   }
 
   /** Read-only availability, for a live sheet check. */
@@ -160,8 +216,7 @@ export class LeagueRegistrar {
     this.#reconcile(roster);
     const norm = normaliseJoinNick(nick);
     if (!norm) return { available: false, error: "name required" };
-    const mine = this.#rows("SELECT norm, state FROM claims WHERE uid = ?", String(uid || ""))[0];
-    if (mine && mine.state !== "released" && mine.norm === norm) return { available: true, own: true };
+    if (this.#ownsLive(this.#row(String(uid || "")), norm, now)) return { available: true, own: true };
     if (!this.#holder(norm, String(uid || ""), now)) return { available: true };
     return { available: false, taken: true, suggestions: this.#suggest(String(nick).trim(), now) };
   }

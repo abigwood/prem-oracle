@@ -857,6 +857,14 @@ export const DEFAULT_NICK = "Anon";
 
 export const normNick = (value) => String(value || "").trim().slice(0, 24) || DEFAULT_NICK;
 
+// The league-level uniqueness key for a display name: the trimmed, length-capped
+// display value, case-folded, with inner whitespace collapsed. "Bob", " bob ",
+// "BOB" and "Bob  Smith"/"Bob Smith" all fold together. Distinct from normNick,
+// which produces the DISPLAYED name (case and single spaces preserved); this is
+// only ever a comparison key and is never stored as a member's name.
+export const normaliseJoinNick = (value) =>
+  String(value || "").trim().slice(0, 24).toLowerCase().replace(/\s+/g, " ").trim();
+
 const icsStamp = (date) => date.toISOString().replace(/[-:]/g, "").slice(0, 15) + "Z";
 
 const icsEscape = (value) =>

@@ -24,6 +24,7 @@ import {
   makeRecovery,
   DEFAULT_NICK,
   normNick,
+  normaliseJoinNick,
   normRecovery,
   normaliseResult,
   normaliseSlate,
@@ -49,6 +50,7 @@ import {
 } from "./logic.js";
 import { apnsConfigured, sendPush } from "./apns.js";
 import { NotifyLedger, utcDay } from "./notify/ledger.js";
+import { LeagueRegistrar } from "./league_registrar.js";
 import {
   dueFixtures, planWindow, slateFixtureKey, slateFixturePrefix,
 } from "./notify/planner.js";
@@ -952,6 +954,50 @@ async function deleteAccount(env, body) {
   }, 200, env);
 }
 
+/** Is the atomic registrar available? Absent during rollback / pre-migration. */
+const registrarEnabled = (env) => !!env.LEAGUE_REGISTRAR;
+
+/**
+ * Arbitrate a display name for a league, atomically when the registrar exists.
+ *
+ * With the Durable Object bound, one instance per league serialises the claim,
+ * so concurrent same-name joins cannot both win. Without it — a rollback or the
+ * window before the migration — the worker falls back to a best-effort roster
+ * check, which is honest but not race-proof; it is strictly better than the old
+ * no-check behaviour and never rewrites an existing member.
+ *
+ * `offered` empty means the caller gave no per-league name (an older client
+ * relying on its profile name): uniqueness is not arbitrated for the Anon
+ * fallback, preserving the v1.7.1 join contract.
+ */
+async function claimLeagueNick(env, code, uid, offered, roster) {
+  if (!offered) return { ok: true, nick: null }; // no name offered -> fallback path
+  if (registrarEnabled(env)) {
+    const stub = env.LEAGUE_REGISTRAR.get(env.LEAGUE_REGISTRAR.idFromName(code));
+    const response = await stub.fetch("https://league-registrar/rpc", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ op: "claim", uid, nick: offered, roster }),
+    });
+    if (!response.ok) throw new Error(`registrar claim failed: ${response.status}`);
+    return response.json();
+  }
+  // Fallback: reject only a name held by a DIFFERENT uid; never a re-join, never
+  // an existing duplicate rewrite.
+  const want = normaliseJoinNick(offered);
+  const clash = roster.find((m) => m.uid !== uid && normaliseJoinNick(m.nick) === want);
+  if (clash) {
+    const taken = new Set(roster.map((m) => normaliseJoinNick(m.nick)));
+    const base = offered.trim().slice(0, 22) || "Player";
+    const suggestions = [];
+    for (let n = 2; suggestions.length < 3 && n < 60; n++) {
+      const candidate = `${base} ${n}`.slice(0, 24);
+      if (!taken.has(normaliseJoinNick(candidate))) suggestions.push(candidate);
+    }
+    return { ok: false, taken: true, error: "That name is taken in this league", suggestions };
+  }
+  return { ok: true, nick: normNick(offered) };
+}
+
 async function joinLeague(env, body) {
   const uid = String(body.uid || "").trim();
   const code = String(body.code || "").trim().toUpperCase();
@@ -964,8 +1010,19 @@ async function joinLeague(env, body) {
   // then whatever they already had. "Anon" only remains when nobody has ever
   // offered a name at all.
   const offered = String(body.nick || body.nickname || "").trim();
+
+  // Uniqueness is arbitrated BEFORE any membership write, so a taken name
+  // produces no partial membership. The registrar is seeded with the current
+  // roster so it knows about members who predate it.
+  const roster = await members(env, league);
+  const claim = await claimLeagueNick(env, code, uid, offered, roster);
+  if (!claim.ok) {
+    return json({ error: claim.error || "name unavailable", taken: !!claim.taken,
+      suggestions: claim.suggestions || [] }, 409, env);
+  }
+
   await kvPut(env, leagueMemberKey(code, uid), {
-    nick: offered ? normNick(offered) : (user.nickname || existing?.nick || DEFAULT_NICK),
+    nick: claim.nick || (offered ? normNick(offered) : (user.nickname || existing?.nick || DEFAULT_NICK)),
     since: existing?.since || league.joinedAt?.[uid] || Date.now(),
   });
   user.leagues = [...new Set([...(user.leagues || []), code])];
@@ -2414,6 +2471,7 @@ export default {
 };
 
 export { NotifyLedger };
+export { LeagueRegistrar };
 
 async function route(request, env) {
   const url = new URL(request.url);

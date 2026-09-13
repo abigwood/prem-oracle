@@ -116,7 +116,12 @@ test("3 · unknown league, nickname and uid fail, changing nothing", async () =>
 
 test("4 · two members with the same nick is refused, never a guess", async () => {
   const { env, post, store, code } = await seeded();
-  await post("/join", { uid: "gift2", code, nickname: "The Gift" });
+  // A PRE-EXISTING production duplicate: written straight to KV, as one would
+  // have existed before v1.8 uniqueness. (A fresh /join with a taken name is
+  // now refused — proved in the join-uniqueness suite — so it cannot be the
+  // way to create the fixture here.)
+  await post("/join", { uid: "gift2", code, nickname: "Cover Story" });
+  store.set(`member:${code}:gift2`, JSON.stringify({ nick: "The Gift", since: 1 }));
   const before = snapshot(store);
   const res = await call(env, { requestId: UUID(), leagueCode: code, exactNick: "The Gift" });
   assert.equal(res.status, 404);

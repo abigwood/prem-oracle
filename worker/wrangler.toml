@@ -24,6 +24,15 @@ preview_id = "b9f71204465f4ea38be82bd2359e70e9"
 tag = "v1"
 new_sqlite_classes = ["NotifyLedger"]
 
+# v1.8 Slice A. The LeagueRegistrar Durable Object — one instance per league,
+# the atomic authority for display-name uniqueness. A second migration adds the
+# class; the binding below reaches it. Rolling back is deleting the binding and
+# redeploying: the join path then degrades to the best-effort roster check in
+# claimLeagueNick, so the v1.7.1 client keeps working either way.
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["LeagueRegistrar"]
+
 # ---------------------------------------------------------------------------
 # B2 ACTIVATION. These three blocks are the whole switch: with them the cron
 # plans into the queue and the consumer delivers; without them the same code
@@ -34,6 +43,12 @@ new_sqlite_classes = ["NotifyLedger"]
 [[durable_objects.bindings]]
 name = "NOTIFY_LEDGER"
 class_name = "NotifyLedger"
+
+# v1.8 Slice A. Absent -> joinLeague uses the best-effort roster check; present
+# -> uniqueness is atomic. Must be deployed before the build-31 client ships.
+[[durable_objects.bindings]]
+name = "LEAGUE_REGISTRAR"
+class_name = "LeagueRegistrar"
 
 [[queues.producers]]
 binding = "NOTIFY_QUEUE"

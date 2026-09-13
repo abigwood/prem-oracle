@@ -76,9 +76,12 @@ test("B2 · the reviewed bindings are configured, and named exactly", () => {
     "the Durable Object binding is missing or not bound to NotifyLedger");
   assert.match(active, /\[\[queues\.producers\]\]\nbinding = "NOTIFY_QUEUE"\nqueue = "prem-oracle-notify"/,
     "the producer is missing or points at another queue");
-  // Exactly one of each: a second producer would be a second name for the same
-  // switch, and a second consumer would double every delivery.
-  assert.equal(active.match(/\[\[durable_objects\.bindings\]\]/g).length, 1);
+  // Exactly one NOTIFY_LEDGER binding. v1.8 Slice A adds one more DO binding —
+  // LeagueRegistrar — and nothing else; a second producer would be a second
+  // name for the same switch, and a second consumer would double every delivery.
+  assert.equal((active.match(/name = "NOTIFY_LEDGER"\nclass_name = "NotifyLedger"/g) || []).length, 1);
+  assert.equal(active.match(/\[\[durable_objects\.bindings\]\]/g).length, 2);
+  assert.match(active, /name = "LEAGUE_REGISTRAR"\nclass_name = "LeagueRegistrar"/);
   assert.equal(active.match(/\[\[queues\.producers\]\]/g).length, 1);
   assert.equal(active.match(/\[\[queues\.consumers\]\]/g).length, 1);
   // The names the code gates on are the names configured.
@@ -108,10 +111,11 @@ test("B2 · activation adds a binding, never a second migration", () => {
   const active = directives();
   assert.match(active, /\[\[migrations\]\]/);
   assert.match(active, /new_sqlite_classes = \["NotifyLedger"\]/);
-  assert.equal(active.match(/\[\[migrations\]\]/g).length, 1,
-    "a second migration was introduced");
-  assert.equal(active.match(/^tag = /gm).length, 1);
+  // v1 (NotifyLedger) and v2 (LeagueRegistrar) — the only two, both additive.
+  assert.equal(active.match(/\[\[migrations\]\]/g).length, 2);
+  assert.equal(active.match(/^tag = /gm).length, 2);
   assert.match(active, /tag = "v1"/, "the applied migration tag changed");
+  assert.match(active, /tag = "v2"\nnew_sqlite_classes = \["LeagueRegistrar"\]/);
   // Nothing may be renamed or deleted: those are the migration verbs that
   // would touch a namespace that already holds state.
   assert.ok(!/renamed_classes|deleted_classes|new_classes\b/.test(active));

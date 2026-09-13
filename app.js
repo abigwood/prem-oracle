@@ -7462,7 +7462,11 @@ function openJoinSheet(code) {
   api(`/state?code=${encodeURIComponent(code0)}`)
     .then((state) => {
       if (superseded()) return;
-      if (code0 !== String(state.code || code0).toUpperCase() && state.name == null) return;
+      // A /state answer that names a DIFFERENT league is never adopted — even
+      // when it carries a name. We only trust an answer for the code we asked
+      // about (Slice A/E).
+      const returned = String(state.code || "").toUpperCase();
+      if (returned && returned !== code0) return;
       nameEl.textContent = `Join ${state.name || code0}`;
     })
     .catch(() => {

@@ -222,3 +222,15 @@ test("a 503 is retryable in the sheet: no save, no nav, and the button comes bac
   assert.match(document.getElementById("joinTaken").textContent, /try again/i);
   assert.equal(document.getElementById("joinDialog").open, true, "the sheet closed on a retryable failure");
 });
+
+test("a /state answer for a DIFFERENT league is never adopted, even with a name", async () => {
+  // The invitation is ABC234, but the answer names league ZZZZZZ. A crossed
+  // identity must be rejected outright — the sheet must not rename to it
+  // (Slice A/E).
+  const { box, document } = sheetBox({ stateResponse: { code: "ZZZZZZ", name: "Someone Else's League" } });
+  box.openJoinSheet("ABC234");
+  await flush();
+  const name = document.getElementById("joinLeagueName").textContent;
+  assert.doesNotMatch(name, /Someone Else/, "adopted a different league's identity");
+  assert.match(name, /Joining league/, "a crossed-identity answer still renamed the sheet");
+});

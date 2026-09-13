@@ -24,9 +24,9 @@ function memoryKV(store = new Map()) {
   };
 }
 
-function world({ registrar = true } = {}) {
+function world({ registrar = true, kv } = {}) {
   const store = new Map();
-  const env = { KV: memoryKV(store) };
+  const env = { KV: kv || memoryKV(store) };
   // registrar: true -> a fresh real namespace; an object -> use it (a fault
   // injector); false -> no binding at all (the fail-closed path).
   if (registrar === true) env.LEAGUE_REGISTRAR = registrarNamespace();
@@ -35,6 +35,28 @@ function world({ registrar = true } = {}) {
     method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
   }), env);
   return { store, env, post };
+}
+
+/** A KV that can be "armed" to THROW on the first write/delete whose key matches
+ *  a substring — a faithful mid-handler crash (the worker's top-level catch
+ *  turns it into a 500). Disarming restores normal operation for the retry. */
+function crashableKV(store = new Map()) {
+  let armed = null; // { op, match } — fires once
+  const fireIfArmed = (op, key) => {
+    if (armed && armed.op === op && key.includes(armed.match)) { armed = null; throw new Error("crash"); }
+  };
+  const kv = {
+    async get(key, type) {
+      if (!store.has(key)) return null;
+      return type === "json" || type === undefined ? JSON.parse(store.get(key)) : store.get(key);
+    },
+    async put(key, value) { fireIfArmed("put", key); store.set(key, value); },
+    async delete(key) { fireIfArmed("delete", key); store.delete(key); },
+    async list({ prefix = "" } = {}) {
+      return { keys: [...store.keys()].filter((k) => k.startsWith(prefix)).sort().map((name) => ({ name })), list_complete: true };
+    },
+  };
+  return { kv, store, crashOn: (op, match) => { armed = { op, match }; }, disarm: () => { armed = null; } };
 }
 
 /** A registrar namespace that can be told to fail the NEXT n calls of an op
@@ -56,6 +78,32 @@ function controllableRegistrar() {
     },
   };
   return { namespace, failNext: (op, n = 1) => { fail[op] += n; } };
+}
+
+/** A registrar that returns a caller-supplied commit VERDICT (a well-formed 200,
+ *  not an error) for the next n commits — for proving definitive committed:false
+ *  handling through a route. begin is left real, so the name is genuinely held. */
+function commitVerdictRegistrar(verdict) {
+  const real = registrarNamespace();
+  let n = 0;
+  const namespace = {
+    idFromName: (name) => real.idFromName(name),
+    get(id) {
+      const inner = real.get(id);
+      return {
+        fetch: async (url, init) => {
+          const body = JSON.parse(init.body);
+          if (body.op === "commit" && n > 0) {
+            n -= 1;
+            return new Response(JSON.stringify({ uid: body.uid, norm: body.norm, ...verdict(body) }),
+              { status: 200, headers: { "content-type": "application/json" } });
+          }
+          return inner.fetch(url, init);
+        },
+      };
+    },
+  };
+  return { namespace, failCommits: (count = 1) => { n += count; } };
 }
 
 /** Direct RPC to a league's real registrar instance, for driving crash points. */
@@ -489,45 +537,97 @@ test("B · a stale reconcile during a crossed rename cancels neither, allocates 
     "the stale reconcile cancelled u1's active rename");
 });
 
-// --- D · teardown is resumable and idempotent across registrar failure ------
+// --- C/D · teardown is a resumable, crash-safe intent/outbox ----------------
+// The live record is removed BEFORE the registrar side, so a crash between them
+// leaves the name over-reserved (a concurrent join is refused), never a live
+// member with no registrar authority. The intent lets a retry finish.
 
-test("D · a kick whose release fails refuses, and a retry completes it", async () => {
+const kickIntent = (code, uid) => `intent:kick:${code}:${uid}`;
+const leagueIntent = (code) => `intent:league:${code}`;
+const accountIntent = (uid) => `intent:account:${uid}`;
+
+test("C · a kick that stalls before release: member gone, name held, join refused, retry frees it", async () => {
   const ctl = controllableRegistrar();
   const { post, store, code } = await withLeague({ registrar: ctl.namespace });
   await post("/join", { uid: "u1", code, nick: "Cantona" });
   ctl.failNext("release", 1);
   const first = await post("/league/kick", { uid: "host", code, memberUid: "u1" });
   assert.equal(first.status, 503, "a kick reported success while the release was outstanding");
-  assert.equal(store.has(`member:${code}:u1`), true, "the membership was torn down before the name was freed");
-  // Retry: release succeeds, member removed, name reusable.
+  // Live membership already removed; the name is still reserved (over-reservation).
+  assert.equal(store.has(`member:${code}:u1`), false, "the live membership was not removed first");
+  assert.ok(store.has(kickIntent(code, "u1")), "no resumable intent was recorded");
+  // A concurrent join to the not-yet-released name is refused — never a duplicate.
+  assert.equal((await post("/join", { uid: "u2", code, nick: "Cantona" })).status, 409,
+    "the name was reusable before the release completed");
+  // Retry resumes from the intent (member already gone) and completes.
   assert.equal((await post("/league/kick", { uid: "host", code, memberUid: "u1" })).status, 200);
-  assert.equal(store.has(`member:${code}:u1`), false);
+  assert.ok(!store.has(kickIntent(code, "u1")), "the intent was not cleared on completion");
   assert.equal((await post("/join", { uid: "u2", code, nick: "Cantona" })).status, 200, "the freed name was not reusable");
 });
 
-test("D · a league delete whose purge fails refuses, and a retry completes it", async () => {
+test("C · a league delete that stalls before purge: league gone, join refused, retry completes", async () => {
   const ctl = controllableRegistrar();
   const { post, store, code } = await withLeague({ registrar: ctl.namespace });
   await post("/join", { uid: "u1", code, nick: "Neville" });
   ctl.failNext("purge", 1);
   const first = await post("/league/delete", { uid: "host", code });
   assert.equal(first.status, 503, "a delete reported success while the purge was outstanding");
-  assert.equal(store.has(`league:${code}`), true, "the league record was erased before the purge landed");
+  // The league is already inaccessible; the intent remains for the retry.
+  assert.equal(store.has(`league:${code}`), false, "the live league was not made inaccessible first");
+  assert.ok(store.has(leagueIntent(code)), "no resumable intent was recorded");
+  // A concurrent join to the dying league is refused (respects the intent).
+  assert.equal((await post("/join", { uid: "u9", code, nick: "Latecomer" })).status, 404,
+    "a join repopulated a league being deleted");
+  // Retry resumes (league record already gone) and completes the purge.
   assert.equal((await post("/league/delete", { uid: "host", code })).status, 200);
-  assert.equal(store.has(`league:${code}`), false);
+  assert.ok(!store.has(leagueIntent(code)), "the intent was not cleared on completion");
 });
 
-test("D · an account delete whose release fails keeps the user record for the retry", async () => {
+test("C · an account delete across leagues that stalls before release: retry completes", async () => {
   const ctl = controllableRegistrar();
-  const { post, store, code } = await withLeague({ registrar: ctl.namespace });
-  await post("/join", { uid: "u1", code, nick: "Keane" });
-  ctl.failNext("release", 1);
+  const { post, store, env } = await withLeague({ registrar: ctl.namespace });
+  // u1 joins two leagues; the account deletion must clean both.
+  const a = await (await post("/league", { uid: "ha", nickname: "HA" })).json();
+  const b = await (await post("/league", { uid: "hb", nickname: "HB" })).json();
+  await post("/join", { uid: "u1", code: a.code, nick: "Keane" });
+  await post("/join", { uid: "u1", code: b.code, nick: "Roy" });
+  ctl.failNext("release", 1); // the FIRST league's release stalls
   const first = await post("/account/delete", { uid: "u1" });
   assert.equal(first.status, 503, "an account delete reported success while a release was outstanding");
-  assert.equal(store.has("user:u1"), true, "the user record — the resume context — was erased on failure");
+  // The resume context is retained until every release lands.
+  assert.ok(store.has(accountIntent("u1")), "no resumable account intent was recorded");
+  assert.ok(store.has("user:u1"), "the user record — resume context — was erased before releases completed");
+  // Retry resumes and completes; both names free again, account gone.
   assert.equal((await post("/account/delete", { uid: "u1" })).status, 200);
+  assert.ok(!store.has(accountIntent("u1")), "the intent was not cleared on completion");
   assert.equal(store.has("user:u1"), false);
-  assert.equal((await post("/join", { uid: "u2", code, nick: "Keane" })).status, 200, "the freed name was not reusable");
+  assert.equal((await post("/join", { uid: "u2", code: a.code, nick: "Keane" })).status, 200);
+  assert.equal((await post("/join", { uid: "u3", code: b.code, nick: "Roy" })).status, 200);
+});
+
+test("C · lifecycle cleanup fails closed when the registrar binding is absent", async () => {
+  // No binding at all: kick, league delete and account delete must refuse rather
+  // than silently skip freeing the name / purging.
+  const { post, store, code } = await withLeague({ registrar: false });
+  // Seed a member and a league directly (join is itself fail-closed without a registrar).
+  store.set(`member:${code}:u1`, JSON.stringify({ nick: "Ghost", since: 1 }));
+  store.set("user:u1", JSON.stringify({ nickname: "Ghost", leagues: [code] }));
+  assert.equal((await post("/league/kick", { uid: "host", code, memberUid: "u1" })).status, 503);
+  assert.equal((await post("/league/delete", { uid: "host", code })).status, 503);
+  assert.equal((await post("/account/delete", { uid: "u1" })).status, 503);
+});
+
+test("B · an existing member's /join with a different name cannot retain it on commit failure", async () => {
+  // /join must not be an unfenced rename. An existing member offering a new name
+  // is delegated to the fenced rename, which restores the prior name when commit
+  // definitively fails — the new name is never retained (Slice A/B).
+  const commitFalse = commitVerdictRegistrar(() => ({ ok: true, committed: false }));
+  const { post, store, code } = await withLeague({ registrar: commitFalse.namespace });
+  await post("/join", { uid: "u1", code, nick: "Old" });
+  commitFalse.failCommits(1);
+  const res = await post("/join", { uid: "u1", code, nick: "New" });
+  assert.notEqual(res.status, 200, "an existing member retained a new name through /join on commit failure");
+  assert.equal(JSON.parse(store.get(`member:${code}:u1`)).nick, "Old", "the prior name was not restored");
 });
 
 // --- E · a malformed registrar answer fails closed --------------------------
@@ -553,4 +653,137 @@ test("E · a malformed begin fails the join closed, writing nothing", async () =
   assert.equal(res.status, 503, "a malformed begin was trusted");
   assert.equal(store.has(`member:${code}:u1`), false, "a malformed begin still wrote a membership");
   assert.equal(store.has("user:u1"), false, "a malformed begin still minted an account");
+});
+
+// --- A · an unknown commit outcome is never reported as success -------------
+// A commit whose verdict is missing/malformed/unavailable (even after the safe
+// re-read) must produce a retryable response, never HTTP 200 — across every
+// commit caller. begin is real, so the fenced state is genuinely held and an
+// identical retry converges once commit works.
+
+test("A · a fresh join whose commit stays unknown refuses, then a retry converges", async () => {
+  const ctl = controllableRegistrar();
+  const { post, store, code } = await withLeague({ registrar: ctl.namespace });
+  ctl.failNext("commit", 2); // both the commit and its safe re-read fail
+  const first = await post("/join", { uid: "u1", code, nick: "Ferdinand" });
+  assert.notEqual(first.status, 200, "a fresh join reported success on an unknown commit");
+  // Retry: commit now lands, join confirmed.
+  const retry = await post("/join", { uid: "u1", code, nick: "Ferdinand" });
+  assert.equal(retry.status, 200);
+  assert.equal(JSON.parse(store.get(`member:${code}:u1`)).nick, "Ferdinand");
+});
+
+test("A · an existing member's /join rename whose commit stays unknown refuses, then converges", async () => {
+  const ctl = controllableRegistrar();
+  const { post, store, code } = await withLeague({ registrar: ctl.namespace });
+  await post("/join", { uid: "u1", code, nick: "Old" });
+  ctl.failNext("commit", 2);
+  const first = await post("/join", { uid: "u1", code, nick: "New" });
+  assert.notEqual(first.status, 200, "an existing member's /join rename reported success on an unknown commit");
+  const retry = await post("/join", { uid: "u1", code, nick: "New" });
+  assert.equal(retry.status, 200);
+  assert.equal(JSON.parse(store.get(`member:${code}:u1`)).nick, "New");
+});
+
+test("A · a /league/nick whose commit stays unknown refuses, then a retry converges", async () => {
+  const ctl = controllableRegistrar();
+  const { post, store, code } = await withLeague({ registrar: ctl.namespace });
+  await post("/join", { uid: "u1", code, nick: "Old" });
+  ctl.failNext("commit", 2);
+  const first = await post("/league/nick", { uid: "u1", code, nick: "Fresh" });
+  assert.notEqual(first.status, 200, "a rename reported success on an unknown commit");
+  const retry = await post("/league/nick", { uid: "u1", code, nick: "Fresh" });
+  assert.equal(retry.status, 200);
+  assert.equal(JSON.parse(store.get(`member:${code}:u1`)).nick, "Fresh");
+});
+
+test("A · profile propagation whose commit stays unknown is retryable, then converges", async () => {
+  const ctl = controllableRegistrar();
+  const { post, store, code } = await withLeague({ registrar: ctl.namespace });
+  // An Anon member exists (seeded straight into KV — join needs a name).
+  store.set(`member:${code}:u1`, JSON.stringify({ nick: "Anon", since: 1 }));
+  store.set("user:u1", JSON.stringify({ nickname: "", leagues: [code] }));
+  ctl.failNext("commit", 2);
+  const first = await post("/profile", { uid: "u1", nickname: "Tom" });
+  assert.notEqual(first.status, 200, "profile propagation reported success on an unknown commit");
+  assert.equal((await first.json()).retryable, true);
+  // Retry: propagation confirmed.
+  const retry = await post("/profile", { uid: "u1", nickname: "Tom" });
+  assert.equal(retry.status, 200);
+  assert.equal(JSON.parse(store.get(`member:${code}:u1`)).nick, "Tom");
+});
+
+// --- C · injected CRASHES (not just RPC errors) after every teardown boundary
+// A crash is simulated by a KV op that throws mid-handler (the worker's
+// top-level catch turns it into a 500). The durable intent lets a retry resume
+// from wherever it stopped — even after the ordinary record is gone — and a
+// concurrent join during the incomplete window is refused, never duplicated.
+
+async function seededCrashWorld() {
+  const cr = crashableKV();
+  const env = { KV: cr.kv, LEAGUE_REGISTRAR: registrarNamespace() };
+  const post = (path, body) => worker.fetch(new Request(`https://worker.test${path}`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+  }), env);
+  return { cr, store: cr.store, post };
+}
+
+test("C · kick — crash mid live-removal: name stays held, join refused, retry completes", async () => {
+  const { cr, store, post } = await seededCrashWorld();
+  const code = (await (await post("/league", { uid: "host", nickname: "Host" })).json()).code;
+  await post("/join", { uid: "u1", code, nick: "Cantona" });
+  cr.crashOn("delete", `member:${code}:u1`); // crash while removing the live membership
+  assert.equal((await post("/league/kick", { uid: "host", code, memberUid: "u1" })).status, 500);
+  assert.ok(store.has(kickIntent(code, "u1")), "the intent was not recorded before the crash");
+  // The name was never released, so a concurrent join is refused (over-reservation).
+  assert.equal((await post("/join", { uid: "u2", code, nick: "Cantona" })).status, 409);
+  // Retry (healthy KV) resumes and completes.
+  assert.equal((await post("/league/kick", { uid: "host", code, memberUid: "u1" })).status, 200);
+  assert.ok(!store.has(kickIntent(code, "u1")));
+  assert.equal(store.has(`member:${code}:u1`), false);
+  assert.equal((await post("/join", { uid: "u2", code, nick: "Cantona" })).status, 200, "the freed name was not reusable");
+});
+
+test("C · kick — crash after release, before clearing the intent: retry converges", async () => {
+  const { cr, store, post } = await seededCrashWorld();
+  const code = (await (await post("/league", { uid: "host", nickname: "Host" })).json()).code;
+  await post("/join", { uid: "u1", code, nick: "Keane" });
+  cr.crashOn("delete", kickIntent(code, "u1")); // release has run; clearing the intent crashes
+  assert.equal((await post("/league/kick", { uid: "host", code, memberUid: "u1" })).status, 500);
+  assert.ok(store.has(kickIntent(code, "u1")), "intent should still be present after a clear-time crash");
+  assert.equal((await post("/league/kick", { uid: "host", code, memberUid: "u1" })).status, 200);
+  assert.ok(!store.has(kickIntent(code, "u1")));
+});
+
+test("C · league delete — crash mid teardown: join refused, retry completes the purge", async () => {
+  const { cr, store, post } = await seededCrashWorld();
+  const code = (await (await post("/league", { uid: "host", nickname: "Host" })).json()).code;
+  await post("/join", { uid: "u1", code, nick: "Neville" });
+  cr.crashOn("delete", `league:${code}`); // crash while making the league inaccessible
+  assert.equal((await post("/league/delete", { uid: "host", code })).status, 500);
+  assert.ok(store.has(leagueIntent(code)), "the deletion intent was not recorded before the crash");
+  // A join during the dying window is refused (respects the intent).
+  assert.equal((await post("/join", { uid: "u9", code, nick: "Latecomer" })).status, 404);
+  // Retry resumes (from the intent) and completes.
+  assert.equal((await post("/league/delete", { uid: "host", code })).status, 200);
+  assert.ok(!store.has(leagueIntent(code)));
+  assert.equal(store.has(`league:${code}`), false);
+});
+
+test("C · account delete across leagues — crash mid teardown: retry resumes every league", async () => {
+  const { cr, store, post } = await seededCrashWorld();
+  const a = await (await post("/league", { uid: "ha", nickname: "HA" })).json();
+  const b = await (await post("/league", { uid: "hb", nickname: "HB" })).json();
+  await post("/join", { uid: "u1", code: a.code, nick: "Keane" });
+  await post("/join", { uid: "u1", code: b.code, nick: "Roy" });
+  cr.crashOn("delete", `member:${a.code}:u1`); // crash mid per-league live teardown
+  assert.equal((await post("/account/delete", { uid: "u1" })).status, 500);
+  assert.ok(store.has(accountIntent("u1")), "the account intent (resume context) was not recorded");
+  assert.ok(store.has("user:u1"), "the user record was erased before cleanup completed");
+  // Retry resumes across BOTH leagues and completes.
+  assert.equal((await post("/account/delete", { uid: "u1" })).status, 200);
+  assert.ok(!store.has(accountIntent("u1")));
+  assert.equal(store.has("user:u1"), false);
+  assert.equal((await post("/join", { uid: "u2", code: a.code, nick: "Keane" })).status, 200);
+  assert.equal((await post("/join", { uid: "u3", code: b.code, nick: "Roy" })).status, 200);
 });

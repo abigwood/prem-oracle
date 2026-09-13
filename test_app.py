@@ -2450,16 +2450,24 @@ class NamesAndViewportTests(unittest.TestCase):
         self.assertIn("if (!registrarEnabled(env)) return registrarUnavailable(env);", fn)
         self.assertLess(fn.index("registrarEnabled(env)) return registrarUnavailable"),
                         fn.index("await members(env, league)"))
-        # C: reserve (begin) BEFORE the account and membership writes; commit AFTER.
+        # C: reserve (begin) BEFORE the account and membership writes; commit AFTER
+        # (via resolveCommit, which fences and safely re-reads the verdict).
         self.assertIn('registrarCall(env, code, "begin"', fn)
-        self.assertIn('registrarCall(env, code, "commit"', fn)
+        self.assertIn("resolveCommit(env, code, { uid, norm: begin.norm, fence: begin.fence })", fn)
         self.assertLess(fn.index('registrarCall(env, code, "begin"'), fn.index("ensureUser(env, uid"))
         self.assertLess(fn.index('registrarCall(env, code, "begin"'), fn.index("leagueMemberKey(code, uid), {"))
-        self.assertLess(fn.index("leagueMemberKey(code, uid), {"), fn.index('registrarCall(env, code, "commit"'))
+        self.assertLess(fn.index("leagueMemberKey(code, uid), {"), fn.index("resolveCommit(env, code"))
+        # A: an unknown commit outcome (resolveCommit -> null) is never a 200.
+        self.assertIn("if (!commit) return registrarUnavailable(env);", fn)
         # The membership stores the offered name, normalised — never a raw or Anon guess.
         self.assertIn("nick: normNick(offered),", fn)
         # The old best-effort fallback is gone: no non-atomic claim path remains.
         self.assertNotIn("claimLeagueNick", self.worker)
+        # resolveCommit fences the attempt and re-reads on an unknown verdict.
+        resolve = self.worker[self.worker.index("async function resolveCommit(env, code, args)"):]
+        resolve = resolve[:resolve.index("\n}")]
+        self.assertIn('registrarCall(env, code, "commit"', resolve)
+        self.assertIn("return null;", resolve)  # persistently-unknown -> caller fails closed
 
     def test_renaming_uses_a_real_field_not_a_prompt(self):
         # prompt() returns null both when WKWebView declines to show it and when

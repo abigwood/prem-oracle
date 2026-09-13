@@ -21,11 +21,20 @@ const NAMES = [
   "noteMatchweekCountMismatch", "matchweekMismatchLines",
 ];
 
+// Kick-offs are anchored a week ahead of the run, not to a fixed calendar date,
+// so "still to come" fixtures stay in the future however far the wall clock has
+// advanced since these were written (correction F). Three staggered days are
+// preserved, so kick-off order still differs from host order where a test needs
+// it to. The relationship — not the absolute date — is what these assert.
+const DAY_MS = 24 * 60 * 60 * 1000;
+const soonISO = (dayOffset) =>
+  new Date(Date.now() + (7 + dayOffset) * DAY_MS).toISOString().replace(/\.\d{3}Z$/, "Z");
+
 /** A competition calendar far larger than any slate, so a fallback would show. */
 const CALENDAR = Array.from({ length: 22 }, (_, i) => ({
   id: `pl-${String(i + 1).padStart(3, "0")}`,
   player1: `Home ${i + 1}`, player2: `Away ${i + 1}`,
-  matchday: 7, startAt: `2026-09-${String(12 + (i % 3)).padStart(2, "0")}T14:00:00Z`,
+  matchday: 7, startAt: soonISO(i % 3),
 }));
 
 const leagueState = ({ code, name, period = "7", ids = null, count = null }) => ({
@@ -477,7 +486,7 @@ test("A10 · a resolvable id replaces its placeholder in place, moving nothing",
   // The fixture arrives — the only thing that changed is what the device holds.
   const after = load(NAMES, {
     ...BASE_STUBS,
-    fixtures: [...CALENDAR, { id: MISSING, player1: "Late", player2: "Arrival", matchday: 7, startAt: "2026-09-12T14:00:00Z" }],
+    fixtures: [...CALENDAR, { id: MISSING, player1: "Late", player2: "Arrival", matchday: 7, startAt: soonISO(0) }],
     activeLeague: "AAA",
     leagueState: leagueState({ code: "AAA", name: "L", ids }),
     leagueStates: {}, leagueCodes: ["AAA"],

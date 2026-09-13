@@ -48,7 +48,19 @@ CREATE TABLE IF NOT EXISTS claims (
   fence TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS claims_norm ON claims (norm);
+CREATE TABLE IF NOT EXISTS teardowns (
+  scope TEXT PRIMARY KEY,
+  kind  TEXT NOT NULL,
+  ts    INTEGER NOT NULL
+);
 `;
+// A teardown fence lives HERE, in the single-threaded DO — not in eventually
+// consistent KV — so it is the immediate concurrency barrier: while a member is
+// being kicked/deleted, or a league deleted, begin/rename/profile/commit for the
+// affected scope refuse atomically, even if the KV intent has not yet become
+// visible. The KV intent is the durable retry context; this is the exclusion.
+const memberScope = (uid) => `member:${String(uid || "")}`;
+const LEAGUE_SCOPE = "league";
 
 // The uniqueness key: trim, cap to the display limit, fold case, collapse inner
 // whitespace. Mirrors normaliseJoinNick in logic.js — a local copy so the
@@ -120,6 +132,10 @@ export class LeagueRegistrar {
     return suggestFor(display, (n) => !held.has(n));
   }
 
+  /** An active teardown fence blocks the whole league, or one member's scope. */
+  #leagueFenced() { return this.#rows("SELECT 1 FROM teardowns WHERE scope = ? LIMIT 1", LEAGUE_SCOPE).length > 0; }
+  #memberFenced(uid) { return this.#rows("SELECT 1 FROM teardowns WHERE scope = ? LIMIT 1", memberScope(uid)).length > 0; }
+
   /** Is this uid's own claim to `norm` still live (committed, or fresh pending)? */
   #ownsLive(row, norm, now) {
     if (!row || row.norm !== norm) return false;
@@ -137,6 +153,10 @@ export class LeagueRegistrar {
     if (!uid) return { ok: false, error: "uid required" };
     const norm = normaliseJoinNick(nick);
     if (!norm) return { ok: false, error: "name required" };
+    // A teardown in progress is the barrier: the league is being deleted, or
+    // this member is being removed. Refuse atomically — no reconcile, no grant.
+    if (this.#leagueFenced()) return { ok: false, fenced: true, scope: "league", error: "league is being deleted" };
+    if (this.#memberFenced(uid)) return { ok: false, fenced: true, scope: "member", error: "removal in progress" };
     this.#reconcile(roster);
     const display = String(nick).trim().slice(0, 24);
     const mine = this.#row(uid);
@@ -180,6 +200,10 @@ export class LeagueRegistrar {
   commit({ uid, norm, fence, now = 0 }) {
     uid = String(uid || "");
     const want = normaliseJoinNick(norm) || String(norm || "");
+    // A teardown of this member or the whole league is in progress: never grant.
+    if (this.#leagueFenced() || this.#memberFenced(uid)) {
+      return { ok: true, committed: false, uid, norm: want, fenced: true };
+    }
     const row = this.#row(uid);
     // Already committed to this name: idempotent success (a duplicate commit).
     // Echoes uid + norm so a lost-and-retried commit proves it is this op's.
@@ -197,24 +221,43 @@ export class LeagueRegistrar {
     return { ok: true, committed: true, uid, norm: want };
   }
 
-  /** Free a member's name — kick or deletion. Tombstoned so a stale roster
-   *  cannot resurrect it; a released name is immediately reusable by anyone.
-   *  Idempotent: releasing an already-released or absent uid is a success, so a
-   *  retry after a failed teardown always converges. */
+  /** Fence a member's scope BEFORE their live teardown begins, so a concurrent
+   *  begin/commit for that uid is refused atomically. Idempotent. */
+  fenceMember({ uid, kind = "kick", now = 0 }) {
+    this.sql.exec("INSERT OR REPLACE INTO teardowns (scope, kind, ts) VALUES (?, ?, ?)", memberScope(uid), String(kind), now);
+    return { ok: true, fenced: true };
+  }
+
+  /** Fence the whole league BEFORE its live teardown, so every begin is refused
+   *  atomically. Idempotent. */
+  fenceLeague({ now = 0 } = {}) {
+    this.sql.exec("INSERT OR REPLACE INTO teardowns (scope, kind, ts) VALUES (?, 'league', ?)", LEAGUE_SCOPE, now);
+    return { ok: true, fenced: true };
+  }
+
+  /** Free a member's name — kick or deletion — and lift their teardown fence, in
+   *  one atomic step. Tombstoned so a stale roster cannot resurrect it; a
+   *  released name is immediately reusable. Idempotent, so a retry after a failed
+   *  teardown always converges. */
   release({ uid, now = 0 }) {
+    uid = String(uid || "");
     const changed = this.sql.exec("UPDATE claims SET state = 'released', ts = ?, fence = '' WHERE uid = ? AND state != 'released'",
-      now, String(uid || "")).rowsWritten;
+      now, uid).rowsWritten;
+    this.sql.exec("DELETE FROM teardowns WHERE scope = ?", memberScope(uid));
     return { ok: true, released: (changed || 0) > 0 };
   }
 
-  /** Drop every claim — league deletion. Idempotent. */
+  /** Drop every claim and every fence — league deletion. Idempotent. */
   purge() {
     this.sql.exec("DELETE FROM claims");
+    this.sql.exec("DELETE FROM teardowns");
     return { ok: true, purged: true };
   }
 
   /** Read-only availability, for a live sheet check. */
   check({ uid, nick, roster, now = 0 }) {
+    if (this.#leagueFenced()) return { available: false, fenced: true };
+    if (this.#memberFenced(String(uid || ""))) return { available: false, fenced: true };
     this.#reconcile(roster);
     const norm = normaliseJoinNick(nick);
     if (!norm) return { available: false, error: "name required" };
@@ -231,6 +274,8 @@ export class LeagueRegistrar {
       release: () => this.release(args),
       purge: () => this.purge(args),
       check: () => this.check(args),
+      fenceMember: () => this.fenceMember(args),
+      fenceLeague: () => this.fenceLeague(args),
     };
     const handler = handlers[op];
     if (!handler) return new Response(JSON.stringify({ error: `unknown op: ${op}` }), { status: 400 });

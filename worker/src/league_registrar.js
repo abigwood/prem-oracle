@@ -142,20 +142,21 @@ export class LeagueRegistrar {
     const mine = this.#row(uid);
 
     // Already committed to this exact name: a no-op success, no new attempt.
+    // Echoes uid + norm so the caller can prove the verdict is for THIS op.
     if (mine && mine.state === "committed" && mine.norm === norm) {
-      return { ok: true, own: true, committed: true, norm, nick: display, fence: mine.fence };
+      return { ok: true, own: true, committed: true, uid, norm, nick: display, fence: mine.fence };
     }
     // A live (fresh) pending under this exact name: an idempotent retry. Issue a
     // NEW fence, superseding the prior attempt, and refresh the hold.
     if (mine && mine.state === "pending" && mine.norm === norm && mine.ts > now - PENDING_TTL_MS) {
       const fence = this.#fence();
       this.sql.exec("UPDATE claims SET ts = ?, nick = ?, fence = ? WHERE uid = ?", now, display, fence, uid);
-      return { ok: true, own: true, norm, nick: display, fence };
+      return { ok: true, own: true, uid, norm, nick: display, fence };
     }
 
     // An EXPIRED pending row is not an owned reservation — contest the name.
     if (this.#holder(norm, uid, now)) {
-      return { ok: false, taken: true, norm, error: "That name is taken in this league",
+      return { ok: false, taken: true, uid, norm, error: "That name is taken in this league",
         suggestions: this.#suggest(display, now) };
     }
 
@@ -166,7 +167,7 @@ export class LeagueRegistrar {
       + "ON CONFLICT(uid) DO UPDATE SET norm = excluded.norm, nick = excluded.nick, "
       + "state = 'pending', ts = excluded.ts, fence = excluded.fence",
       uid, norm, display, now, fence);
-    return { ok: true, norm, nick: display, fence };
+    return { ok: true, uid, norm, nick: display, fence };
   }
 
   /**
@@ -181,18 +182,19 @@ export class LeagueRegistrar {
     const want = normaliseJoinNick(norm) || String(norm || "");
     const row = this.#row(uid);
     // Already committed to this name: idempotent success (a duplicate commit).
-    if (row && row.state === "committed" && row.norm === want) return { ok: true, committed: true };
+    // Echoes uid + norm so a lost-and-retried commit proves it is this op's.
+    if (row && row.state === "committed" && row.norm === want) return { ok: true, committed: true, uid, norm: want };
 
     const active = row && row.state === "pending" && row.norm === want
       && row.fence === String(fence || "") && row.ts > now - PENDING_TTL_MS;
-    if (!active) return { ok: true, committed: false, reason: "superseded" };
+    if (!active) return { ok: true, committed: false, uid, norm: want, reason: "superseded" };
     // The name may have been acquired by another uid since this attempt began.
     if (this.#holder(want, uid, now)) {
-      return { ok: true, committed: false, taken: true, suggestions: this.#suggest(row.nick, now) };
+      return { ok: true, committed: false, uid, norm: want, taken: true, suggestions: this.#suggest(row.nick, now) };
     }
     this.sql.exec("UPDATE claims SET state = 'committed' WHERE uid = ? AND fence = ? AND state = 'pending'",
       uid, String(fence || ""));
-    return { ok: true, committed: true };
+    return { ok: true, committed: true, uid, norm: want };
   }
 
   /** Free a member's name — kick or deletion. Tombstoned so a stale roster

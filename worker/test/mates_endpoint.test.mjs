@@ -7,6 +7,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import worker from "../src/worker.js";
+import { registrarNamespace } from "./registrar_harness.mjs";
 
 const HOUR = 60 * 60 * 1000;
 const AHEAD = 10 * 24 * HOUR;
@@ -54,7 +55,7 @@ const get = (env) => (path) => worker.fetch(new Request(`https://worker.test${pa
  */
 async function league(fixtures) {
   const store = new Map();
-  const env = { FIXTURES_URL: "https://example.com/fixtures.json", KV: memoryKV(store) };
+  const env = { FIXTURES_URL: "https://example.com/fixtures.json", KV: memoryKV(store), LEAGUE_REGISTRAR: registrarNamespace() };
   await get(env)("/fixtures?refresh=1");
   const send = post(env);
   const { code } = await (await send("/league", { uid: "host", nickname: "Host" })).json();

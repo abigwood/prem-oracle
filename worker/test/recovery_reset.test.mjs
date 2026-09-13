@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import worker from "../src/worker.js";
 import { readFileSync } from "node:fs";
 import { makeRecovery } from "../src/logic.js";
+import { registrarNamespace } from "./registrar_harness.mjs";
 
 const SECRET = "test-recovery-admin-secret";
 const UUID = () => crypto.randomUUID();
@@ -34,7 +35,7 @@ const call = (env, body, { auth = SECRET } = {}) =>
 
 async function seeded({ secret = SECRET } = {}) {
   const store = new Map();
-  const env = { KV: memoryKV(store), ...(secret == null ? {} : { RECOVERY_ADMIN_SECRET: secret }) };
+  const env = { KV: memoryKV(store), LEAGUE_REGISTRAR: registrarNamespace(), ...(secret == null ? {} : { RECOVERY_ADMIN_SECRET: secret }) };
   const post = (path, obj) => worker.fetch(new Request(`https://worker.test${path}`, {
     method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(obj),
   }), env);

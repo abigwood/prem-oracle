@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import worker, { mergeResultOverlay } from "../src/worker.js";
+import { registrarNamespace } from "./registrar_harness.mjs";
 
 function memoryKV(store = new Map()) {
   return {
@@ -140,7 +141,7 @@ test("manual settle deletes a fixture result when passed null", async () => {
 
 test("owner can kick a member without affecting the league or others", async () => {
   const store = new Map();
-  const env = { KV: memoryKV(store) };
+  const env = { KV: memoryKV(store), LEAGUE_REGISTRAR: registrarNamespace() };
   const post = (path, body) => worker.fetch(new Request(`https://worker.test${path}`, {
     method: "POST",
     body: JSON.stringify(body),
@@ -188,7 +189,7 @@ test("owner can kick a member without affecting the league or others", async () 
 
 test("owner can delete a league, stripping the code from every member", async () => {
   const store = new Map();
-  const env = { KV: memoryKV(store) };
+  const env = { KV: memoryKV(store), LEAGUE_REGISTRAR: registrarNamespace() };
   const post = (path, body) => worker.fetch(new Request(`https://worker.test${path}`, {
     method: "POST",
     body: JSON.stringify(body),
@@ -231,6 +232,7 @@ test("simultaneous joins write independent member keys", async () => {
   const env = {
     FIXTURES_URL: "https://example.com/fixtures.json",
     KV: memoryKV(store),
+    LEAGUE_REGISTRAR: registrarNamespace(),
   };
   const post = (path, body) => worker.fetch(new Request(`https://worker.test${path}`, {
     method: "POST",
@@ -455,7 +457,7 @@ test("fixtures endpoint exposes the teams intel block and model version", async 
 
 test("POST /league/nick updates only that league's member row with normNick rules", async () => {
   const store = new Map();
-  const env = { KV: memoryKV(store) };
+  const env = { KV: memoryKV(store), LEAGUE_REGISTRAR: registrarNamespace() };
   const post = (path, body) => worker.fetch(new Request(`https://worker.test${path}`, {
     method: "POST",
     body: JSON.stringify(body),

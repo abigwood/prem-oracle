@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import worker from "../src/worker.js";
+import { registrarNamespace } from "./registrar_harness.mjs";
 import {
   applySlates,
   computeCabinet,
@@ -308,6 +309,7 @@ function endpointEnv(fixtureList, store = new Map()) {
     env: {
       FIXTURES_URL: "https://example.com/fixtures.json",
       KV: memoryKV(store),
+      LEAGUE_REGISTRAR: registrarNamespace(),
     },
     store,
     fixtureList,

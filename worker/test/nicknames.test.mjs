@@ -8,6 +8,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import worker from "../src/worker.js";
 import { DEFAULT_NICK, normNick } from "../src/logic.js";
+import { registrarNamespace } from "./registrar_harness.mjs";
 
 function memoryKV(store = new Map()) {
   return {
@@ -49,9 +50,21 @@ const nicks = async (env, code) =>
   (await (await get(env)(`/state?code=${code}`)).json()).table.map((r) => r.nick).sort();
 const memberNick = async (store, code, uid) => JSON.parse(store.get(`member:${code}:${uid}`)).nick;
 
+// Anon members can no longer be minted through /join — v1.8 requires a name
+// (Slice A/B) — but they still exist in the wild: legacy joins from before the
+// rule, and hosts who never set a profile name. Seed one straight into KV, the
+// exact shape /join once wrote, so the propagation rule still has something to
+// replace.
+async function seedAnonMember(env, store, code, uid) {
+  store.set(`member:${code}:${uid}`, JSON.stringify({ nick: DEFAULT_NICK, since: 1 }));
+  const user = (await env.KV.get(`user:${uid}`)) || { nickname: "", leagues: [] };
+  user.leagues = [...new Set([...(user.leagues || []), code])];
+  store.set(`user:${uid}`, JSON.stringify(user));
+}
+
 function setup() {
   const store = new Map();
-  return { store, env: { FIXTURES_URL: "https://example.com/f.json", KV: memoryKV(store) } };
+  return { store, env: { FIXTURES_URL: "https://example.com/f.json", KV: memoryKV(store), LEAGUE_REGISTRAR: registrarNamespace() } };
 }
 
 // --- joining ----------------------------------------------------------------
@@ -88,13 +101,14 @@ test("a league name beats the profile name for that league only", async () => {
   });
 });
 
-test("only a joiner who offers nothing at all is Anon", async () => {
+test("a nameless join is refused, minting no Anon member (v1.8 requires a name)", async () => {
   const { env, store } = setup();
   await withFixtures(round(), async () => {
     await get(env)("/fixtures?refresh=1");
     const code = await league(env);
-    await post(env)("/join", { uid: "tom", code });
-    assert.equal(await memberNick(store, code, "tom"), DEFAULT_NICK);
+    const res = await post(env)("/join", { uid: "tom", code });
+    assert.equal(res.status, 400, "a nameless join is refused, not stored as Anon");
+    assert.equal(store.get(`member:${code}:tom`), undefined, "no membership was written");
   });
 });
 
@@ -106,8 +120,8 @@ test("saving a profile name replaces Anon everywhere it is still Anon", async ()
     await get(env)("/fixtures?refresh=1");
     const a = await league(env);
     const b = await (await post(env)("/league", { uid: "host", nickname: "Adam", name: "BVW", competitions: ["PL"], fixtureMode: "limited", fixtureLimit: 4 })).json();
-    await post(env)("/join", { uid: "tom", code: a });
-    await post(env)("/join", { uid: "tom", code: b.code });
+    await seedAnonMember(env, store, a, "tom");
+    await seedAnonMember(env, store, b.code, "tom");
     assert.equal(await memberNick(store, a, "tom"), DEFAULT_NICK);
     assert.equal(await memberNick(store, b.code, "tom"), DEFAULT_NICK);
 
@@ -126,8 +140,8 @@ test("a name the viewer chose for a league is never overwritten", async () => {
     await get(env)("/fixtures?refresh=1");
     const a = await league(env);
     const b = await (await post(env)("/league", { uid: "host", nickname: "Adam", name: "BVW", competitions: ["PL"], fixtureMode: "limited", fixtureLimit: 4 })).json();
-    await post(env)("/join", { uid: "tom", code: a });
-    await post(env)("/join", { uid: "tom", code: b.code });
+    await seedAnonMember(env, store, a, "tom");
+    await seedAnonMember(env, store, b.code, "tom");
     // Tom names himself deliberately in one of them.
     await post(env)("/league/nick", { uid: "tom", code: b.code, nick: "Biggers" });
 
@@ -144,7 +158,7 @@ test("a second profile save does not reclaim a league renamed since", async () =
   await withFixtures(round(), async () => {
     await get(env)("/fixtures?refresh=1");
     const a = await league(env);
-    await post(env)("/join", { uid: "tom", code: a });
+    await seedAnonMember(env, store, a, "tom");
     await post(env)("/profile", { uid: "tom", nickname: "Tom" });
     await post(env)("/league/nick", { uid: "tom", code: a, nick: "Biggers" });
     const again = await (await post(env)("/profile", { uid: "tom", nickname: "Thomas" })).json();
@@ -177,7 +191,7 @@ test("a member who is not the host can rename themselves", async () => {
   await withFixtures(round(), async () => {
     await get(env)("/fixtures?refresh=1");
     const code = await league(env);
-    await post(env)("/join", { uid: "tom", code });
+    await post(env)("/join", { uid: "tom", code, nick: "Tommy" });
     const result = await post(env)("/league/nick", { uid: "tom", code, nick: "Tom" });
     assert.equal(result.status, 200);
     assert.equal(await memberNick(store, code, "tom"), "Tom");

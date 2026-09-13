@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import worker from "../src/worker.js";
+import { registrarNamespace } from "./registrar_harness.mjs";
 import {
   effectiveFixtureCount,
   isMixedLeague,
@@ -265,6 +266,7 @@ function env(store = new Map()) {
       FIXTURES_URL: "https://example.com/pl.json",
       FIXTURES_URL_ELC: "https://example.com/elc.json",
       KV: memoryKV(store),
+      LEAGUE_REGISTRAR: registrarNamespace(),
     },
     store,
   };

@@ -6,10 +6,9 @@
 // a guarantee proved here is proved about the code that ships.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { DatabaseSync } from "node:sqlite";
 import worker from "../src/worker.js";
-import { LeagueRegistrar } from "../src/league_registrar.js";
 import { normaliseJoinNick } from "../src/logic.js";
+import { registrarNamespace } from "./registrar_harness.mjs";
 
 function memoryKV(store = new Map()) {
   return {
@@ -21,42 +20,6 @@ function memoryKV(store = new Map()) {
     async delete(key) { store.delete(key); },
     async list({ prefix = "" } = {}) {
       return { keys: [...store.keys()].filter((k) => k.startsWith(prefix)).sort().map((name) => ({ name })), list_complete: true };
-    },
-  };
-}
-
-/** The Durable Object SQL surface over node:sqlite (positional bindings). */
-function sqlShim(db) {
-  return {
-    exec(query, ...binds) {
-      const trimmed = query.trim();
-      if (!binds.length && /;\s*\S/.test(trimmed.replace(/;\s*$/, ""))) {
-        db.exec(trimmed);
-        return { toArray: () => [] };
-      }
-      const statement = db.prepare(trimmed);
-      if (/RETURNING|^\s*SELECT/i.test(trimmed)) {
-        const rows = statement.all(...binds);
-        return { toArray: () => rows };
-      }
-      const info = statement.run(...binds);
-      return { toArray: () => [], rowsWritten: Number(info.changes ?? 0) };
-    },
-  };
-}
-
-/** A LEAGUE_REGISTRAR namespace: one real DO instance per league name. */
-function registrarNamespace() {
-  const instances = new Map();
-  return {
-    idFromName(name) { return { name }; },
-    get(id) {
-      if (!instances.has(id.name)) {
-        const db = new DatabaseSync(":memory:");
-        instances.set(id.name, new LeagueRegistrar({ storage: { sql: sqlShim(db) } }));
-      }
-      const inst = instances.get(id.name);
-      return { fetch: (url, init) => inst.fetch(new Request(url, init)) };
     },
   };
 }
@@ -162,7 +125,7 @@ test("a claim without its membership write completes on retry, no duplicate", as
   const stub = env.LEAGUE_REGISTRAR.get(env.LEAGUE_REGISTRAR.idFromName(code));
   const claimed = await (await stub.fetch("https://league-registrar/rpc", {
     method: "POST", headers: { "content-type": "application/json" },
-    body: JSON.stringify({ op: "claim", uid: "u1", nick: "Keeper", roster: [] }),
+    body: JSON.stringify({ op: "begin", uid: "u1", nick: "Keeper", roster: [], now: Date.now() }),
   })).json();
   assert.equal(claimed.ok, true);
   assert.equal(store.has(`member:${code}:u1`), false, "no membership yet");
@@ -235,25 +198,30 @@ test("the v1.7.1 request shape still joins", async () => {
   assert.equal(JSON.parse(store.get(`member:${code}:u1`)).nick, "Adam");
 });
 
-test("an offered-empty name keeps the v1.7.1 Anon fallback, unarbitrated", async () => {
-  // No per-league nick and no profile name: old behaviour is a fallback nick,
-  // and uniqueness is NOT arbitrated for the fallback.
+test("a nameless join is refused with no mutation — no anonymous bypass (Slice A/B)", async () => {
+  // No per-league nick and no profile name. The old fallback minted an
+  // unarbitrated "Anon"; that is exactly the anonymous uniqueness bypass the
+  // review closed. A genuinely nameless request now refuses and writes nothing.
   const { post, store, code } = await withLeague();
   const res = await post("/join", { uid: "u1", code });
-  assert.equal(res.status, 200);
-  assert.equal(JSON.parse(store.get(`member:${code}:u1`)).nick, "Anon");
+  assert.equal(res.status, 400);
+  assert.equal(store.has(`member:${code}:u1`), false, "a nameless join wrote a membership");
+  assert.equal(store.has("user:u1"), false, "a nameless join minted an account");
 });
 
-// --- degraded mode: no registrar binding still refuses cross-uid duplicates -
+// --- no atomic authority: fail closed, never proceed non-atomically ---------
 
-test("without the registrar, the fallback still refuses a name held by another uid", async () => {
+test("without the registrar a named join fails closed with 503 and no mutation (Slice A/A)", async () => {
+  // The registrar's absence is a broken configuration, not a degraded mode. A
+  // named join must not proceed non-atomically; it refuses, retryably, and
+  // mints no account, recovery or membership.
   const { post, store, code } = await withLeague({ registrar: false });
-  assert.equal((await post("/join", { uid: "u1", code, nick: "Solo" })).status, 200);
-  const res = await post("/join", { uid: "u2", code, nick: "solo" });
-  assert.equal(res.status, 409, "the degraded path allowed a duplicate");
-  assert.equal(store.has(`member:${code}:u2`), false);
-  // A re-join by the holder is still fine.
-  assert.equal((await post("/join", { uid: "u1", code, nick: "Solo" })).status, 200);
+  const res = await post("/join", { uid: "u1", code, nick: "Solo" });
+  assert.equal(res.status, 503, "a named join proceeded without atomic authority");
+  const body = await res.json();
+  assert.equal(body.retryable, true, "the 503 did not advertise itself as retryable");
+  assert.equal(store.has(`member:${code}:u1`), false, "a fail-closed join wrote a membership");
+  assert.equal(store.has("user:u1"), false, "a fail-closed join minted an account");
 });
 
 // --- UID remains identity ---------------------------------------------------
@@ -265,4 +233,125 @@ test("the display name is never the account key — UID is", async () => {
   assert.ok(store.has(`member:${code}:u1`) && store.has("user:u1"));
   assert.ok(![...store.keys()].some((k) => k.includes("Handle") || k.toLowerCase().includes("handle")),
     "a nickname leaked into a key");
+});
+
+// --- lifecycle across the whole membership surface (Slice A/D) ---------------
+//
+// Every path that changes who holds a name routes through the registrar, so its
+// authority never drifts from KV: a rename is a contest, a removed member frees
+// the name (and a stale roster cannot resurrect it), and a deleted league drops
+// every claim.
+
+test("D · a rename to a name another member holds is refused, and nothing changes", async () => {
+  const { post, store, code } = await withLeague();
+  await post("/join", { uid: "u1", code, nick: "Beckham" });
+  await post("/join", { uid: "u2", code, nick: "Scholes" });
+  const res = await post("/league/nick", { uid: "u2", code, nick: "Beckham" });
+  assert.equal(res.status, 409, "a colliding rename was allowed");
+  assert.deepEqual((await res.json()).suggestions?.length > 0, true, "no alternatives were offered");
+  assert.equal(JSON.parse(store.get(`member:${code}:u2`)).nick, "Scholes", "the rename wrote anyway");
+});
+
+test("D · a rename to a free name succeeds and the old name frees up", async () => {
+  const { post, store, code } = await withLeague();
+  await post("/join", { uid: "u1", code, nick: "Giggs" });
+  assert.equal((await post("/league/nick", { uid: "u1", code, nick: "Ryan" })).status, 200);
+  assert.equal(JSON.parse(store.get(`member:${code}:u1`)).nick, "Ryan");
+  // The vacated name is now available to someone else.
+  assert.equal((await post("/join", { uid: "u2", code, nick: "Giggs" })).status, 200);
+});
+
+test("D · a kicked member's name is reusable, by a newcomer or the returning member", async () => {
+  const { post, store, code } = await withLeague();
+  await post("/join", { uid: "u1", code, nick: "Cantona" });
+  assert.equal((await post("/league/kick", { uid: "host", code, memberUid: "u1" })).status, 200);
+  assert.equal(store.has(`member:${code}:u1`), false, "the membership survived the kick");
+  // A brand-new member may take the freed name...
+  assert.equal((await post("/join", { uid: "u2", code, nick: "Cantona" })).status, 200);
+  // ...and once it is taken again, a third cannot.
+  assert.equal((await post("/join", { uid: "u3", code, nick: "Cantona" })).status, 409);
+});
+
+test("D · an account deletion frees its names for reuse in each league", async () => {
+  const { post, store, code } = await withLeague();
+  await post("/join", { uid: "u1", code, nick: "Keane" });
+  assert.equal((await post("/account/delete", { uid: "u1" })).status, 200);
+  assert.equal(store.has(`member:${code}:u1`), false, "the membership survived deletion");
+  assert.equal((await post("/join", { uid: "u2", code, nick: "Keane" })).status, 200, "the freed name was not reusable");
+});
+
+test("D · deleting a league purges its claims, so its codes can be reused elsewhere", async () => {
+  const { post, env, code } = await withLeague();
+  await post("/join", { uid: "u1", code, nick: "Neville" });
+  assert.equal((await post("/league/delete", { uid: "host", code })).status, 200);
+  // The registrar instance for that code holds nothing — a check on the same
+  // name comes back available (the DO storage was purged).
+  const stub = env.LEAGUE_REGISTRAR.get(env.LEAGUE_REGISTRAR.idFromName(code));
+  const avail = await (await stub.fetch("https://league-registrar/rpc", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ op: "check", uid: "someone-else", nick: "Neville", roster: [], now: Date.now() }),
+  })).json();
+  assert.equal(avail.available, true, "a purged registrar still held a claim");
+});
+
+test("D · a stale KV roster listing a released member never resurrects the claim", async () => {
+  // The dangerous read-after-write lag: a member is kicked (released in the
+  // registrar and gone from KV in production) but a lagging roster still lists
+  // them. Reconciliation must NOT revive that released claim, so the freed name
+  // stays free for the next joiner.
+  const { post, env, store, code } = await withLeague();
+  await post("/join", { uid: "u1", code, nick: "Charlton" });
+  await post("/league/kick", { uid: "host", code, memberUid: "u1" });
+
+  // Simulate the lag: re-plant the kicked member's row straight into KV, as an
+  // eventually-consistent roster read would still surface.
+  store.set(`member:${code}:u1`, JSON.stringify({ nick: "Charlton", since: 1 }));
+
+  // A different member claims the name; the stale u1 row must not block it, and
+  // reconciliation must not resurrect u1's released claim.
+  const res = await post("/join", { uid: "u2", code, nick: "Charlton" });
+  assert.equal(res.status, 200, "a released claim was resurrected by a stale roster");
+  assert.equal(JSON.parse(store.get(`member:${code}:u2`)).nick, "Charlton");
+});
+
+// --- C · every crash point converges, and abandonment cannot strand a name --
+
+test("C · a crash after the membership write but before commit still yields one member", async () => {
+  // The registrar holds u1 as pending and the membership is already written,
+  // but the commit never landed. A different uid is still blocked (the pending
+  // claim is live), and the next roster reconciliation promotes u1's genuine
+  // membership so its name is permanent.
+  const { post, env, store, code } = await withLeague();
+  const stub = env.LEAGUE_REGISTRAR.get(env.LEAGUE_REGISTRAR.idFromName(code));
+  const rpc = (op, args) => stub.fetch("https://league-registrar/rpc", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ op, ...args }),
+  }).then((r) => r.json());
+
+  await rpc("begin", { uid: "u1", nick: "Solskjaer", roster: [], now: Date.now() });
+  store.set(`member:${code}:u1`, JSON.stringify({ nick: "Solskjaer", since: 1 })); // membership written, commit lost
+  // A different uid cannot take the pending name.
+  assert.equal((await post("/join", { uid: "u2", code, nick: "Solskjaer" })).status, 409);
+  // A reconcile (any join carries the roster) promotes u1's real membership.
+  await post("/join", { uid: "u3", code, nick: "Sheringham" });
+  const state = await rpc("check", { uid: "u2", nick: "Solskjaer", roster: [], now: Date.now() });
+  assert.equal(state.available, false, "u1's genuine membership was not committed by reconcile");
+});
+
+test("C · an abandoned pending claim expires and no longer reserves the name", async () => {
+  const { env, code } = await withLeague();
+  const stub = env.LEAGUE_REGISTRAR.get(env.LEAGUE_REGISTRAR.idFromName(code));
+  const rpc = (op, args) => stub.fetch("https://league-registrar/rpc", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ op, ...args }),
+  }).then((r) => r.json());
+
+  const t0 = 1_000_000;
+  await rpc("begin", { uid: "u1", nick: "Berbatov", roster: [], now: t0 });
+  // Within the TTL, another uid is blocked.
+  assert.equal((await rpc("begin", { uid: "u2", nick: "Berbatov", roster: [], now: t0 + 1000 })).taken, true);
+  // Long past the TTL, the abandoned pending claim no longer reserves the name.
+  const late = await rpc("begin", { uid: "u2", nick: "Berbatov", roster: [], now: t0 + 11 * 60 * 1000 });
+  assert.equal(late.ok, true, "an abandoned pending claim reserved the name forever");
+  assert.equal(late.taken, undefined);
 });

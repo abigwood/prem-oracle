@@ -2439,16 +2439,27 @@ class NamesAndViewportTests(unittest.TestCase):
         self.assertIn('export const DEFAULT_NICK = "Anon";', logic)
         self.assertIn("|| DEFAULT_NICK;", logic)
 
-    def test_join_prefers_the_name_given_for_that_league(self):
+    def test_join_requires_a_name_and_arbitrates_it_atomically(self):
         fn = self.worker[self.worker.index("async function joinLeague(env, body)"):]
         fn = fn[:fn.index("\n}")]
+        # B: one effective non-empty display name is required; a nameless request
+        # refuses with no mutation.
         self.assertIn('const offered = String(body.nick || body.nickname || "").trim();', fn)
-        # v1.8 Slice A: the registrar's arbitrated name wins; the v1.7.1
-        # offered-name / profile / existing / Anon fallback is preserved behind it.
-        self.assertIn("nick: claim.nick || (offered ? normNick(offered) : (user.nickname || existing?.nick || DEFAULT_NICK)),", fn)
-        # Uniqueness is arbitrated before any account or membership is written.
-        self.assertLess(fn.index("claimLeagueNick(env, code, uid, offered, roster)"), fn.index("ensureUser(env, uid"))
-        self.assertLess(fn.index("claimLeagueNick(env, code, uid, offered, roster)"), fn.index("leagueMemberKey(code, uid), {"))
+        self.assertIn('if (!offered) return json({ error: "A display name is required to join." }, 400, env);', fn)
+        # A: no atomic authority -> fail closed, before any read of the roster.
+        self.assertIn("if (!registrarEnabled(env)) return registrarUnavailable(env);", fn)
+        self.assertLess(fn.index("registrarEnabled(env)) return registrarUnavailable"),
+                        fn.index("await members(env, league)"))
+        # C: reserve (begin) BEFORE the account and membership writes; commit AFTER.
+        self.assertIn('registrarCall(env, code, "begin"', fn)
+        self.assertIn('registrarCall(env, code, "commit"', fn)
+        self.assertLess(fn.index('registrarCall(env, code, "begin"'), fn.index("ensureUser(env, uid"))
+        self.assertLess(fn.index('registrarCall(env, code, "begin"'), fn.index("leagueMemberKey(code, uid), {"))
+        self.assertLess(fn.index("leagueMemberKey(code, uid), {"), fn.index('registrarCall(env, code, "commit"'))
+        # The membership stores the offered name, normalised — never a raw or Anon guess.
+        self.assertIn("nick: normNick(offered),", fn)
+        # The old best-effort fallback is gone: no non-atomic claim path remains.
+        self.assertNotIn("claimLeagueNick", self.worker)
 
     def test_renaming_uses_a_real_field_not_a_prompt(self):
         # prompt() returns null both when WKWebView declines to show it and when

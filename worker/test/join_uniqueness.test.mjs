@@ -27,12 +27,45 @@ function memoryKV(store = new Map()) {
 function world({ registrar = true } = {}) {
   const store = new Map();
   const env = { KV: memoryKV(store) };
-  if (registrar) env.LEAGUE_REGISTRAR = registrarNamespace();
+  // registrar: true -> a fresh real namespace; an object -> use it (a fault
+  // injector); false -> no binding at all (the fail-closed path).
+  if (registrar === true) env.LEAGUE_REGISTRAR = registrarNamespace();
+  else if (registrar) env.LEAGUE_REGISTRAR = registrar;
   const post = (path, body) => worker.fetch(new Request(`https://worker.test${path}`, {
     method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
   }), env);
   return { store, env, post };
 }
+
+/** A registrar namespace that can be told to fail the NEXT n calls of an op
+ *  (release/purge), then behaves normally — for proving resumable teardown. */
+function controllableRegistrar() {
+  const real = registrarNamespace();
+  const fail = { release: 0, purge: 0, begin: 0, commit: 0 };
+  const namespace = {
+    idFromName: (name) => real.idFromName(name),
+    get(id) {
+      const inner = real.get(id);
+      return {
+        fetch: async (url, init) => {
+          const op = JSON.parse(init.body).op;
+          if (fail[op] > 0) { fail[op] -= 1; return new Response("{}", { status: 500 }); }
+          return inner.fetch(url, init);
+        },
+      };
+    },
+  };
+  return { namespace, failNext: (op, n = 1) => { fail[op] += n; } };
+}
+
+/** Direct RPC to a league's real registrar instance, for driving crash points. */
+const rpcTo = (env, code) => {
+  const stub = env.LEAGUE_REGISTRAR.get(env.LEAGUE_REGISTRAR.idFromName(code));
+  return (op, args) => stub.fetch("https://league-registrar/rpc", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ op, ...args }),
+  }).then((r) => r.json());
+};
 
 async function withLeague(opts = {}) {
   const w = world(opts);
@@ -354,4 +387,170 @@ test("C · an abandoned pending claim expires and no longer reserves the name", 
   const late = await rpc("begin", { uid: "u2", nick: "Berbatov", roster: [], now: t0 + 11 * 60 * 1000 });
   assert.equal(late.ok, true, "an abandoned pending claim reserved the name forever");
   assert.equal(late.taken, undefined);
+});
+
+// === SECOND REVIEW — fence, expiry and resumable teardown =================
+// Directly reproduces the three correctness blockers, then proves them closed.
+
+const TTL = 10 * 60 * 1000;
+
+test("A · an expired owner's replay contests afresh — another UID's win refuses it", async () => {
+  // The exact sequence from the review.
+  const { env, code } = await withLeague();
+  const rpc = rpcTo(env, code);
+  const t0 = 1_000_000;
+  // 1. u1 begins "Name".
+  const b1 = await rpc("begin", { uid: "u1", nick: "Name", roster: [], now: t0 });
+  assert.equal(b1.ok, true);
+  // 2. u1's pending claim expires. 3. u2 begins and commits "Name".
+  const later = t0 + TTL + 1;
+  const b2 = await rpc("begin", { uid: "u2", nick: "Name", roster: [], now: later });
+  assert.equal(b2.ok, true, "u2 could not take the expired name");
+  assert.equal((await rpc("commit", { uid: "u2", norm: b2.norm, fence: b2.fence, now: later })).committed, true);
+  // 4. u1 retries "Name". 5. It must be the normal taken refusal, not own:true.
+  const b1retry = await rpc("begin", { uid: "u1", nick: "Name", roster: [], now: later });
+  assert.equal(b1retry.own, undefined, "an expired pending row was honoured as an owned reservation");
+  assert.equal(b1retry.taken, true, "the old UID was not refused after another won the name");
+});
+
+test("C · a delayed commit for an expired, reallocated attempt never converts", async () => {
+  const { env, code } = await withLeague();
+  const rpc = rpcTo(env, code);
+  const t0 = 2_000_000;
+  const b1 = await rpc("begin", { uid: "u1", nick: "Keeper", roster: [], now: t0 });
+  const later = t0 + TTL + 1;
+  const b2 = await rpc("begin", { uid: "u2", nick: "Keeper", roster: [], now: later });
+  await rpc("commit", { uid: "u2", norm: b2.norm, fence: b2.fence, now: later });
+  // u1's original commit finally lands — expired AND reallocated to u2.
+  const late = await rpc("commit", { uid: "u1", norm: b1.norm, fence: b1.fence, now: later });
+  assert.equal(late.committed, false, "a delayed commit converted an expired, reallocated claim");
+});
+
+test("C · a second different rename by the same UID fences out the first commit", async () => {
+  const { env, code } = await withLeague();
+  const rpc = rpcTo(env, code);
+  const now = 3_000_000;
+  const first = await rpc("begin", { uid: "u1", nick: "Alpha", roster: [], now });
+  const second = await rpc("begin", { uid: "u1", nick: "Bravo", roster: [], now });
+  assert.equal((await rpc("commit", { uid: "u1", norm: first.norm, fence: first.fence, now })).committed, false,
+    "the superseded first attempt still committed");
+  assert.equal((await rpc("commit", { uid: "u1", norm: second.norm, fence: second.fence, now })).committed, true);
+});
+
+test("C · a stale commit after release never resurrects the name", async () => {
+  const { env, code } = await withLeague();
+  const rpc = rpcTo(env, code);
+  const now = 4_000_000;
+  const b = await rpc("begin", { uid: "u1", nick: "Cantona", roster: [], now });
+  await rpc("commit", { uid: "u1", norm: b.norm, fence: b.fence, now });
+  await rpc("release", { uid: "u1", now });
+  const stale = await rpc("commit", { uid: "u1", norm: b.norm, fence: b.fence, now });
+  assert.equal(stale.committed, false, "a stale commit resurrected a released claim");
+  // And the name is genuinely free for a newcomer.
+  assert.equal((await rpc("check", { uid: "u2", nick: "Cantona", roster: [], now })).available, true);
+});
+
+test("C · an ordinary idempotent retry still commits", async () => {
+  const { env, code } = await withLeague();
+  const rpc = rpcTo(env, code);
+  const now = 5_000_000;
+  const b1 = await rpc("begin", { uid: "u1", nick: "Solskjaer", roster: [], now });
+  await rpc("commit", { uid: "u1", norm: b1.norm, fence: b1.fence, now });
+  // Same uid, same name again: idempotent success, and commit still lands.
+  const b2 = await rpc("begin", { uid: "u1", nick: "Solskjaer", roster: [], now });
+  assert.equal(b2.ok, true);
+  assert.equal((await rpc("commit", { uid: "u1", norm: b2.norm, fence: b2.fence, now })).committed, true);
+});
+
+test("B · a stale reconcile during a crossed rename cancels neither, allocates once", async () => {
+  // u1 and u2 are members; u1 has a rename to "New" in flight (a live pending
+  // attempt). u2 then renames to "New" through the REAL /league/nick route,
+  // whose begin reconciles a roster that still shows u1 as "Old".
+  const { post, env, store, code } = await withLeague();
+  await post("/join", { uid: "u1", code, nick: "Old" });
+  await post("/join", { uid: "u2", code, nick: "Other" });
+  const rpc = rpcTo(env, code);
+  // Real time, because the contesting request goes through the worker, which
+  // stamps its own Date.now(); a fake clock would make u1's claim look expired.
+  const now = Date.now();
+  // u1's rename to "New" is in flight: a live pending attempt, KV still "Old".
+  const u1new = await rpc("begin", { uid: "u1", nick: "New", roster: [], now });
+  assert.equal(u1new.ok, true);
+
+  // u2 renames to "New" through the route — its begin reconciles the stale
+  // roster (u1 still "Old"). The stale row must NOT promote/rewrite u1's active
+  // rename, and u2 must NOT win the name.
+  const res = await post("/league/nick", { uid: "u2", code, nick: "New" });
+  assert.equal(res.status, 409, "u2 won a name still held by u1's in-flight rename");
+  assert.equal(JSON.parse(store.get(`member:${code}:u2`)).nick, "Other", "u2's membership was rewritten");
+
+  // u1's active attempt survived the stale reconcile and can still commit.
+  assert.equal((await rpc("commit", { uid: "u1", norm: u1new.norm, fence: u1new.fence, now })).committed, true,
+    "the stale reconcile cancelled u1's active rename");
+});
+
+// --- D · teardown is resumable and idempotent across registrar failure ------
+
+test("D · a kick whose release fails refuses, and a retry completes it", async () => {
+  const ctl = controllableRegistrar();
+  const { post, store, code } = await withLeague({ registrar: ctl.namespace });
+  await post("/join", { uid: "u1", code, nick: "Cantona" });
+  ctl.failNext("release", 1);
+  const first = await post("/league/kick", { uid: "host", code, memberUid: "u1" });
+  assert.equal(first.status, 503, "a kick reported success while the release was outstanding");
+  assert.equal(store.has(`member:${code}:u1`), true, "the membership was torn down before the name was freed");
+  // Retry: release succeeds, member removed, name reusable.
+  assert.equal((await post("/league/kick", { uid: "host", code, memberUid: "u1" })).status, 200);
+  assert.equal(store.has(`member:${code}:u1`), false);
+  assert.equal((await post("/join", { uid: "u2", code, nick: "Cantona" })).status, 200, "the freed name was not reusable");
+});
+
+test("D · a league delete whose purge fails refuses, and a retry completes it", async () => {
+  const ctl = controllableRegistrar();
+  const { post, store, code } = await withLeague({ registrar: ctl.namespace });
+  await post("/join", { uid: "u1", code, nick: "Neville" });
+  ctl.failNext("purge", 1);
+  const first = await post("/league/delete", { uid: "host", code });
+  assert.equal(first.status, 503, "a delete reported success while the purge was outstanding");
+  assert.equal(store.has(`league:${code}`), true, "the league record was erased before the purge landed");
+  assert.equal((await post("/league/delete", { uid: "host", code })).status, 200);
+  assert.equal(store.has(`league:${code}`), false);
+});
+
+test("D · an account delete whose release fails keeps the user record for the retry", async () => {
+  const ctl = controllableRegistrar();
+  const { post, store, code } = await withLeague({ registrar: ctl.namespace });
+  await post("/join", { uid: "u1", code, nick: "Keane" });
+  ctl.failNext("release", 1);
+  const first = await post("/account/delete", { uid: "u1" });
+  assert.equal(first.status, 503, "an account delete reported success while a release was outstanding");
+  assert.equal(store.has("user:u1"), true, "the user record — the resume context — was erased on failure");
+  assert.equal((await post("/account/delete", { uid: "u1" })).status, 200);
+  assert.equal(store.has("user:u1"), false);
+  assert.equal((await post("/join", { uid: "u2", code, nick: "Keane" })).status, 200, "the freed name was not reusable");
+});
+
+// --- E · a malformed registrar answer fails closed --------------------------
+
+test("E · a malformed begin fails the join closed, writing nothing", async () => {
+  // A namespace whose begin returns a 200 with an unrecognised shape.
+  const real = registrarNamespace();
+  const namespace = {
+    idFromName: (name) => real.idFromName(name),
+    get(id) {
+      const inner = real.get(id);
+      return {
+        fetch: async (url, init) => {
+          const op = JSON.parse(init.body).op;
+          if (op === "begin") return new Response(JSON.stringify({ surprise: true }), { status: 200 });
+          return inner.fetch(url, init);
+        },
+      };
+    },
+  };
+  const { post, store, code } = await withLeague({ registrar: namespace });
+  const res = await post("/join", { uid: "u1", code, nick: "Ghost" });
+  assert.equal(res.status, 503, "a malformed begin was trusted");
+  assert.equal(store.has(`member:${code}:u1`), false, "a malformed begin still wrote a membership");
+  assert.equal(store.has("user:u1"), false, "a malformed begin still minted an account");
 });

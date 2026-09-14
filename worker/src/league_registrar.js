@@ -40,12 +40,13 @@ const PENDING_TTL_MS = 10 * 60 * 1000; // far longer than a join, short enough n
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS claims (
-  uid   TEXT PRIMARY KEY,
-  norm  TEXT NOT NULL,
-  nick  TEXT NOT NULL,
-  state TEXT NOT NULL,
-  ts    INTEGER NOT NULL,
-  fence TEXT NOT NULL DEFAULT ''
+  uid       TEXT PRIMARY KEY,
+  norm      TEXT NOT NULL,
+  nick      TEXT NOT NULL,
+  state     TEXT NOT NULL,
+  ts        INTEGER NOT NULL,
+  fence     TEXT NOT NULL DEFAULT '',
+  activated INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS claims_norm ON claims (norm);
 CREATE TABLE IF NOT EXISTS teardowns (
@@ -92,7 +93,7 @@ export class LeagueRegistrar {
   /** An opaque, unguessable fence for one attempt. */
   #fence() { return crypto.randomUUID(); }
 
-  #row(uid) { return this.#rows("SELECT norm, nick, state, ts, fence FROM claims WHERE uid = ?", uid)[0]; }
+  #row(uid) { return this.#rows("SELECT norm, nick, state, ts, fence, activated FROM claims WHERE uid = ?", uid)[0]; }
 
   /**
    * Backfill members KV already holds — additive only.
@@ -110,9 +111,9 @@ export class LeagueRegistrar {
       if (!m?.uid) continue;
       const norm = normaliseJoinNick(m.nick);
       if (!norm) continue;
-      this.sql.exec("INSERT OR IGNORE INTO claims (uid, norm, nick, state, ts, fence) VALUES (?, ?, ?, 'committed', 0, '')",
+      this.sql.exec("INSERT OR IGNORE INTO claims (uid, norm, nick, state, ts, fence, activated) VALUES (?, ?, ?, 'committed', 0, '', 1)",
         m.uid, norm, String(m.nick));
-      this.sql.exec("UPDATE claims SET state = 'committed' WHERE uid = ? AND state = 'pending' AND norm = ?",
+      this.sql.exec("UPDATE claims SET state = 'committed', activated = 1 WHERE uid = ? AND state = 'pending' AND norm = ?",
         m.uid, norm);
     }
   }
@@ -216,7 +217,7 @@ export class LeagueRegistrar {
     if (this.#holder(want, uid, now)) {
       return { ok: true, committed: false, uid, norm: want, taken: true, suggestions: this.#suggest(row.nick, now) };
     }
-    this.sql.exec("UPDATE claims SET state = 'committed' WHERE uid = ? AND fence = ? AND state = 'pending'",
+    this.sql.exec("UPDATE claims SET state = 'committed', activated = 1 WHERE uid = ? AND fence = ? AND state = 'pending'",
       uid, String(fence || ""));
     return { ok: true, committed: true, uid, norm: want };
   }
@@ -254,6 +255,26 @@ export class LeagueRegistrar {
     return { ok: true, purged: true };
   }
 
+  /**
+   * The authoritative visibility verdict for a set of uids: which must be HIDDEN
+   * from ordinary member/state/league reads. This makes the DO — not a racy KV
+   * write — the source of truth for whether a membership is live: a first-join
+   * claim not yet activated (provisional) and a released (torn-down) claim are
+   * both hidden, so no provisional row is ever shown and no late write can make a
+   * released member reappear. A uid the DO has never seen is legacy and stays
+   * visible (KV is its only record).
+   */
+  classify({ uids }) {
+    const hide = [];
+    for (const uid of uids || []) {
+      const row = this.#row(String(uid || ""));
+      if (!row) continue; // unknown to the DO -> legacy member, visible
+      if (row.state === "released") hide.push(uid);
+      else if (row.state === "pending" && !row.activated) hide.push(uid); // a first join, not yet activated
+    }
+    return { ok: true, hide };
+  }
+
   /** Read-only availability, for a live sheet check. */
   check({ uid, nick, roster, now = 0 }) {
     if (this.#leagueFenced()) return { available: false, fenced: true };
@@ -274,6 +295,7 @@ export class LeagueRegistrar {
       release: () => this.release(args),
       purge: () => this.purge(args),
       check: () => this.check(args),
+      classify: () => this.classify(args),
       fenceMember: () => this.fenceMember(args),
       fenceLeague: () => this.fenceLeague(args),
     };

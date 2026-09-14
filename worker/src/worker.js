@@ -462,14 +462,24 @@ async function uniqueRecovery(env) {
   throw new Error("could not allocate recovery code");
 }
 
+// Crash-idempotent account creation. The selected recovery code is PERSISTED in
+// the user record BEFORE its recovery lookup is published, so a crash between the
+// two repairs the missing lookup for the already-chosen code on retry rather than
+// minting a second one — and an unowned mapping is never left, because the user
+// record (carrying the code) is always written first. Existing users and codes
+// are preserved byte-for-byte.
 async function ensureUser(env, uid, nickname) {
   const user = (await kvGet(env, `user:${uid}`)) || { nickname: "", leagues: [] };
-  if (nickname) user.nickname = normNick(nickname);
-  if (!user.recovery) {
-    user.recovery = await uniqueRecovery(env);
-    await kvPut(env, `recovery:${user.recovery}`, uid);
+  let dirty = false;
+  if (nickname) {
+    const n = normNick(nickname);
+    if (user.nickname !== n) { user.nickname = n; dirty = true; }
   }
-  await kvPut(env, `user:${uid}`, user);
+  if (!user.recovery) { user.recovery = await uniqueRecovery(env); dirty = true; }
+  if (dirty) await kvPut(env, `user:${uid}`, user);      // persist the selection first
+  if ((await kvGet(env, `recovery:${user.recovery}`)) !== uid) {
+    await kvPut(env, `recovery:${user.recovery}`, uid);  // publish or repair the lookup
+  }
   return user;
 }
 
@@ -505,7 +515,32 @@ async function members(env, league) {
       since: league.joinedAt?.[uid] || 0,
     });
   }
+  // The registrar is the authority on which memberships are LIVE: a provisional
+  // (not-yet-activated) join and a released (torn-down) member are hidden from
+  // ordinary reads even if their KV row still exists, so a provisional row is
+  // never shown and no late write can resurrect a torn-down member (Slice A/B).
+  if (registrarEnabled(env) && found.size) {
+    try {
+      const { hide } = await registrarCall(env, code, "classify", { uids: [...found.keys()] });
+      for (const uid of hide || []) found.delete(uid);
+    } catch { /* registrar unreachable: fall back to the KV view for this read */ }
+  }
   return [...found.values()].sort((a, b) => (a.since || 0) - (b.since || 0) || a.nick.localeCompare(b.nick));
+}
+
+/** The raw set of member-row uids in KV, unfiltered by registrar liveness — for
+ *  teardown, which must remove every row regardless of DO state. */
+async function allMemberUids(env, code) {
+  const uids = [];
+  if (!(code && env.KV.list)) return uids;
+  let cursor;
+  do {
+    const page = await env.KV.list({ prefix: leagueMemberPrefix(code), cursor });
+    for (const key of page.keys) uids.push(key.name.slice(leagueMemberPrefix(code).length));
+    cursor = page.cursor;
+    if (page.list_complete) break;
+  } while (cursor);
+  return uids;
 }
 
 async function allPicks(env, ids) {
@@ -1035,6 +1070,8 @@ function validRegistrarShape(op, data) {
     case "fenceMember":
     case "fenceLeague":
       return data.ok === true;
+    case "classify":
+      return Array.isArray(data.hide);
     case "check":
       return typeof data.available === "boolean";
     default:
@@ -1183,18 +1220,35 @@ async function joinLeague(env, body) {
   }
   // The grant must be for the very uid + name we asked about (Slice A/D).
   if (!begin.ok || begin.uid !== uid || begin.norm !== offeredNorm) return registrarUnavailable(env);
+  const wasMember = !!(existing || legacyMember);
 
-  // Phase 2 — commit the fenced name FIRST, and only mint the account and write
-  // the membership once it is CONFIRMED ours. So a definitive loss or an unknown
-  // outcome leaves no user, no recovery credential, no membership and no league
-  // link — the orphaned-credential invariant (Slice A/A). Nothing was written
-  // before this point, so there is nothing to roll back.
-  //   unknown (null) after a safe re-read -> never success, nothing written;
-  //     the name stays pending and an identical retry converges.
-  //   committed:false -> refuse; if fenced, a teardown started mid-flight.
+  // Phase 2 — write the PROVISIONAL membership while the claim is still pending.
+  // The registrar reports a not-yet-activated claim as hidden, so this row is
+  // invisible to every member/state/league read until activation — and because
+  // ACTIVATION (the commit) is the last authoritative step, there is no KV write
+  // after it that a teardown could race (Slice A/B).
+  await kvPut(env, leagueMemberKey(code, uid), {
+    nick: normNick(offered),
+    since: existing?.since || league.joinedAt?.[uid] || Date.now(),
+  });
+
+  // Phase 3 — ACTIVATE. commit is the single Durable-Object authority that
+  // serialises final membership activation against teardown: it refuses if a
+  // member/league teardown fence won first (so a membership is never activated
+  // past a teardown), and if it wins the teardown that follows necessarily
+  // includes this membership. Nothing is minted or made visible before this.
+  //   unknown (null) after the safe re-read -> never success; the provisional
+  //     row stays hidden and an identical retry converges (Slice A/A).
+  //   committed:false -> a definitive loss; drop our provisional row and refuse.
   const commit = await resolveCommit(env, code, { uid, norm: begin.norm, fence: begin.fence });
   if (!commit) return registrarUnavailable(env);
   if (!commit.committed) {
+    // Never delete an existing member's row; a fresh join's provisional row is
+    // ours to remove (only while it is still the one we wrote).
+    if (!wasMember) {
+      const current = await kvGet(env, leagueMemberKey(code, uid));
+      if (current && normaliseJoinNick(current.nick) === offeredNorm) await env.KV.delete(leagueMemberKey(code, uid));
+    }
     if (commit.taken) {
       return json({ error: "That name is taken in this league", taken: true,
         suggestions: commit.suggestions || [] }, 409, env);
@@ -1203,16 +1257,11 @@ async function joinLeague(env, body) {
     return registrarUnavailable(env);
   }
 
-  // Phase 3 — the name is confirmed ours: NOW mint the account (recovery on
-  // first contact, idempotent on retry) and write the visible membership. A
-  // crash between the confirmed commit and here leaves the name committed to us
-  // with no membership; an identical retry sees begin -> already-committed and
-  // finishes this phase (Slice A/A).
+  // Phase 4 — activated: the membership is now live (the registrar shows it).
+  // Mint the account and recovery (crash-idempotent) and link the league. A
+  // crash here leaves a live member without an account; an identical retry sees
+  // begin -> already-committed and finishes this phase (Slice A/A).
   const user = await ensureUser(env, uid, body.nickname);
-  await kvPut(env, leagueMemberKey(code, uid), {
-    nick: normNick(offered),
-    since: existing?.since || league.joinedAt?.[uid] || Date.now(),
-  });
   user.leagues = [...new Set([...(user.leagues || []), code])];
   await kvPut(env, `user:${uid}`, user);
   return json({ ok: true, code, name: league.name, recovery: user.recovery }, 200, env);
@@ -1235,8 +1284,9 @@ async function deleteLeague(env, body) {
   if (!registrarEnabled(env)) return teardownIncomplete(env, "deletion");
 
   // 1 · Record the deletion intent (owner + member uids) so a retry can finish
-  // even after the league record is gone.
-  const memberUids = league ? (await members(env, league)).map((m) => m.uid) : (intent?.members || []);
+  // even after the league record is gone. Use the RAW KV rows, not the filtered
+  // roster, so a provisional or released row is still torn down.
+  const memberUids = [...new Set([...(await allMemberUids(env, code)), ...(intent?.members || [])])];
   await kvPut(env, intentKey, { op: "league", code, owner, members: memberUids, at: Date.now() });
 
   // 2 · Raise the DO league fence BEFORE any live teardown — the atomic barrier
@@ -1586,11 +1636,13 @@ async function setProfile(env, body) {
   const nickname = normNick(body.nickname);
   const user = (await kvGet(env, `user:${uid}`)) || { nickname: "", leagues: [] };
   user.nickname = nickname;
-  if (!user.recovery) {
-    user.recovery = await uniqueRecovery(env);
+  if (!user.recovery) user.recovery = await uniqueRecovery(env);
+  // Persist the user (with its selected recovery) BEFORE publishing the lookup,
+  // so a crash repairs rather than mints a second code (crash-idempotent).
+  await kvPut(env, `user:${uid}`, user);
+  if ((await kvGet(env, `recovery:${user.recovery}`)) !== uid) {
     await kvPut(env, `recovery:${user.recovery}`, uid);
   }
-  await kvPut(env, `user:${uid}`, user);
 
   const updated = [];
   const kept = [];

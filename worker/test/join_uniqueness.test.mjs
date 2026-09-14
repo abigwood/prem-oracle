@@ -41,9 +41,12 @@ function world({ registrar = true, kv } = {}) {
  *  a substring — a faithful mid-handler crash (the worker's top-level catch
  *  turns it into a 500). Disarming restores normal operation for the retry. */
 function crashableKV(store = new Map()) {
-  let armed = null; // { op, match } — fires once
+  let armed = null; // { op, match, skip } — fires once, after `skip` earlier matches
   const fireIfArmed = (op, key) => {
-    if (armed && armed.op === op && key.includes(armed.match)) { armed = null; throw new Error("crash"); }
+    if (armed && armed.op === op && key.includes(armed.match)) {
+      if (armed.skip > 0) { armed.skip -= 1; return; }
+      armed = null; throw new Error("crash");
+    }
   };
   const kv = {
     async get(key, type) {
@@ -56,7 +59,7 @@ function crashableKV(store = new Map()) {
       return { keys: [...store.keys()].filter((k) => k.startsWith(prefix)).sort().map((name) => ({ name })), list_complete: true };
     },
   };
-  return { kv, store, crashOn: (op, match) => { armed = { op, match }; }, disarm: () => { armed = null; } };
+  return { kv, store, crashOn: (op, match, skip = 0) => { armed = { op, match, skip }; }, disarm: () => { armed = null; } };
 }
 
 /** A registrar namespace that can be told to fail the NEXT n calls of an op
@@ -124,6 +127,16 @@ async function withLeague(opts = {}) {
 const memberNicks = (store, code) => [...store.keys()]
   .filter((k) => k.startsWith(`member:${code}:`))
   .map((k) => JSON.parse(store.get(k)).nick);
+
+/** The player-VISIBLE roster from /state — the ordinary read that must never
+ *  show a provisional or released membership. */
+async function stateNicks(env, code) {
+  const res = await worker.fetch(new Request(`https://worker.test/state?code=${code}`), env);
+  const body = await res.json();
+  const byUid = {};
+  for (const row of body.table || []) byUid[row.uid] = row.nick;
+  return { table: body.table || [], byUid };
+}
 
 // --- available name: invitation through to a real membership ----------------
 
@@ -725,7 +738,7 @@ async function seededCrashWorld() {
   const post = (path, body) => worker.fetch(new Request(`https://worker.test${path}`, {
     method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
   }), env);
-  return { cr, store: cr.store, post };
+  return { cr, env, store: cr.store, post };
 }
 
 test("C · kick — crash mid live-removal: name stays held, join refused, retry completes", async () => {
@@ -807,15 +820,19 @@ test("A · a definitive commit loss leaves no user, recovery, membership or link
 
 test("A · an unknown commit leaves no visible membership and converges on retry", async () => {
   const ctl = controllableRegistrar();
-  const { post, store, code } = await withLeague({ registrar: ctl.namespace });
+  const { post, env, store, code } = await withLeague({ registrar: ctl.namespace });
   ctl.failNext("commit", 2); // commit + safe re-read both fail
   const first = await post("/join", { uid: "u1", code, nick: "Ferdinand" });
   assert.notEqual(first.status, 200);
-  assert.equal(store.has(`member:${code}:u1`), false, "an unknown commit left a visible membership");
+  // The provisional row may exist in KV, but it must NOT be visible (registrar
+  // reports it as not-yet-activated) and no account/recovery is minted.
+  assert.ok(!(await stateNicks(env, code)).byUid.u1, "an unknown commit showed a provisional member");
   assert.equal(store.has("user:u1"), false, "an unknown commit minted a user");
-  // Retry converges: commit lands, identity now minted.
+  assert.deepEqual([...store.keys()].filter((k) => k.startsWith("recovery:") && JSON.parse(store.get(k)) === "u1"), [],
+    "an unknown commit minted a recovery credential for u1");
+  // Retry converges: commit lands, identity now minted and the member is visible.
   assert.equal((await post("/join", { uid: "u1", code, nick: "Ferdinand" })).status, 200);
-  assert.equal(JSON.parse(store.get(`member:${code}:u1`)).nick, "Ferdinand");
+  assert.equal((await stateNicks(env, code)).byUid.u1, "Ferdinand", "the member did not become visible on retry");
   assert.ok(store.has("user:u1"));
 });
 
@@ -957,4 +974,120 @@ test("B · crash after the DO fence, before live removal: rejoin still refused, 
   assert.equal((await post("/league/kick", { uid: "host", code, memberUid: "u1" })).status, 200);
   assert.ok(!store.has(kickIntent(code, "u1")));
   assert.equal((await post("/join", { uid: "u1", code, nick: "Scholes" })).status, 200);
+});
+
+// === FIFTH REVIEW ===========================================================
+
+// --- A · recovery creation is crash-idempotent ------------------------------
+// Exactly one user and one recovery mapping must remain after a crash at any
+// boundary of account creation, followed by a retry.
+
+const recoveriesFor = (store, uid) => [...store.keys()]
+  .filter((k) => k.startsWith("recovery:") && JSON.parse(store.get(k)) === uid);
+
+test("A · crash before the user write: retry mints exactly one user and one recovery", async () => {
+  const { cr, store, post } = await seededCrashWorld();
+  const code = (await (await post("/league", { uid: "host", nickname: "Host" })).json()).code;
+  cr.crashOn("put", "user:u1"); // the account write (after a confirmed commit)
+  assert.equal((await post("/join", { uid: "u1", code, nick: "Vidic" })).status, 500);
+  assert.equal(store.has("user:u1"), false);
+  assert.deepEqual(recoveriesFor(store, "u1"), [], "a recovery mapping was left with no user");
+  // Retry converges.
+  assert.equal((await post("/join", { uid: "u1", code, nick: "Vidic" })).status, 200);
+  assert.equal(recoveriesFor(store, "u1").length, 1, "not exactly one recovery mapping");
+  assert.equal(JSON.parse(store.get("user:u1")).recovery, recoveriesFor(store, "u1")[0].slice("recovery:".length));
+});
+
+test("A · crash after the user write, before the recovery mapping: retry repairs, no second code", async () => {
+  // The exact reported bug: user carries code1, its lookup was never published;
+  // a naive retry would mint code2. The fix repairs the lookup for code1.
+  const { cr, store, post } = await seededCrashWorld();
+  const code = (await (await post("/league", { uid: "host", nickname: "Host" })).json()).code;
+  cr.crashOn("put", "recovery:"); // the host's was written during setup; crash on u1's lookup publish
+  assert.equal((await post("/join", { uid: "u1", code, nick: "Keane" })).status, 500);
+  const chosen = JSON.parse(store.get("user:u1")).recovery; // code1 persisted in the user record
+  assert.ok(chosen, "the selected recovery was not persisted before the lookup");
+  assert.deepEqual(recoveriesFor(store, "u1"), [], "an unpublished code somehow had a lookup");
+  // Retry: repairs the SAME code, never mints a second.
+  assert.equal((await post("/join", { uid: "u1", code, nick: "Keane" })).status, 200);
+  assert.equal(recoveriesFor(store, "u1").length, 1, "retry minted a second recovery mapping");
+  assert.equal(recoveriesFor(store, "u1")[0], `recovery:${chosen}`, "retry did not repair the original code");
+  assert.equal(JSON.parse(store.get("user:u1")).recovery, chosen, "the user's recorded code changed");
+});
+
+test("A · crash after the recovery mapping, before the league link: retry converges", async () => {
+  const { cr, env, store, post } = await seededCrashWorld();
+  const code = (await (await post("/league", { uid: "host", nickname: "Host" })).json()).code;
+  // ensureUser writes user (put #1) then the lookup; the league link is put #2 to user:u1.
+  cr.crashOn("put", "user:u1", 1);
+  assert.equal((await post("/join", { uid: "u1", code, nick: "Scholes" })).status, 500);
+  assert.equal(recoveriesFor(store, "u1").length, 1, "recovery was not exactly one after the mapping");
+  // Retry converges: one user, one recovery, member visible with the league linked.
+  assert.equal((await post("/join", { uid: "u1", code, nick: "Scholes" })).status, 200);
+  assert.equal(recoveriesFor(store, "u1").length, 1);
+  assert.ok(JSON.parse(store.get("user:u1")).leagues.includes(code));
+  assert.equal((await stateNicks(env, code)).byUid.u1, "Scholes");
+});
+
+// --- C · required interleaving evidence -------------------------------------
+// join obtains its fence, teardown runs at a boundary, and the two complete in
+// both orders. After every terminal sequence: at most one live member, one
+// authoritative name holder, one recovery for a success and zero for an abandon,
+// no provisional row in visible reads, no stranded fence.
+
+test("C · join then kick-of-the-joining-UID, teardown wins: no live member, no stranded fence", async () => {
+  // The join has activated; the owner then kicks that very UID. Teardown must
+  // include the freshly-activated membership.
+  const { post, env, store, code } = await withLeague();
+  assert.equal((await post("/join", { uid: "u1", code, nick: "Park" })).status, 200);
+  assert.equal((await post("/league/kick", { uid: "host", code, memberUid: "u1" })).status, 200);
+  assert.ok(!(await stateNicks(env, code)).byUid.u1, "a kicked joiner is still visible");
+  // No stranded fence: the name is reusable.
+  assert.equal((await post("/join", { uid: "u2", code, nick: "Park" })).status, 200);
+});
+
+test("C · join loses to a league deletion that fenced first: nothing visible, converges", async () => {
+  // Raise the league fence via a stalled delete, then a concurrent join must not
+  // activate; after the delete completes there is no ghost.
+  const ctl = controllableRegistrar();
+  const { post, store, code } = await withLeague({ registrar: ctl.namespace });
+  ctl.failNext("purge", 1);
+  assert.equal((await post("/league/delete", { uid: "host", code })).status, 503); // league fence up
+  assert.equal((await post("/join", { uid: "u1", code, nick: "Ghost" })).status, 404, "a join activated during deletion");
+  assert.equal(store.has("user:u1"), false);
+  assert.deepEqual(recoveriesFor(store, "u1"), []);
+  // Complete the deletion; no membership, no fence residue that a re-created code could inherit.
+  assert.equal((await post("/league/delete", { uid: "host", code })).status, 200);
+});
+
+test("C · sole-owner account deletion closes the league; a racing join cannot revive it", async () => {
+  const ctl = controllableRegistrar();
+  const { post, store, code } = await withLeague({ registrar: ctl.namespace });
+  // Host is the sole member; deleting the host account closes the league.
+  ctl.failNext("release", 1);
+  assert.equal((await post("/account/delete", { uid: "host" })).status, 503); // member fence up on host
+  // A join by the departing host is fenced; a join by anyone else sees the league going/gone.
+  assert.notEqual((await post("/join", { uid: "host", code, nick: "Host" })).status, 200);
+  assert.equal((await post("/account/delete", { uid: "host" })).status, 200);
+  assert.equal(store.has("user:host"), false);
+});
+
+test("C · commit succeeds then teardown runs before the account write: no stranded recovery, name reusable", async () => {
+  // Activation wins; a crash strikes before the account write; the owner then
+  // kicks the UID. Teardown includes the activated member; the aborted account
+  // left no recovery to strand.
+  const { cr, env, store, post } = await seededCrashWorld();
+  const code = (await (await post("/league", { uid: "host", nickname: "Host" })).json()).code;
+  cr.crashOn("put", "user:u1"); // crash right after the confirmed commit, at account creation
+  assert.equal((await post("/join", { uid: "u1", code, nick: "Berbatov" })).status, 500);
+  // The commit was confirmed, so the member is a live (visible) member — but with
+  // no account yet, and crucially no recovery credential was stranded.
+  assert.equal((await stateNicks(env, code)).byUid.u1, "Berbatov");
+  assert.deepEqual(recoveriesFor(store, "u1"), [], "a recovery was stranded before the account existed");
+  // The owner kicks the half-finished joiner; teardown includes the activated member.
+  assert.equal((await post("/league/kick", { uid: "host", code, memberUid: "u1" })).status, 200);
+  assert.ok(!(await stateNicks(env, code)).byUid.u1, "the kicked member is still visible");
+  assert.deepEqual(recoveriesFor(store, "u1"), []);
+  // The name is free again.
+  assert.equal((await post("/join", { uid: "u2", code, nick: "Berbatov" })).status, 200);
 });

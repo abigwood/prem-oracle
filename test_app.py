@@ -2450,14 +2450,19 @@ class NamesAndViewportTests(unittest.TestCase):
         self.assertIn("if (!registrarEnabled(env)) return registrarUnavailable(env);", fn)
         self.assertLess(fn.index("registrarEnabled(env)) return registrarUnavailable"),
                         fn.index("await members(env, league)"))
-        # A: commit-first — the fenced name is CONFIRMED (begin then resolveCommit)
-        # BEFORE the account is minted or any membership is written, so a lost or
-        # rejected join leaves no user, recovery mapping or membership.
+        # A/B: begin reserves the name; the PROVISIONAL membership is written
+        # while the claim is still pending (hidden by the registrar); ACTIVATION
+        # (resolveCommit) is the last authoritative step; only AFTER it is the
+        # account/recovery minted. So a lost or rejected join mints no account,
+        # recovery mapping or visible membership, and no KV write follows
+        # activation that a teardown could race.
         self.assertIn('registrarCall(env, code, "begin"', fn)
         self.assertIn("resolveCommit(env, code, { uid, norm: begin.norm, fence: begin.fence })", fn)
-        self.assertLess(fn.index('registrarCall(env, code, "begin"'), fn.index("resolveCommit(env, code"))
+        self.assertLess(fn.index('registrarCall(env, code, "begin"'), fn.index("leagueMemberKey(code, uid), {"))
+        self.assertLess(fn.index("leagueMemberKey(code, uid), {"), fn.index("resolveCommit(env, code"))
         self.assertLess(fn.index("resolveCommit(env, code"), fn.index("ensureUser(env, uid"))
-        self.assertLess(fn.index("resolveCommit(env, code"), fn.index("leagueMemberKey(code, uid), {"))
+        # The account is minted only after activation — nothing before commit.
+        self.assertLess(fn.index("resolveCommit(env, code"), fn.index("user.leagues = "))
         # A: an unknown commit outcome (resolveCommit -> null) is never a 200, and
         # nothing is minted on a definitive loss either.
         self.assertIn("if (!commit) return registrarUnavailable(env);", fn)

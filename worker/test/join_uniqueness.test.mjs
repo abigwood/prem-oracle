@@ -66,7 +66,7 @@ function crashableKV(store = new Map()) {
  *  (release/purge), then behaves normally — for proving resumable teardown. */
 function controllableRegistrar() {
   const real = registrarNamespace();
-  const fail = { release: 0, purge: 0, begin: 0, commit: 0 };
+  const fail = { release: 0, purge: 0, begin: 0, commit: 0, classify: 0 };
   const namespace = {
     idFromName: (name) => real.idFromName(name),
     get(id) {
@@ -821,35 +821,48 @@ test("A · a definitive commit loss leaves no user, recovery, membership or link
 test("A · an unknown commit leaves no visible membership and converges on retry", async () => {
   const ctl = controllableRegistrar();
   const { post, env, store, code } = await withLeague({ registrar: ctl.namespace });
-  ctl.failNext("commit", 2); // commit + safe re-read both fail
+  ctl.failNext("commit", 2); // activation + its safe re-read both fail (unknown)
   const first = await post("/join", { uid: "u1", code, nick: "Ferdinand" });
   assert.notEqual(first.status, 200);
-  // The provisional row may exist in KV, but it must NOT be visible (registrar
-  // reports it as not-yet-activated) and no account/recovery is minted.
-  assert.ok(!(await stateNicks(env, code)).byUid.u1, "an unknown commit showed a provisional member");
-  assert.equal(store.has("user:u1"), false, "an unknown commit minted a user");
-  assert.deepEqual([...store.keys()].filter((k) => k.startsWith("recovery:") && JSON.parse(store.get(k)) === "u1"), [],
-    "an unknown commit minted a recovery credential for u1");
-  // Retry converges: commit lands, identity now minted and the member is visible.
-  assert.equal((await post("/join", { uid: "u1", code, nick: "Ferdinand" })).status, 200);
+  // The account and membership are PREPARED but the claim is not activated, so
+  // the membership must not be player-visible — nothing surfaced despite the
+  // prepared state.
+  assert.ok(!(await stateNicks(env, code)).byUid.u1, "an unknown activation showed a provisional member");
+  // Retry converges: activation lands, and the same account/membership/recovery
+  // is confirmed and made visible.
+  const before = store.has("user:u1") ? JSON.parse(store.get("user:u1")).recovery : null;
+  const retry = await (await post("/join", { uid: "u1", code, nick: "Ferdinand" })).json();
   assert.equal((await stateNicks(env, code)).byUid.u1, "Ferdinand", "the member did not become visible on retry");
-  assert.ok(store.has("user:u1"));
+  assert.equal(recoveriesFor(store, "u1").length, 1, "not exactly one recovery after convergence");
+  if (before) assert.equal(retry.recovery, before, "the recovery credential changed across the retry");
 });
 
-test("A · commit success then a crash before account creation converges on retry", async () => {
-  // The DO commits, but the worker dies before minting the account (a KV crash
-  // on the user write). Nothing visible yet; a retry sees begin -> already
-  // committed and finishes.
-  const { cr, store, post } = await seededCrashWorld();
+test("A · a crash while preparing the account (before activation) shows nothing, converges on retry", async () => {
+  // The account is prepared BEFORE the final activation. A crash mid-prepare
+  // leaves the membership un-activated, so it is invisible; a retry finishes and
+  // activates it, with exactly one recovery.
+  const { cr, env, store, post } = await seededCrashWorld();
   const code = (await (await post("/league", { uid: "host", nickname: "Host" })).json()).code;
-  cr.crashOn("put", "user:u1"); // crash right after the confirmed commit, at account creation
+  cr.crashOn("put", "user:u1"); // crash during account preparation, before activation
   const first = await post("/join", { uid: "u1", code, nick: "Ferdinand" });
   assert.equal(first.status, 500);
-  assert.equal(store.has("user:u1"), false, "the account was created before commit was confirmed");
-  // Retry: begin -> already committed, account + membership finalised.
+  assert.ok(!(await stateNicks(env, code)).byUid.u1, "an un-activated join was visible after a prepare crash");
+  // Retry finishes prepare then the final activation; member visible, one recovery.
   assert.equal((await post("/join", { uid: "u1", code, nick: "Ferdinand" })).status, 200);
-  assert.ok(store.has("user:u1"));
-  assert.equal(JSON.parse(store.get(`member:${code}:u1`)).nick, "Ferdinand");
+  assert.equal((await stateNicks(env, code)).byUid.u1, "Ferdinand");
+  assert.equal(recoveriesFor(store, "u1").length, 1);
+});
+
+test("A · a lost response after successful activation: an identical retry returns the same result", async () => {
+  // Activation is the last mutation. If its response is lost, the operation is
+  // complete; an identical retry returns the same account, membership and code.
+  const { post, env, store, code } = await withLeague();
+  const firstBody = await (await post("/join", { uid: "u1", code, nick: "Ferdinand" })).json();
+  const retryBody = await (await post("/join", { uid: "u1", code, nick: "Ferdinand" })).json();
+  assert.equal(retryBody.recovery, firstBody.recovery, "the recovery credential changed on an identical retry");
+  assert.equal(recoveriesFor(store, "u1").length, 1, "a retry minted a second recovery");
+  assert.equal((await stateNicks(env, code)).byUid.u1, "Ferdinand");
+  assert.equal(memberNicks(store, code).filter((n) => n === "Ferdinand").length, 1, "a retry duplicated the membership");
 });
 
 test("A · another member taking an expired name cannot resurrect an abandoned attempt", async () => {
@@ -1072,22 +1085,116 @@ test("C · sole-owner account deletion closes the league; a racing join cannot r
   assert.equal(store.has("user:host"), false);
 });
 
-test("C · commit succeeds then teardown runs before the account write: no stranded recovery, name reusable", async () => {
-  // Activation wins; a crash strikes before the account write; the owner then
-  // kicks the UID. Teardown includes the activated member; the aborted account
-  // left no recovery to strand.
-  const { cr, env, store, post } = await seededCrashWorld();
-  const code = (await (await post("/league", { uid: "host", nickname: "Host" })).json()).code;
-  cr.crashOn("put", "user:u1"); // crash right after the confirmed commit, at account creation
-  assert.equal((await post("/join", { uid: "u1", code, nick: "Berbatov" })).status, 500);
-  // The commit was confirmed, so the member is a live (visible) member — but with
-  // no account yet, and crucially no recovery credential was stranded.
-  assert.equal((await stateNicks(env, code)).byUid.u1, "Berbatov");
-  assert.deepEqual(recoveriesFor(store, "u1"), [], "a recovery was stranded before the account existed");
-  // The owner kicks the half-finished joiner; teardown includes the activated member.
-  assert.equal((await post("/league/kick", { uid: "host", code, memberUid: "u1" })).status, 200);
-  assert.ok(!(await stateNicks(env, code)).byUid.u1, "the kicked member is still visible");
-  assert.deepEqual(recoveriesFor(store, "u1"), []);
-  // The name is free again.
+test("C · final activation refused after prepare removes the whole attempt — no stranded recovery", async () => {
+  // begin succeeds and the account + membership are PREPARED, but the FINAL
+  // activation is refused (a teardown won). The attempt must remove everything it
+  // created — member row, account and recovery — leaving nothing stranded.
+  const refuse = commitVerdictRegistrar(() => ({ ok: true, committed: false, fenced: true }));
+  const { post, env, store, code } = await withLeague({ registrar: refuse.namespace });
+  refuse.failCommits(1);
+  const res = await post("/join", { uid: "newbie", code, nick: "Berbatov" });
+  assert.notEqual(res.status, 200, "a refused activation reported success");
+  assert.equal(store.has("user:newbie"), false, "the attempt's account survived a refused activation");
+  assert.deepEqual(recoveriesFor(store, "newbie"), [], "a recovery was stranded by a refused activation");
+  assert.ok(!(await stateNicks(env, code)).byUid.newbie, "a refused join is visible");
+  assert.equal(store.has(`member:${code}:newbie`), false, "the provisional row was not cleaned up");
+  // The name was never activated, so a real joiner can take it.
   assert.equal((await post("/join", { uid: "u2", code, nick: "Berbatov" })).status, 200);
+});
+
+test("C · an EXISTING account joining a new league that is refused keeps its account", async () => {
+  // The cleanup must remove only what the attempt owns. An existing account whose
+  // NEW-league join is refused keeps its account, recovery and other leagues.
+  const first = await withLeague();
+  await first.post("/join", { uid: "u1", code: first.code, nick: "Established" });
+  const before = JSON.parse(first.store.get("user:u1"));
+  assert.ok(before.recovery);
+  // A second league on the SAME store/registrar world, where activation is refused.
+  const refuse = commitVerdictRegistrar(() => ({ ok: true, committed: false, fenced: true }));
+  // Reuse the same KV store so u1's account persists; new registrar for the 2nd league.
+  const env2 = { KV: memoryKV(first.store), LEAGUE_REGISTRAR: refuse.namespace };
+  const post2 = (path, body) => worker.fetch(new Request(`https://worker.test${path}`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+  }), env2);
+  const b = await (await post2("/league", { uid: "hostB", nickname: "HostB" })).json();
+  refuse.failCommits(1);
+  assert.notEqual((await post2("/join", { uid: "u1", code: b.code, nick: "Established" })).status, 200);
+  const after = JSON.parse(first.store.get("user:u1"));
+  assert.equal(after.recovery, before.recovery, "an existing account's recovery was destroyed");
+  assert.ok(!after.leagues.includes(b.code), "the refused league link was not detached");
+  assert.ok(after.leagues.includes(first.code), "an existing membership was lost");
+});
+
+// --- B · membership reads fail closed when the registrar cannot classify -----
+// A player-visible roster must NEVER show a provisional or released row because
+// the registrar is unavailable or returns garbage. The read fails closed
+// (retryable) instead of falling back to the raw KV view.
+
+test("B · /state fails closed when classify is unavailable — a provisional member never shows", async () => {
+  const ctl = controllableRegistrar();
+  const { post, env, store, code } = await withLeague({ registrar: ctl.namespace });
+  // Create a PROVISIONAL member: a join whose activation stays unknown leaves a
+  // hidden, not-yet-activated membership row in KV.
+  ctl.failNext("commit", 2);
+  await post("/join", { uid: "prov", code, nick: "Provisional" });
+  assert.ok(store.has(`member:${code}:prov`), "test needs a provisional row present in KV");
+
+  // Now the registrar cannot classify. /state must fail closed, not fall back.
+  ctl.failNext("classify", 5);
+  const res = await worker.fetch(new Request(`https://worker.test/state?code=${code}`), env);
+  assert.equal(res.status, 503, "state read did not fail closed when classification was unavailable");
+  const body = await res.json();
+  assert.equal(body.retryable, true, "the failure was not advertised as retryable");
+  assert.ok(!(body.table || []).some((r) => r.uid === "prov"), "a provisional member leaked into a failed-open read");
+  assert.ok(!(body.reveals || []).some((r) => r.uid === "prov"), "a provisional member leaked into reveals");
+});
+
+test("B · /state fails closed when classify is MALFORMED — a released member never shows", async () => {
+  // A released (kicked) member whose KV row lingers must not reappear when the
+  // registrar answers classify with garbage.
+  const real = registrarNamespace();
+  let malform = false;
+  const namespace = {
+    idFromName: (name) => real.idFromName(name),
+    get(id) {
+      const inner = real.get(id);
+      return {
+        fetch: async (url, init) => {
+          if (malform && JSON.parse(init.body).op === "classify") {
+            return new Response(JSON.stringify({ ok: true, hide: "not-an-array" }), { status: 200 });
+          }
+          return inner.fetch(url, init);
+        },
+      };
+    },
+  };
+  const store = new Map();
+  const env = { KV: memoryKV(store), LEAGUE_REGISTRAR: namespace };
+  const post = (path, body) => worker.fetch(new Request(`https://worker.test${path}`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+  }), env);
+  const code = (await (await post("/league", { uid: "host", nickname: "Host" })).json()).code;
+  await post("/join", { uid: "u1", code, nick: "Cantona" });
+  // Simulate a lingering released row: kick u1 (row removed + released), then
+  // re-plant a stale KV row as an eventually-consistent read might.
+  await post("/league/kick", { uid: "host", code, memberUid: "u1" });
+  store.set(`member:${code}:u1`, JSON.stringify({ nick: "Cantona", since: 1 }));
+
+  malform = true;
+  const res = await worker.fetch(new Request(`https://worker.test/state?code=${code}`), env);
+  assert.equal(res.status, 503, "state read trusted a malformed classification");
+  const body = await res.json();
+  assert.ok(!(body.table || []).some((r) => r.uid === "u1"), "a released member reappeared on a malformed classify");
+});
+
+test("B · with NO registrar bound at all, /state still serves (no provisional rows can exist)", async () => {
+  // Fail-closed applies when the registrar is bound but unavailable — not when
+  // none is configured, a world that has no provisional/released rows to hide.
+  const store = new Map();
+  const env = { KV: memoryKV(store) };
+  store.set(`league:LEGACY`, JSON.stringify({ code: "LEGACY", name: "Legacy", owner: "h", members: ["h"] }));
+  store.set(`member:LEGACY:h`, JSON.stringify({ nick: "Legacy Host", since: 1 }));
+  const res = await worker.fetch(new Request("https://worker.test/state?code=LEGACY"), env);
+  assert.equal(res.status, 200, "a registrar-less world should serve the KV roster directly");
+  assert.ok((await res.json()).table.some((r) => r.nick === "Legacy Host"));
 });

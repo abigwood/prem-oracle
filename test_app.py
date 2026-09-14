@@ -2450,23 +2450,28 @@ class NamesAndViewportTests(unittest.TestCase):
         self.assertIn("if (!registrarEnabled(env)) return registrarUnavailable(env);", fn)
         self.assertLess(fn.index("registrarEnabled(env)) return registrarUnavailable"),
                         fn.index("await members(env, league)"))
-        # A/B: begin reserves the name; the PROVISIONAL membership is written
-        # while the claim is still pending (hidden by the registrar); ACTIVATION
-        # (resolveCommit) is the last authoritative step; only AFTER it is the
-        # account/recovery minted. So a lost or rejected join mints no account,
-        # recovery mapping or visible membership, and no KV write follows
-        # activation that a teardown could race.
+        # A: the FINAL activation is the last authoritative mutation. begin
+        # reserves the name; the PROVISIONAL membership and the account/recovery/
+        # league link are all prepared while the claim is still pending (hidden by
+        # the registrar); resolveCommit ACTIVATES last, and nothing is written
+        # after it. So a lost or rejected join surfaces no visible membership, and
+        # a definitive refusal removes only what the attempt owns.
         self.assertIn('registrarCall(env, code, "begin"', fn)
         self.assertIn("resolveCommit(env, code, { uid, norm: begin.norm, fence: begin.fence })", fn)
         self.assertLess(fn.index('registrarCall(env, code, "begin"'), fn.index("leagueMemberKey(code, uid), {"))
-        self.assertLess(fn.index("leagueMemberKey(code, uid), {"), fn.index("resolveCommit(env, code"))
-        self.assertLess(fn.index("resolveCommit(env, code"), fn.index("ensureUser(env, uid"))
-        # The account is minted only after activation — nothing before commit.
-        self.assertLess(fn.index("resolveCommit(env, code"), fn.index("user.leagues = "))
-        # A: an unknown commit outcome (resolveCommit -> null) is never a 200, and
-        # nothing is minted on a definitive loss either.
-        self.assertIn("if (!commit) return registrarUnavailable(env);", fn)
-        self.assertLess(fn.index("if (!commit) return registrarUnavailable"), fn.index("ensureUser(env, uid"))
+        self.assertLess(fn.index("leagueMemberKey(code, uid), {"), fn.index("ensureUser(env, uid"))
+        self.assertLess(fn.index("ensureUser(env, uid"), fn.index("user.leagues = "))
+        self.assertLess(fn.index("user.leagues = "), fn.index("resolveCommit(env, code"))
+        # Nothing authoritative is written after activation: every membership and
+        # account write is positioned before resolveCommit, and the block after
+        # the verdict only cleans up (on refusal) or returns.
+        after = fn[fn.index("resolveCommit(env, code"):]
+        self.assertNotIn("await ensureUser", after)
+        self.assertNotIn("leagueMemberKey(code, uid), {", after)  # no provisional/visible member write after activation
+        # A: an unknown activation (resolveCommit -> null) is never a 200.
+        self.assertIn("if (!activation) return registrarUnavailable(env);", fn)
+        # A definitive refusal cleans up only the attempt's own state.
+        self.assertIn("cleanupUnactivatedJoin(env, code, uid", fn)
         # B: an active teardown fence refuses the join (never rejoins over a removal).
         self.assertIn("if (begin.fenced)", fn)
         # The membership stores the offered name, normalised — never a raw or Anon guess.

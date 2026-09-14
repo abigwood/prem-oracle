@@ -46,7 +46,8 @@ CREATE TABLE IF NOT EXISTS claims (
   state     TEXT NOT NULL,
   ts        INTEGER NOT NULL,
   fence     TEXT NOT NULL DEFAULT '',
-  activated INTEGER NOT NULL DEFAULT 0
+  activated INTEGER NOT NULL DEFAULT 0,
+  since     INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS claims_norm ON claims (norm);
 CREATE TABLE IF NOT EXISTS teardowns (
@@ -93,7 +94,7 @@ export class LeagueRegistrar {
   /** An opaque, unguessable fence for one attempt. */
   #fence() { return crypto.randomUUID(); }
 
-  #row(uid) { return this.#rows("SELECT norm, nick, state, ts, fence, activated FROM claims WHERE uid = ?", uid)[0]; }
+  #row(uid) { return this.#rows("SELECT norm, nick, state, ts, fence, activated, since FROM claims WHERE uid = ?", uid)[0]; }
 
   /**
    * Backfill members KV already holds — additive only.
@@ -111,10 +112,12 @@ export class LeagueRegistrar {
       if (!m?.uid) continue;
       const norm = normaliseJoinNick(m.nick);
       if (!norm) continue;
-      this.sql.exec("INSERT OR IGNORE INTO claims (uid, norm, nick, state, ts, fence, activated) VALUES (?, ?, ?, 'committed', 0, '', 1)",
-        m.uid, norm, String(m.nick));
-      this.sql.exec("UPDATE claims SET state = 'committed', activated = 1 WHERE uid = ? AND state = 'pending' AND norm = ?",
-        m.uid, norm);
+      const since = Number.isFinite(m.since) && m.since >= 0 ? Math.floor(m.since) : 0;
+      this.sql.exec("INSERT OR IGNORE INTO claims (uid, norm, nick, state, ts, fence, activated, since) VALUES (?, ?, ?, 'committed', 0, '', 1, ?)",
+        m.uid, norm, String(m.nick), since);
+      // Promote a matching pending claim, carrying the roster's join time.
+      this.sql.exec("UPDATE claims SET state = 'committed', activated = 1, since = ? WHERE uid = ? AND state = 'pending' AND norm = ?",
+        since, m.uid, norm);
     }
   }
 
@@ -205,7 +208,7 @@ export class LeagueRegistrar {
    * released attempt returns committed:false and changes nothing, so the caller
    * knows its fence lost authority and must not report success.
    */
-  commit({ uid, norm, fence, now = 0 }) {
+  commit({ uid, norm, fence, since, now = 0 }) {
     uid = String(uid || "");
     const want = normaliseJoinNick(norm) || String(norm || "");
     // A teardown of this member or the whole league is in progress: never grant.
@@ -224,8 +227,11 @@ export class LeagueRegistrar {
     if (this.#holder(want, uid, now)) {
       return { ok: true, committed: false, uid, norm: want, taken: true, suggestions: this.#suggest(row.nick, now) };
     }
-    this.sql.exec("UPDATE claims SET state = 'committed', activated = 1 WHERE uid = ? AND fence = ? AND state = 'pending'",
-      uid, String(fence || ""));
+    // Store the authoritative join time supplied by the worker (the prepared
+    // membership timestamp), so the committed roster carries a real `since`.
+    const joinTs = Number.isFinite(since) && since >= 0 ? Math.floor(since) : (row.since || now);
+    this.sql.exec("UPDATE claims SET state = 'committed', activated = 1, since = ? WHERE uid = ? AND fence = ? AND state = 'pending'",
+      joinTs, uid, String(fence || ""));
     return { ok: true, committed: true, uid, norm: want };
   }
 
@@ -239,7 +245,7 @@ export class LeagueRegistrar {
   /** Every uid the registrar knows a claim for — pending, committed OR released
    *  — the authoritative teardown set. Committed members alone drive succession. */
   #allClaimUids() { return this.#rows("SELECT uid FROM claims").map((r) => r.uid); }
-  #committedMembers() { return this.#rows("SELECT uid, nick FROM claims WHERE state = 'committed'"); }
+  #committedMembers() { return this.#rows("SELECT uid, nick, since FROM claims WHERE state = 'committed'"); }
 
   /** Fence the whole league BEFORE its live teardown. Reconciles the caller's raw
    *  roster FIRST (so pre-v1.8 legacy members are backfilled and included), then
@@ -313,11 +319,29 @@ export class LeagueRegistrar {
    */
   abort({ uid, fence, now = 0 }) {
     uid = String(uid || "");
+    fence = String(fence || "");
     const row = this.#row(uid);
-    const ownsPending = row && row.state === "pending" && row.fence === String(fence || "");
-    if (!ownsPending) return { ok: true, authorised: false };
+    const ownsPending = row && row.state === "pending" && row.fence === fence;
+    // A mismatched, newer or committed fence refuses abort — echoes uid + fence.
+    if (!ownsPending) return { ok: true, authorised: false, uid, fence };
     this.sql.exec("INSERT OR REPLACE INTO teardowns (scope, kind, ts) VALUES (?, 'abort', ?)", memberScope(uid), now);
-    return { ok: true, authorised: true };
+    return { ok: true, authorised: true, uid, fence };
+  }
+
+  /** Finish an attempt-owned abort: fence-validated, it tombstones ONLY that
+   *  pending attempt and lifts its cleanup fence. A mismatched, newer or
+   *  committed fence refuses (finished:false), so a stray finish can never
+   *  release a winner. Echoes uid + fence. */
+  finishAbort({ uid, fence, now = 0 }) {
+    uid = String(uid || "");
+    fence = String(fence || "");
+    const row = this.#row(uid);
+    const ownsPending = row && row.state === "pending" && row.fence === fence;
+    if (!ownsPending) return { ok: true, finished: false, uid, fence };
+    this.sql.exec("UPDATE claims SET state = 'released', ts = ?, fence = '' WHERE uid = ? AND fence = ? AND state = 'pending'",
+      now, uid, fence);
+    this.sql.exec("DELETE FROM teardowns WHERE scope = ?", memberScope(uid));
+    return { ok: true, finished: true, uid, fence };
   }
 
   /** Drop every claim and every fence — league deletion. Idempotent. */
@@ -340,7 +364,7 @@ export class LeagueRegistrar {
     // The authoritative committed roster: the registrar's word on who is a live
     // member and under exactly which display name. Callers OVERLAY this so a
     // stale/clobbered KV row can never repaint or resurrect a member.
-    const members = this.#rows("SELECT uid, nick FROM claims WHERE state = 'committed'");
+    const members = this.#committedMembers();
     const committed = new Set(members.map((m) => m.uid));
     const hide = [];
     for (const uid of uids || []) {
@@ -380,6 +404,7 @@ export class LeagueRegistrar {
       unfenceLeague: () => this.unfenceLeague(args),
       ownerDeparture: () => this.ownerDeparture(args),
       abort: () => this.abort(args),
+      finishAbort: () => this.finishAbort(args),
     };
     const handler = handlers[op];
     if (!handler) return new Response(JSON.stringify({ error: `unknown op: ${op}` }), { status: 400 });

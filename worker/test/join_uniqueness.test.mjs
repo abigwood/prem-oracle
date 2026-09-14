@@ -1354,3 +1354,134 @@ test("A · league deletion converges after a crash, recovering the same authorit
   assert.equal(cr.store.has(`member:${code}:u1`), false);
   assert.equal(cr.store.has(`league:${code}`), false);
 });
+
+// --- C · attempt-owned abort: a losing cleanup never releases or erases a winner
+
+test("C · a losing /join's real cleanup removes only its own state; a committed member survives", async () => {
+  // The winner is a real committed member with a member row, name, account link
+  // and recovery. The loser's activation is forced to fail, so it runs the REAL
+  // cleanup route (abort -> remove fence-owned state -> release). The winner is
+  // untouched.
+  const refuse = commitVerdictRegistrar(() => ({ ok: true, committed: false }));
+  const { post, env, store, code } = await withLeague({ registrar: refuse.namespace });
+  assert.equal((await post("/join", { uid: "u_win", code, nick: "Alpha" })).status, 200);
+  const winnerRec = JSON.parse(store.get("user:u_win")).recovery;
+
+  refuse.failCommits(1); // the loser's activation loses
+  const res = await post("/join", { uid: "u_lose", code, nick: "Bravo" });
+  assert.notEqual(res.status, 200, "the losing join reported success");
+
+  // The winner survives entirely.
+  assert.equal((await stateNicks(env, code)).byUid.u_win, "Alpha", "the winner's name was lost");
+  assert.equal(JSON.parse(store.get(`member:${code}:u_win`)).nick, "Alpha", "the winner's member row was touched");
+  assert.equal(JSON.parse(store.get("user:u_win")).recovery, winnerRec, "the winner's recovery changed");
+  assert.equal(recoveriesFor(store, "u_win").length, 1);
+  // The loser's own state is cleaned up.
+  assert.equal(store.has(`member:${code}:u_lose`), false, "the loser's provisional row survived");
+  assert.deepEqual(recoveriesFor(store, "u_lose"), [], "the loser stranded a recovery");
+});
+
+test("C · abort is refused once the attempt has committed (a winner) — cleanup releases nothing", async () => {
+  const { env, code } = await withLeague();
+  const rpc = rpcTo(env, code);
+  const now = 70_000_000;
+  const b = await rpc("begin", { uid: "u1", nick: "Name", roster: [], now });
+  await rpc("commit", { uid: "u1", norm: b.norm, fence: b.fence, now }); // u1 WON
+  // A stray/late cleanup for the same fence must NOT be authorised.
+  const ab = await rpc("abort", { uid: "u1", fence: b.fence, now });
+  assert.equal(ab.authorised, false, "abort authorised cleanup of a committed winner");
+  // And the winner is still the authoritative holder.
+  assert.equal((await rpc("check", { uid: "u2", nick: "Name", roster: [], now })).available, false);
+});
+
+test("C · abort is refused once a newer attempt has superseded the fence", async () => {
+  const { env, code } = await withLeague();
+  const rpc = rpcTo(env, code);
+  const now = 71_000_000;
+  const first = await rpc("begin", { uid: "u1", nick: "Name", roster: [], now });
+  // The first attempt expires; a fresh attempt takes over with a new fence.
+  const later = now + TTL + 1;
+  const second = await rpc("begin", { uid: "u1", nick: "Name", roster: [], now: later });
+  assert.notEqual(second.fence, first.fence, "expected a fresh fence after expiry");
+  // The stale attempt's abort is refused — it cannot disturb the newer attempt.
+  assert.equal((await rpc("abort", { uid: "u1", fence: first.fence, now: later })).authorised, false);
+  // The newer attempt can still commit.
+  assert.equal((await rpc("commit", { uid: "u1", norm: second.norm, fence: second.fence, now: later })).committed, true);
+});
+
+// --- A · a pending prepared join and a legacy member are torn down by deletion --
+
+test("A · league deletion tears down a PENDING prepared join and a LEGACY member", async () => {
+  const ctl = controllableRegistrar();
+  const { post, store, code } = await withLeague({ registrar: ctl.namespace });
+  // A legacy member (pre-registrar): a raw KV row + account link, no DO claim.
+  store.set(`member:${code}:legacy`, JSON.stringify({ nick: "Old Timer", since: 1 }));
+  store.set("user:legacy", JSON.stringify({ nickname: "Old Timer", leagues: [code] }));
+  // A pending prepared join: activation stays unknown, so a provisional row +
+  // account link exist while the claim is not yet committed.
+  ctl.failNext("commit", 2);
+  await post("/join", { uid: "pend", code, nick: "Pending" });
+  assert.ok(store.has(`member:${code}:pend`), "test needs a prepared pending row");
+
+  assert.equal((await post("/league/delete", { uid: "host", code })).status, 200);
+  // Both the legacy and the pending member rows AND their account links are gone.
+  for (const u of ["legacy", "pend"]) {
+    assert.equal(store.has(`member:${code}:${u}`), false, `${u} member row orphaned`);
+    assert.ok(!(JSON.parse(store.get(`user:${u}`)).leagues || []).includes(code), `${u} league link orphaned`);
+  }
+  assert.equal(store.has(`league:${code}`), false);
+});
+
+test("A · sole-owner account closure deletes slate reverse-index entries too", async () => {
+  const { post, store, code } = await withLeague();
+  // Seed a published slate and its reverse index, as a live league would have.
+  store.set(`custom_slate:${code}:7`, JSON.stringify({ status: "published", fixtureIds: ["PL-99"] }));
+  store.set(`slatefx:PL-99:${code}`, JSON.stringify({ some: "value" }));
+  // Sole owner deletes their account -> the league closes.
+  assert.equal((await post("/account/delete", { uid: "host" })).status, 200);
+  assert.equal(store.has(`league:${code}`), false, "the sole-owner league did not close");
+  assert.equal(store.has(`custom_slate:${code}:7`), false, "the slate survived closure");
+  assert.equal(store.has(`slatefx:PL-99:${code}`), false, "the slate reverse-index survived closure");
+});
+
+// --- D · malformed authoritative registrar data fails closed ----------------
+
+function malformedOp(op, badBody) {
+  const real = registrarNamespace();
+  return {
+    idFromName: (name) => real.idFromName(name),
+    get(id) {
+      const inner = real.get(id);
+      return {
+        fetch: async (url, init) => {
+          if (JSON.parse(init.body).op === op) return new Response(JSON.stringify(badBody), { status: 200 });
+          return inner.fetch(url, init);
+        },
+      };
+    },
+  };
+}
+
+test("D · a malformed classify (members not valid identities) fails /state closed", async () => {
+  const ns = malformedOp("classify", { ok: true, hide: [], members: [{ uid: "", nick: "x" }] });
+  const store = new Map();
+  const env = { KV: memoryKV(store), LEAGUE_REGISTRAR: ns };
+  store.set(`league:L`, JSON.stringify({ code: "L", name: "L", owner: "h", members: ["h"] }));
+  store.set(`member:L:h`, JSON.stringify({ nick: "Host", since: 1 }));
+  const res = await worker.fetch(new Request("https://worker.test/state?code=L"), env);
+  assert.equal(res.status, 503, "malformed authoritative membership data was trusted");
+  assert.equal((await res.json()).retryable, true);
+});
+
+test("D · a malformed fenceLeague (bad uids) fails league deletion closed, never an empty set", async () => {
+  const ns = malformedOp("fenceLeague", { ok: true, fenced: true, uids: "nope", committed: [] });
+  const store = new Map();
+  const env = { KV: memoryKV(store), LEAGUE_REGISTRAR: ns };
+  store.set(`league:L`, JSON.stringify({ code: "L", name: "L", owner: "h", members: ["h"] }));
+  store.set(`member:L:h`, JSON.stringify({ nick: "Host", since: 1 }));
+  const res = await worker.fetch(new Request("https://worker.test/league/delete", {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ uid: "h", code: "L" }),
+  }), env);
+  assert.equal(res.status, 503, "a malformed fenceLeague was trusted");
+  assert.ok(store.has("league:L"), "the league was erased on malformed authoritative data");
+});

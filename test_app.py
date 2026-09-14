@@ -2457,7 +2457,7 @@ class NamesAndViewportTests(unittest.TestCase):
         # after it. So a lost or rejected join surfaces no visible membership, and
         # a definitive refusal removes only what the attempt owns.
         self.assertIn('registrarCall(env, code, "begin"', fn)
-        self.assertIn("resolveCommit(env, code, { uid, norm: begin.norm, fence: begin.fence })", fn)
+        self.assertIn("resolveCommit(env, code, { uid, norm: begin.norm, fence: begin.fence, since })", fn)
         self.assertLess(fn.index('registrarCall(env, code, "begin"'), fn.index("leagueMemberKey(code, uid), {"))
         self.assertLess(fn.index("leagueMemberKey(code, uid), {"), fn.index("ensureUser(env, uid"))
         self.assertLess(fn.index("ensureUser(env, uid"), fn.index("user.leagues = "))
@@ -2470,8 +2470,15 @@ class NamesAndViewportTests(unittest.TestCase):
         self.assertNotIn("leagueMemberKey(code, uid), {", after)  # no provisional/visible member write after activation
         # A: an unknown activation (resolveCommit -> null) is never a 200.
         self.assertIn("if (!activation) return registrarUnavailable(env);", fn)
-        # A definitive refusal cleans up only the attempt's own state.
-        self.assertIn("cleanupUnactivatedJoin(env, code, uid", fn)
+        # A definitive refusal runs the durable, resumable, attempt-owned abort;
+        # a stranded cleanup is resumed at the head of the next join.
+        self.assertIn("abortJoinAttempt(env, code, uid", fn)
+        self.assertIn("resumeAbortCleanup(env, code, uid)", fn)
+        # The abort protocol is fence-validated and never a generic release.
+        cleanup = self.worker[self.worker.index("async function runAbortCleanup(env, code, uid, ctx)"):]
+        cleanup = cleanup[:cleanup.index("\n}")]
+        self.assertIn('registrarCall(env, code, "abort"', cleanup)
+        self.assertIn('registrarCall(env, code, "finishAbort"', cleanup)
         # B: an active teardown fence refuses the join (never rejoins over a removal).
         self.assertIn("if (begin.fenced)", fn)
         # The membership stores the offered name, normalised — never a raw or Anon guess.

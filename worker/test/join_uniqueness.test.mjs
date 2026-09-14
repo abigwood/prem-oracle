@@ -1485,3 +1485,161 @@ test("D · a malformed fenceLeague (bad uids) fails league deletion closed, neve
   assert.equal(res.status, 503, "a malformed fenceLeague was trusted");
   assert.ok(store.has("league:L"), "the league was erased on malformed authoritative data");
 });
+
+// === NINTH REVIEW ===========================================================
+
+// --- A · abort cleanup is durably resumable across a crash at any boundary ---
+// A world where the loser's activation always fails (so /join runs the real
+// abort cleanup), with a crashable KV and an optionally-failing finishAbort.
+
+function abortWorld({ failFinish = 0 } = {}) {
+  const cr = crashableKV();
+  const real = registrarNamespace();
+  let finishFails = failFinish;
+  const R = (body) => new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+  const ns = {
+    idFromName: (n) => real.idFromName(n),
+    get(id) {
+      const inner = real.get(id);
+      return { fetch: async (url, init) => {
+        const b = JSON.parse(init.body);
+        if (b.op === "commit" && b.uid === "u_lose") return R({ ok: true, committed: false, uid: b.uid, norm: b.norm });
+        if (b.op === "finishAbort" && finishFails > 0) { finishFails -= 1; return new Response("{}", { status: 500 }); }
+        return inner.fetch(url, init);
+      }};
+    },
+  };
+  const env = { KV: cr.kv, LEAGUE_REGISTRAR: ns };
+  const post = (path, body) => worker.fetch(new Request(`https://worker.test${path}`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+  }), env);
+  return { cr, env, post, store: cr.store };
+}
+
+async function assertLoserCleanConverged(env, post, store, code) {
+  // Retry until the abort cleanup has fully resumed (no intent left).
+  for (let i = 0; i < 4 && store.has(`intent:abort:${code}:u_lose`); i++) {
+    await post("/join", { uid: "u_lose", code, nick: "Bravo" });
+  }
+  assert.equal(store.has(`intent:abort:${code}:u_lose`), false, "a cleanup intent was stranded");
+  assert.equal(store.has(`member:${code}:u_lose`), false, "a provisional member row was stranded");
+  assert.deepEqual(recoveriesFor(store, "u_lose"), [], "a recovery credential was stranded");
+  assert.equal(store.has("user:u_lose"), false, "an account was stranded");
+  // No stranded fence: a different uid can take the freed name.
+  assert.equal((await post("/join", { uid: "u_other", code, nick: "Bravo" })).status, 200, "the name was left fenced/reserved");
+  // The pre-existing account is intact.
+  assert.ok(store.has("user:u_keep"), "an existing account was destroyed by the loser's cleanup");
+}
+
+for (const boundary of [
+  { name: "after abort authorisation (before provisional member deletion)", arm: (cr, code) => cr.crashOn("delete", `member:${code}:u_lose`) },
+  { name: "after provisional member deletion (during account/recovery deletion)", arm: (cr, code) => cr.crashOn("delete", "user:u_lose") },
+  { name: "at a failed finishAbort", arm: () => {}, failFinish: 1 },
+]) {
+  test(`A · abort cleanup converges after a crash ${boundary.name}`, async () => {
+    const { cr, env, post, store } = abortWorld({ failFinish: boundary.failFinish || 0 });
+    const code = (await (await post("/league", { uid: "host", nickname: "Host" })).json()).code;
+    // A pre-existing account that must survive the loser's cleanup untouched.
+    await post("/join", { uid: "u_keep", code, nick: "Keeper" });
+
+    boundary.arm(cr, code);
+    const first = await post("/join", { uid: "u_lose", code, nick: "Bravo" });
+    assert.notEqual(first.status, 200, "the losing join reported success");
+    assert.ok(store.has(`intent:abort:${code}:u_lose`), "no durable cleanup intent was recorded");
+    cr.disarm();
+    await assertLoserCleanConverged(env, post, store, code);
+  });
+}
+
+test("A · a lost response after a successful abort finish converges (no duplicate cleanup)", async () => {
+  const { cr, env, post, store } = abortWorld();
+  const code = (await (await post("/league", { uid: "host", nickname: "Host" })).json()).code;
+  await post("/join", { uid: "u_keep", code, nick: "Keeper" });
+  // The abort completes fully (intent cleared) but imagine the HTTP response was
+  // lost; an identical retry must be a clean no-op resume + fresh attempt.
+  const first = await post("/join", { uid: "u_lose", code, nick: "Bravo" });
+  assert.notEqual(first.status, 200);
+  assert.equal(store.has(`intent:abort:${code}:u_lose`), false, "the finished cleanup left an intent");
+  await assertLoserCleanConverged(env, post, store, code);
+});
+
+test("A · an existing account survives a failed-join cleanup (only the league link is dropped)", async () => {
+  const { post, store, code, env } = await withLeague();
+  // u1 is an established member of ANOTHER league too.
+  const other = await (await post("/league", { uid: "hb", nickname: "HB" })).json();
+  await post("/join", { uid: "u1", code: other.code, nick: "Established" });
+  const rec = JSON.parse(store.get("user:u1")).recovery;
+  // u1's join to THIS league loses activation, via a verdict registrar.
+  const refuse = commitVerdictRegistrar(() => ({ ok: true, committed: false }));
+  const env2 = { KV: env.KV, LEAGUE_REGISTRAR: refuse.namespace };
+  const post2 = (path, body) => worker.fetch(new Request(`https://worker.test${path}`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+  }), env2);
+  refuse.failCommits(1);
+  assert.notEqual((await post2("/join", { uid: "u1", code, nick: "Fresh" })).status, 200);
+  // The account, its recovery and the OTHER membership survive; only this league's link is gone.
+  assert.equal(JSON.parse(store.get("user:u1")).recovery, rec, "an existing account's recovery was destroyed");
+  assert.ok(JSON.parse(store.get("user:u1")).leagues.includes(other.code), "an existing membership was lost");
+  assert.ok(!JSON.parse(store.get("user:u1")).leagues.includes(code), "the failed league link was not dropped");
+});
+
+// --- B · authoritative join time drives succession and survives a missing row -
+
+test("B · succession selects the longest-standing member by authoritative since, even if its KV row is missing", async () => {
+  const { post, store, code } = await withLeague();
+  // Pin deterministic join times so 'since' — not a tie-breaker — decides.
+  const lg = JSON.parse(store.get(`league:${code}`));
+  lg.joinedAt = { u_early: 1000, u_late: 2000 };
+  store.set(`league:${code}`, JSON.stringify(lg));
+  await post("/join", { uid: "u_early", code, nick: "Zeb" });   // since 1000 (alphabetically LAST)
+  await post("/join", { uid: "u_late", code, nick: "Abe" });    // since 2000 (alphabetically FIRST)
+  // The longest-standing member's KV row is missing — its authoritative since (1000) must still win.
+  store.delete(`member:${code}:u_early`);
+
+  await post("/account/delete", { uid: "host" });
+  assert.equal(JSON.parse(store.get(`league:${code}`)).owner, "u_early",
+    "succession did not pick the longest-standing member from the authoritative since");
+});
+
+// --- B/D · malformed or inconsistent authoritative data fails closed ---------
+
+test("D · a classify member with a non-finite since fails /state closed", async () => {
+  const ns = malformedOp("classify", { ok: true, hide: [], members: [{ uid: "h", nick: "Host", since: -1 }] });
+  const store = new Map();
+  const env = { KV: memoryKV(store), LEAGUE_REGISTRAR: ns };
+  store.set("league:L", JSON.stringify({ code: "L", name: "L", owner: "h", members: ["h"] }));
+  store.set("member:L:h", JSON.stringify({ nick: "Host", since: 1 }));
+  const res = await worker.fetch(new Request("https://worker.test/state?code=L"), env);
+  assert.equal(res.status, 503, "a mistimed authoritative since was trusted");
+});
+
+test("D · a fenceLeague whose committed uid is not in the uid set fails deletion closed", async () => {
+  const ns = malformedOp("fenceLeague", { ok: true, fenced: true, uids: ["h"], committed: [{ uid: "ghost", nick: "G", since: 1 }] });
+  const store = new Map();
+  const env = { KV: memoryKV(store), LEAGUE_REGISTRAR: ns };
+  store.set("league:L", JSON.stringify({ code: "L", name: "L", owner: "h", members: ["h"] }));
+  store.set("member:L:h", JSON.stringify({ nick: "Host", since: 1 }));
+  const res = await worker.fetch(new Request("https://worker.test/league/delete", {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ uid: "h", code: "L" }),
+  }), env);
+  assert.equal(res.status, 503, "an inconsistent committed/uid set was trusted");
+  assert.ok(store.has("league:L"), "the league was erased on inconsistent data");
+});
+
+test("D · an ownerDeparture whose closing verdict contradicts its committed set fails closed", async () => {
+  // closing:true but a committed OTHER member exists -> internally inconsistent.
+  const ns = malformedOp("ownerDeparture",
+    { ok: true, closing: true, uids: ["h", "other"], committed: [{ uid: "other", nick: "O", since: 1 }] });
+  const store = new Map();
+  const env = { KV: memoryKV(store), LEAGUE_REGISTRAR: ns };
+  store.set("league:L", JSON.stringify({ code: "L", name: "L", owner: "h", members: ["h", "other"] }));
+  store.set("member:L:h", JSON.stringify({ nick: "Host", since: 1 }));
+  store.set("member:L:other", JSON.stringify({ nick: "Other", since: 2 }));
+  store.set("user:h", JSON.stringify({ nickname: "Host", leagues: ["L"], recovery: "r" }));
+  store.set("recovery:r", JSON.stringify("h"));
+  const res = await worker.fetch(new Request("https://worker.test/account/delete", {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ uid: "h" }),
+  }), env);
+  assert.equal(res.status, 503, "an inconsistent closing verdict was trusted");
+  assert.ok(store.has("user:h"), "the account was erased on inconsistent data");
+});

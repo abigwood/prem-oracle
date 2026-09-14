@@ -210,6 +210,24 @@ test("a member who joined after kick-off is omitted from that fixture only", asy
   });
 });
 
+test("a late joiner whose KV member row is LOST stays omitted — authoritative since keeps privacy closed", async () => {
+  // Slice A/B: a committed member's join time is authoritative in the registrar,
+  // so even if its KV row vanishes the reveal must not default it to 0 and expose
+  // the kicked-off fixture's picks to someone who joined after it locked.
+  const fixtures = round();
+  await withFixtures(fixtures, async () => {
+    const { env, code, store, send } = await league(fixtures);
+    await send("/join", { uid: "late", code, nickname: "Latecomer" }); // joins after fixture 1 locked
+    // Lose the late joiner's KV membership row; the registrar still holds it.
+    store.delete(`member:${code}:late`);
+
+    const [kickedOff] = await reveal(env, code, "late");
+    assert.equal(kickedOff.picks.some((row) => row.uid === "late"), false,
+      "a late joiner reappeared in a locked fixture after its KV row was lost");
+    assert.doesNotMatch(JSON.stringify(kickedOff), /Latecomer/, "not even as No pick — privacy stayed closed");
+  });
+});
+
 test("the response carrying picks is nobody else's to cache", async () => {
   const fixtures = round();
   await withFixtures(fixtures, async () => {

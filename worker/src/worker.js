@@ -562,6 +562,18 @@ async function allMemberUids(env, code) {
   return uids;
 }
 
+/** The raw {uid, nick} rows in KV — fed to the registrar so it can reconcile
+ *  legacy (pre-registrar) members into its claims before an authoritative
+ *  fence/departure decision. */
+async function allMemberRows(env, code) {
+  const rows = [];
+  for (const uid of await allMemberUids(env, code)) {
+    const value = await kvGet(env, leagueMemberKey(code, uid));
+    if (value) rows.push({ uid, nick: value.nick || DEFAULT_NICK });
+  }
+  return rows;
+}
+
 async function allPicks(env, ids) {
   return Object.fromEntries(await Promise.all(ids.map(async (id) => [id, (await kvGet(env, `picks:${id}`)) || {}])));
 }
@@ -1026,31 +1038,54 @@ async function deleteAccount(env, body) {
         continue;
       }
       if (league.owner === uid) {
-        const fenced = await registrarFenceLeague(env, code); // raise + authoritative committed set
-        const others = (fenced.uids || []).filter((u) => u !== uid);
-        if (others.length === 0) {
-          // CLOSE — the fence blocks any racing join; teardown then purge clears it.
-          await env.KV.delete(`league:${code}`);
+        // ONE atomic op decides close-vs-succeed AND hands off the fence:
+        // reconciles the raw roster (legacy + pending), then either keeps the
+        // whole-league fence up (closing) or converts it directly into a fence on
+        // the departing uid (succession) — no unfenced gap, no stranded fence.
+        const dep = await registrarCall(env, code, "ownerDeparture",
+          { uid, roster: await allMemberRows(env, code), now: Date.now() });
+        if (dep.closing) {
+          // CLOSE — the whole-league fence blocks any racing join; the teardown
+          // (every known uid's row + link, slates and their reverse index) then
+          // purge clears it. Matches ordinary league deletion.
+          const teardownUids = [...new Set([...(dep.uids || []), ...(await allMemberUids(env, code))])];
+          await Promise.all(teardownUids.map(async (memberUid) => {
+            const u = await kvGet(env, `user:${memberUid}`);
+            if (u?.leagues?.includes(code)) { u.leagues = u.leagues.filter((e) => e !== code); await kvPut(env, `user:${memberUid}`, u); }
+            await env.KV.delete(leagueMemberKey(code, memberUid));
+          }));
           if (env.KV.list) {
             const slateKeys = await listAllKeys(env, `custom_slate:${code}:`);
-            await Promise.all(slateKeys.map((key) => env.KV.delete(key)));
+            const published = new Set();
+            for (const key of slateKeys) {
+              const slate = await kvGet(env, key);
+              for (const id of slate?.fixtureIds || []) published.add(String(id));
+            }
+            await Promise.all([
+              ...slateKeys.map((key) => env.KV.delete(key)),
+              ...[...published].map((id) => env.KV.delete(slateFixtureKey(id, code))),
+            ]);
           }
           await updateCustomMixIndex(env, code, false);
-          await env.KV.delete(leagueMemberKey(code, uid));
+          await env.KV.delete(`league:${code}`);
           await registrarCall(env, code, "purge");
           closed.push(code);
           continue;
         }
-        // SUCCESSION — hand the league to the longest-standing committed member,
-        // then lift the whole-league fence so the league lives on.
-        const heir = (await members(env, league)).find((m) => m.uid !== uid) || { uid: others[0], nick: DEFAULT_NICK };
+        // SUCCESSION — the fence is already converted to the departing uid's;
+        // hand the league to the longest-standing committed heir. The league
+        // lives on for everyone else, and the departing account cannot rejoin
+        // while its row is torn down (no unfenced gap).
+        const heir = (await members(env, league)).find((m) => m.uid !== uid)
+          || dep.committed.find((m) => m.uid !== uid) || { uid: (dep.uids || []).find((u) => u !== uid), nick: DEFAULT_NICK };
         league.owner = heir.uid;
         league.members = (league.members || []).filter((entry) => entry !== uid);
         await kvPut(env, `league:${code}`, league);
-        await registrarCall(env, code, "unfenceLeague");
         succession.push({ code, name: league.name, uid: heir.uid, nick: heir.nick });
       }
-      // Departing member's own teardown: fence, drop the row, release the name.
+      // Departing member's own teardown. The fence is already up (converted by
+      // ownerDeparture for a succession; raised here for a non-owner league —
+      // idempotent). Drop the row, then release (which clears the fence).
       await registrarFenceMember(env, code, uid, "account");
       await env.KV.delete(leagueMemberKey(code, uid));
       await registrarRelease(env, code, uid);
@@ -1084,6 +1119,13 @@ const registrarEnabled = (env) => !!env.LEAGUE_REGISTRAR;
 /** Operation-specific success shapes. A response that does not match one is
  *  malformed and must fail closed — an unrecognised begin or a commit with no
  *  boolean verdict cannot be trusted to mean "it worked". */
+/** A committed roster must be an array of non-empty {uid, nick} identities —
+ *  malformed authoritative data must fail closed, never become an empty set. */
+function validMemberList(members) {
+  return Array.isArray(members) && members.every((m) =>
+    m && typeof m.uid === "string" && m.uid && typeof m.nick === "string");
+}
+
 function validRegistrarShape(op, data) {
   if (!data || typeof data !== "object") return false;
   switch (op) {
@@ -1104,10 +1146,20 @@ function validRegistrarShape(op, data) {
     case "purge":
       return data.purged === true || data.ok === true;
     case "fenceMember":
-    case "fenceLeague":
+    case "unfenceLeague":
       return data.ok === true;
     case "classify":
-      return Array.isArray(data.hide);
+      // Authoritative committed roster: hide list plus valid {uid,nick} members.
+      return Array.isArray(data.hide) && validMemberList(data.members);
+    case "fenceLeague":
+      return data.ok === true && Array.isArray(data.uids) && data.uids.every((u) => typeof u === "string" && u)
+        && validMemberList(data.committed);
+    case "ownerDeparture":
+      return data.ok === true && typeof data.closing === "boolean"
+        && Array.isArray(data.uids) && data.uids.every((u) => typeof u === "string" && u)
+        && validMemberList(data.committed);
+    case "abort":
+      return typeof data.authorised === "boolean";
     case "check":
       return typeof data.available === "boolean";
     default:
@@ -1144,10 +1196,12 @@ async function registrarFenceMember(env, code, uid, kind) {
   await registrarCall(env, code, "fenceMember", { uid, kind, now: Date.now() });
 }
 
-/** Raise the DO teardown fence for the whole league BEFORE its live teardown, and
- *  return the authoritative committed member uids (never trust a KV list alone). */
+/** Raise the DO teardown fence for the whole league BEFORE its live teardown. The
+ *  raw KV roster is reconciled in the SAME atomic op so legacy/pending members are
+ *  included; it returns the full known-uid set (teardown) and committed members
+ *  (succession) — never trust a KV list alone. */
 async function registrarFenceLeague(env, code) {
-  return await registrarCall(env, code, "fenceLeague", { now: Date.now() });
+  return await registrarCall(env, code, "fenceLeague", { roster: await allMemberRows(env, code), now: Date.now() });
 }
 
 /**
@@ -1317,38 +1371,36 @@ async function joinLeague(env, body) {
  * An existing account, and any account with other memberships, is left intact.
  */
 async function cleanupUnactivatedJoin(env, code, uid, { wasMember, existedBefore, fence }) {
-  // If ANY attempt for this uid won — the registrar shows the uid as a committed
-  // member of this league — a winner owns the membership, account link and
-  // recovery. Touch NOTHING (Slice A/C).
-  let confirmedNotCommitted = false;
-  try {
-    const cls = await registrarCall(env, code, "classify", { uids: [uid] });
-    if ((cls.members || []).some((m) => m.uid === uid)) return; // a winner exists
-    confirmedNotCommitted = true;
-  } catch { /* cannot confirm — remove only strictly fence-owned state below */ }
+  // Attempt-owned abort, race-free. The registrar authorises cleanup ONLY if this
+  // uid's pending row still carries THIS fence — and in the same atomic step it
+  // installs a cleanup fence that blocks any begin/commit for the uid while we
+  // work. So a winner that commits between the loser's check and its cleanup is
+  // impossible: either abort ran first (winner is then blocked and this attempt
+  // still owns the row) or the winner committed first (abort is not authorised
+  // and we touch nothing). A generic uid release is never used (Slice A/C).
+  let authorised;
+  try { ({ authorised } = await registrarCall(env, code, "abort", { uid, fence, now: Date.now() })); }
+  catch { return; } // cannot abort safely — leave the attempt's state; expiry / retry resolves it
+  if (!authorised) return; // superseded or a winner committed — nothing of ours to remove
 
-  // Remove ONLY this attempt's fence-owned provisional row (no name fallback, so
-  // a losing attempt can never delete a row a competing attempt wrote).
+  // Under the cleanup fence, remove ONLY this attempt's fence-owned KV state.
   if (!wasMember) {
     const row = await kvGet(env, leagueMemberKey(code, uid));
     if (row && row.fence === fence) await env.KV.delete(leagueMemberKey(code, uid));
-    try { await registrarRelease(env, code, uid); } catch { /* expiry frees the name */ }
   }
-
-  // The account link and recovery are only removed once we have CONFIRMED the
-  // uid is not a committed member — otherwise a losing cleanup could strip the
-  // winner's account. Skip account mutation entirely on an unconfirmed check.
-  if (!confirmedNotCommitted) return;
   const user = await kvGet(env, `user:${uid}`);
-  if (!user?.leagues?.includes(code)) return;
-  user.leagues = user.leagues.filter((entry) => entry !== code);
-  if (!existedBefore && user.leagues.length === 0) {
-    // This attempt created the whole account; remove it and its recovery.
-    await env.KV.delete(`user:${uid}`);
-    if (user.recovery) await env.KV.delete(`recovery:${user.recovery}`);
-  } else {
-    await kvPut(env, `user:${uid}`, user);
+  if (user?.leagues?.includes(code)) {
+    user.leagues = user.leagues.filter((entry) => entry !== code);
+    if (!existedBefore && user.leagues.length === 0) {
+      await env.KV.delete(`user:${uid}`);          // this attempt created the account
+      if (user.recovery) await env.KV.delete(`recovery:${user.recovery}`);
+    } else {
+      await kvPut(env, `user:${uid}`, user);
+    }
   }
+  // Finish the abort: release tombstones the pending claim AND lifts the cleanup
+  // fence, so the freed name is reusable and a fresh attempt may proceed.
+  try { await registrarRelease(env, code, uid); } catch { /* expiry frees it */ }
 }
 
 async function deleteLeague(env, body) {
@@ -1376,10 +1428,11 @@ async function deleteLeague(env, body) {
   try { fenced = await registrarFenceLeague(env, code); }
   catch { return teardownIncomplete(env, "deletion"); }
 
-  // 2 · The deletion set is the UNION of the authoritative registrar uids (which
-  // include a member activated just before the fence that a lagging KV list would
-  // miss), the raw KV rows, and any prior intent. Persist it so a retry recovers
-  // exactly the same set even after the league record is gone.
+  // 2 · The deletion set is the UNION of the authoritative registrar uids (all
+  // known claims — committed, pending AND released, reconciled with the raw
+  // roster inside fenceLeague — so a member activated just before the fence and a
+  // prepared pending join are both included), the raw KV rows, and any prior
+  // intent. Persist it so a retry recovers exactly the same set.
   const memberUids = [...new Set([
     ...(fenced.uids || []),
     ...(await allMemberUids(env, code)),

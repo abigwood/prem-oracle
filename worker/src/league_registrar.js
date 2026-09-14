@@ -236,14 +236,21 @@ export class LeagueRegistrar {
     return { ok: true, fenced: true };
   }
 
-  /** Fence the whole league BEFORE its live teardown, and ATOMICALLY return the
-   *  authoritative set of committed member uids (and the display names), so the
-   *  caller never has to trust an eventually-consistent KV list for who to tear
-   *  down or whether a closure is warranted. Idempotent. */
-  fenceLeague({ now = 0 } = {}) {
+  /** Every uid the registrar knows a claim for — pending, committed OR released
+   *  — the authoritative teardown set. Committed members alone drive succession. */
+  #allClaimUids() { return this.#rows("SELECT uid FROM claims").map((r) => r.uid); }
+  #committedMembers() { return this.#rows("SELECT uid, nick FROM claims WHERE state = 'committed'"); }
+
+  /** Fence the whole league BEFORE its live teardown. Reconciles the caller's raw
+   *  roster FIRST (so pre-v1.8 legacy members are backfilled and included), then
+   *  atomically raises the fence and returns BOTH the full known-uid set (for
+   *  teardown — pending, committed and released, so a prepared pending join is
+   *  never left orphaned) and the committed-only set (for succession decisions).
+   *  The caller never has to trust an eventually-consistent KV list. Idempotent. */
+  fenceLeague({ roster, now = 0 } = {}) {
+    this.#reconcile(roster);
     this.sql.exec("INSERT OR REPLACE INTO teardowns (scope, kind, ts) VALUES (?, 'league', ?)", LEAGUE_SCOPE, now);
-    const members = this.#rows("SELECT uid, nick FROM claims WHERE state = 'committed'");
-    return { ok: true, fenced: true, uids: members.map((m) => m.uid), members };
+    return { ok: true, fenced: true, uids: this.#allClaimUids(), committed: this.#committedMembers() };
   }
 
   /** Lift the whole-league fence — used when a closure decision resolves instead
@@ -251,6 +258,36 @@ export class LeagueRegistrar {
   unfenceLeague() {
     this.sql.exec("DELETE FROM teardowns WHERE scope = ?", LEAGUE_SCOPE);
     return { ok: true, unfenced: true };
+  }
+
+  /**
+   * Owner departure (account deletion) — the CLOSE-vs-succeed decision and the
+   * fence handoff in ONE atomic step, so there is never an unfenced gap and no
+   * retry path that forgets to lift the league fence.
+   *
+   * Reconciles the raw roster first (legacy + pending included), then:
+   *   - no other committed member  -> CLOSING: the whole-league fence stays up so
+   *     every later join is refused; the caller purges (which clears it).
+   *   - another committed member   -> SUCCESSION: the whole-league fence is
+   *     CONVERTED, in place, into a teardown fence on the departing uid — the
+   *     league keeps living for others, but the departing account cannot rejoin
+   *     while its row is being removed. No gap either way.
+   * Returns the full known-uid set and the committed members regardless.
+   */
+  ownerDeparture({ uid, roster, now = 0 }) {
+    uid = String(uid || "");
+    this.#reconcile(roster);
+    const committed = this.#committedMembers();
+    const uids = this.#allClaimUids();
+    const others = committed.filter((m) => m.uid !== uid);
+    if (others.length === 0) {
+      this.sql.exec("INSERT OR REPLACE INTO teardowns (scope, kind, ts) VALUES (?, 'league', ?)", LEAGUE_SCOPE, now);
+      return { ok: true, closing: true, uids, committed };
+    }
+    // Convert league fence -> departing-member fence, atomically.
+    this.sql.exec("DELETE FROM teardowns WHERE scope = ?", LEAGUE_SCOPE);
+    this.sql.exec("INSERT OR REPLACE INTO teardowns (scope, kind, ts) VALUES (?, 'account', ?)", memberScope(uid), now);
+    return { ok: true, closing: false, uids, committed };
   }
 
   /** Free a member's name — kick or deletion — and lift their teardown fence, in
@@ -263,6 +300,24 @@ export class LeagueRegistrar {
       now, uid).rowsWritten;
     this.sql.exec("DELETE FROM teardowns WHERE scope = ?", memberScope(uid));
     return { ok: true, released: (changed || 0) > 0 };
+  }
+
+  /**
+   * Authorise cleanup of a FAILED join attempt, attempt-owned and race-free.
+   * Aborts only when this uid's row is still the pending attempt with this exact
+   * fence; in that case it atomically installs a member (cleanup) fence — blocking
+   * any new begin/commit for the uid while the worker removes its fence-owned KV
+   * state — and reports authorised:true. If a newer attempt has superseded it or
+   * a claim has committed, it reports authorised:false and changes nothing, so a
+   * losing cleanup can never release or erase a winner. release() finishes it.
+   */
+  abort({ uid, fence, now = 0 }) {
+    uid = String(uid || "");
+    const row = this.#row(uid);
+    const ownsPending = row && row.state === "pending" && row.fence === String(fence || "");
+    if (!ownsPending) return { ok: true, authorised: false };
+    this.sql.exec("INSERT OR REPLACE INTO teardowns (scope, kind, ts) VALUES (?, 'abort', ?)", memberScope(uid), now);
+    return { ok: true, authorised: true };
   }
 
   /** Drop every claim and every fence — league deletion. Idempotent. */
@@ -323,6 +378,8 @@ export class LeagueRegistrar {
       fenceMember: () => this.fenceMember(args),
       fenceLeague: () => this.fenceLeague(args),
       unfenceLeague: () => this.unfenceLeague(args),
+      ownerDeparture: () => this.ownerDeparture(args),
+      abort: () => this.abort(args),
     };
     const handler = handlers[op];
     if (!handler) return new Response(JSON.stringify({ error: `unknown op: ${op}` }), { status: 400 });

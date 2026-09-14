@@ -117,12 +117,14 @@ test("3 · unknown league, nickname and uid fail, changing nothing", async () =>
 
 test("4 · two members with the same nick is refused, never a guess", async () => {
   const { env, post, store, code } = await seeded();
-  // A PRE-EXISTING production duplicate: written straight to KV, as one would
-  // have existed before v1.8 uniqueness. (A fresh /join with a taken name is
-  // now refused — proved in the join-uniqueness suite — so it cannot be the
-  // way to create the fixture here.)
-  await post("/join", { uid: "gift2", code, nickname: "Cover Story" });
+  // A PRE-EXISTING production duplicate: a LEGACY member (no registrar claim,
+  // as one would have existed before v1.8) written straight to KV. The registrar
+  // never minted this name, so the roster overlay leaves it as-is — a genuine
+  // second "The Gift". (A fresh /join with a taken name is now refused, and a
+  // committed member would be overlaid to its authoritative name, so neither can
+  // create the fixture here.)
   store.set(`member:${code}:gift2`, JSON.stringify({ nick: "The Gift", since: 1 }));
+  store.set("user:gift2", JSON.stringify({ nickname: "The Gift", leagues: [code] }));
   const before = snapshot(store);
   const res = await call(env, { requestId: UUID(), leagueCode: code, exactNick: "The Gift" });
   assert.equal(res.status, 404);

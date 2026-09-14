@@ -487,15 +487,30 @@ test("C · a delayed commit for an expired, reallocated attempt never converts",
   assert.equal(late.committed, false, "a delayed commit converted an expired, reallocated claim");
 });
 
-test("C · a second different rename by the same UID fences out the first commit", async () => {
+test("C · a competing different-name attempt by the same UID is refused, not superseding", async () => {
+  // One safe in-flight attempt per uid: while an attempt is live, a second under
+  // a DIFFERENT name is refused (inflight) rather than silently superseding it,
+  // so the first attempt can still commit.
   const { env, code } = await withLeague();
   const rpc = rpcTo(env, code);
   const now = 3_000_000;
   const first = await rpc("begin", { uid: "u1", nick: "Alpha", roster: [], now });
   const second = await rpc("begin", { uid: "u1", nick: "Bravo", roster: [], now });
-  assert.equal((await rpc("commit", { uid: "u1", norm: first.norm, fence: first.fence, now })).committed, false,
-    "the superseded first attempt still committed");
-  assert.equal((await rpc("commit", { uid: "u1", norm: second.norm, fence: second.fence, now })).committed, true);
+  assert.equal(second.inflight, true, "a competing name silently superseded the active attempt");
+  assert.equal(second.ok, false);
+  // The first, un-superseded attempt still commits.
+  assert.equal((await rpc("commit", { uid: "u1", norm: first.norm, fence: first.fence, now })).committed, true);
+});
+
+test("C · an identical retry converges on the SAME attempt (same fence)", async () => {
+  const { env, code } = await withLeague();
+  const rpc = rpcTo(env, code);
+  const now = 3_100_000;
+  const first = await rpc("begin", { uid: "u1", nick: "Alpha", roster: [], now });
+  const again = await rpc("begin", { uid: "u1", nick: "Alpha", roster: [], now: now + 5 });
+  assert.equal(again.fence, first.fence, "an identical retry minted a new fence instead of converging");
+  // Either fence (they are equal) commits the one attempt; the other is idempotent.
+  assert.equal((await rpc("commit", { uid: "u1", norm: first.norm, fence: first.fence, now })).committed, true);
 });
 
 test("C · a stale commit after release never resurrects the name", async () => {
@@ -790,7 +805,8 @@ test("C · account delete across leagues — crash mid teardown: retry resumes e
   await post("/join", { uid: "u1", code: a.code, nick: "Keane" });
   await post("/join", { uid: "u1", code: b.code, nick: "Roy" });
   cr.crashOn("delete", `member:${a.code}:u1`); // crash mid per-league live teardown
-  assert.equal((await post("/account/delete", { uid: "u1" })).status, 500);
+  const first = await post("/account/delete", { uid: "u1" });
+  assert.notEqual(first.status, 200, "account deletion completed despite a mid-teardown crash");
   assert.ok(store.has(accountIntent("u1")), "the account intent (resume context) was not recorded");
   assert.ok(store.has("user:u1"), "the user record was erased before cleanup completed");
   // Retry resumes across BOTH leagues and completes.
@@ -1073,15 +1089,42 @@ test("C · join loses to a league deletion that fenced first: nothing visible, c
   assert.equal((await post("/league/delete", { uid: "host", code })).status, 200);
 });
 
-test("C · sole-owner account deletion closes the league; a racing join cannot revive it", async () => {
-  const ctl = controllableRegistrar();
-  const { post, store, code } = await withLeague({ registrar: ctl.namespace });
+test("B · sole-owner account deletion — CLOSURE wins: the league closes and no join can revive it", async () => {
+  const { post, env, store, code } = await withLeague();
   // Host is the sole member; deleting the host account closes the league.
-  ctl.failNext("release", 1);
-  assert.equal((await post("/account/delete", { uid: "host" })).status, 503); // member fence up on host
-  // A join by the departing host is fenced; a join by anyone else sees the league going/gone.
-  assert.notEqual((await post("/join", { uid: "host", code, nick: "Host" })).status, 200);
   assert.equal((await post("/account/delete", { uid: "host" })).status, 200);
+  assert.equal(store.has("user:host"), false);
+  assert.equal(store.has(`league:${code}`), false, "the sole-owner league was not closed");
+  // Every join to the closed league is refused — never a revival into an
+  // ownerless league.
+  assert.equal((await post("/join", { uid: "u2", code, nick: "Latecomer" })).status, 404);
+});
+
+test("B · sole-owner account deletion — a JOIN that wins first receives succession, not closure", async () => {
+  const { post, env, store, code } = await withLeague();
+  // A fresh different UID commits BEFORE the owner's deletion linearises.
+  assert.equal((await post("/join", { uid: "u2", code, nick: "Heir" })).status, 200);
+  // Now the sole(-ish) owner deletes their account; the committed member is the heir.
+  assert.equal((await post("/account/delete", { uid: "host" })).status, 200);
+  assert.ok(store.has(`league:${code}`), "the league was wrongly closed with a member present");
+  assert.equal(JSON.parse(store.get(`league:${code}`)).owner, "u2", "succession did not pass to the winning member");
+  assert.equal((await stateNicks(env, code)).byUid.u2, "Heir");
+  assert.ok(!(await stateNicks(env, code)).byUid.host, "the departed owner is still visible");
+  // The league is not fenced — a further join succeeds.
+  assert.equal((await post("/join", { uid: "u3", code, nick: "Newcomer" })).status, 200);
+});
+
+test("B · a crash after the closure fence resumes to complete closure, no ownerless league", async () => {
+  const { cr, env, store, post } = await seededCrashWorld();
+  const code = (await (await post("/league", { uid: "host", nickname: "Host" })).json()).code;
+  // Crash while closing the sole-owner league (after the fence is raised).
+  cr.crashOn("delete", `league:${code}`);
+  assert.notEqual((await post("/account/delete", { uid: "host" })).status, 200);
+  // The fence is up; a racing join cannot slip in.
+  assert.equal((await post("/join", { uid: "u2", code, nick: "Latecomer" })).status, 404);
+  // Retry resumes and completes the closure.
+  assert.equal((await post("/account/delete", { uid: "host" })).status, 200);
+  assert.equal(store.has(`league:${code}`), false);
   assert.equal(store.has("user:host"), false);
 });
 
@@ -1197,4 +1240,117 @@ test("B · with NO registrar bound at all, /state still serves (no provisional r
   const res = await worker.fetch(new Request("https://worker.test/state?code=LEGACY"), env);
   assert.equal(res.status, 200, "a registrar-less world should serve the KV roster directly");
   assert.ok((await res.json()).table.some((r) => r.nick === "Legacy Host"));
+});
+
+// --- C · one coherent survivor: the loser never erases or repaints the winner -
+
+test("C · same UID, two different nicknames: one wins, the other is refused", async () => {
+  const { post, env, store, code } = await withLeague();
+  const rpc = rpcTo(env, code);
+  // Attempt A for u1 "Alice" is in flight (a live pending claim).
+  const a = await rpc("begin", { uid: "u1", nick: "Alice", roster: [], now: Date.now() });
+  assert.ok(a.ok && a.fence);
+  // A competing attempt for the SAME uid under a DIFFERENT name is refused.
+  assert.notEqual((await post("/join", { uid: "u1", code, nick: "Bob" })).status, 200, "a competing name won");
+  // A completes (its /join converges on the same attempt). Exactly one survivor.
+  assert.equal((await post("/join", { uid: "u1", code, nick: "Alice" })).status, 200);
+  assert.equal((await stateNicks(env, code)).byUid.u1, "Alice");
+  assert.notEqual((await stateNicks(env, code)).byUid.u1, "Bob");
+  assert.equal(recoveriesFor(store, "u1").length, 1, "more than one recovery survived");
+  assert.equal(memberNicks(store, code).filter((n) => normaliseJoinNick(n) === "bob").length, 0, "Bob materialised");
+});
+
+test("C · a losing attempt's stale write cannot repaint or erase the winner", async () => {
+  const { post, env, store, code } = await withLeague();
+  // The winner joins as "Bob".
+  assert.equal((await post("/join", { uid: "u1", code, nick: "Bob" })).status, 200);
+  const rec = JSON.parse(store.get("user:u1")).recovery;
+
+  // A delayed LOSER clobbers the KV member row (different name + stale fence), as
+  // a reordered provisional write would. The authoritative roster still shows Bob.
+  store.set(`member:${code}:u1`, JSON.stringify({ nick: "Alice", since: 1, fence: "stale-fence" }));
+  assert.equal((await stateNicks(env, code)).byUid.u1, "Bob", "a stale write repainted the winner");
+
+  // Even if the loser's cleanup then deletes the (clobbered) row, the committed
+  // winner is still shown from the registrar — never erased.
+  store.delete(`member:${code}:u1`);
+  assert.equal((await stateNicks(env, code)).byUid.u1, "Bob", "a losing cleanup erased the winner");
+
+  // The winner's account and single recovery are untouched.
+  assert.equal(JSON.parse(store.get("user:u1")).recovery, rec, "the winner's recovery changed");
+  assert.equal(recoveriesFor(store, "u1").length, 1);
+});
+
+test("C · an expired attempt arriving after a newer attempt commits nothing of its own", async () => {
+  const { env, code } = await withLeague();
+  const rpc = rpcTo(env, code);
+  const t0 = 60_000_000;
+  const stale = await rpc("begin", { uid: "u1", nick: "Alice", roster: [], now: t0 }); // will expire
+  const later = t0 + TTL + 1;
+  // A newer attempt (different name) is now allowed because the old one expired.
+  const fresh = await rpc("begin", { uid: "u1", nick: "Bob", roster: [], now: later });
+  assert.ok(fresh.ok && fresh.fence);
+  assert.equal((await rpc("commit", { uid: "u1", norm: fresh.norm, fence: fresh.fence, now: later })).committed, true);
+  // The stale attempt's delayed commit converts nothing (superseded/expired).
+  assert.equal((await rpc("commit", { uid: "u1", norm: stale.norm, fence: stale.fence, now: later })).committed, false);
+});
+
+// --- A · league deletion trusts the registrar, not an eventually-consistent list
+
+test("A · league deletion tears down a member a lagging KV list() omits (registrar is authoritative)", async () => {
+  // A production-shaped KV whose list() drops one freshly-activated member while
+  // get() still sees it — exactly the eventual-consistency gap. The registrar's
+  // authoritative uid set must still drive teardown.
+  const store = new Map();
+  let hideFromList = null;
+  const kv = {
+    async get(key, type) {
+      if (!store.has(key)) return null;
+      return type === "json" || type === undefined ? JSON.parse(store.get(key)) : store.get(key);
+    },
+    async put(key, value) { store.set(key, value); },
+    async delete(key) { store.delete(key); },
+    async list({ prefix = "" } = {}) {
+      const keys = [...store.keys()].filter((k) => k.startsWith(prefix) && k !== hideFromList)
+        .sort().map((name) => ({ name }));
+      return { keys, list_complete: true };
+    },
+  };
+  const env = { KV: kv, LEAGUE_REGISTRAR: registrarNamespace() };
+  const post = (path, body) => worker.fetch(new Request(`https://worker.test${path}`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+  }), env);
+
+  const code = (await (await post("/league", { uid: "host", nickname: "Host" })).json()).code;
+  assert.equal((await post("/join", { uid: "u1", code, nick: "Freshly" })).status, 200);
+  assert.ok(store.has(`member:${code}:u1`), "u1 is a real member (get sees it)");
+  // The lagging list() omits u1 — but the registrar committed u1.
+  hideFromList = `member:${code}:u1`;
+
+  assert.equal((await post("/league/delete", { uid: "host", code })).status, 200);
+  // u1's member row AND league link are gone despite the list() omission.
+  assert.equal(store.has(`member:${code}:u1`), false, "the list()-omitted member row was orphaned");
+  assert.ok(!(JSON.parse(store.get("user:u1")).leagues || []).includes(code), "the league link was orphaned on the user");
+  assert.equal(store.has(`league:${code}`), false);
+  // The registrar was purged: the code is free for a brand-new league to reuse.
+  hideFromList = null;
+  const reborn = await (await post("/league", { uid: "host2", nickname: "Host2" })).json();
+  assert.ok(reborn.code, "could not create a new league after purge");
+});
+
+test("A · league deletion converges after a crash, recovering the same authoritative set", async () => {
+  const cr = crashableKV();
+  const env = { KV: cr.kv, LEAGUE_REGISTRAR: registrarNamespace() };
+  const post = (path, body) => worker.fetch(new Request(`https://worker.test${path}`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+  }), env);
+  const code = (await (await post("/league", { uid: "host", nickname: "Host" })).json()).code;
+  await post("/join", { uid: "u1", code, nick: "Member" });
+  cr.crashOn("delete", `league:${code}`); // crash mid teardown, after the intent + fence
+  assert.notEqual((await post("/league/delete", { uid: "host", code })).status, 200);
+  assert.ok(cr.store.has(leagueIntent(code)), "the deletion intent (with the full set) was not recorded");
+  // Retry recovers the same set from the intent and completes.
+  assert.equal((await post("/league/delete", { uid: "host", code })).status, 200);
+  assert.equal(cr.store.has(`member:${code}:u1`), false);
+  assert.equal(cr.store.has(`league:${code}`), false);
 });

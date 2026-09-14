@@ -167,12 +167,19 @@ export class LeagueRegistrar {
     if (mine && mine.state === "committed" && mine.norm === norm) {
       return { ok: true, own: true, committed: true, uid, norm, nick: display, fence: mine.fence };
     }
-    // A live (fresh) pending under this exact name: an idempotent retry. Issue a
-    // NEW fence, superseding the prior attempt, and refresh the hold.
-    if (mine && mine.state === "pending" && mine.norm === norm && mine.ts > now - PENDING_TTL_MS) {
-      const fence = this.#fence();
-      this.sql.exec("UPDATE claims SET ts = ?, nick = ?, fence = ? WHERE uid = ?", now, display, fence, uid);
-      return { ok: true, own: true, uid, norm, nick: display, fence };
+    // ONE safe in-flight attempt per uid. A live (fresh) pending claim is an
+    // active attempt:
+    //   same name  -> an identical retry CONVERGES on the SAME attempt (same
+    //                 fence), so the original and the retry both finish it.
+    //   other name -> a competing attempt must NOT silently supersede the active
+    //                 one; refuse it. (A committed member changing name goes
+    //                 through the rename path, not here.)
+    if (mine && mine.state === "pending" && mine.ts > now - PENDING_TTL_MS) {
+      if (mine.norm === norm) {
+        this.sql.exec("UPDATE claims SET ts = ? WHERE uid = ?", now, uid); // keep the fence; refresh the hold
+        return { ok: true, own: true, uid, norm, nick: mine.nick, fence: mine.fence };
+      }
+      return { ok: false, inflight: true, uid, error: "a join is already in progress for this account" };
     }
 
     // An EXPIRED pending row is not an owned reservation — contest the name.
@@ -229,11 +236,21 @@ export class LeagueRegistrar {
     return { ok: true, fenced: true };
   }
 
-  /** Fence the whole league BEFORE its live teardown, so every begin is refused
-   *  atomically. Idempotent. */
+  /** Fence the whole league BEFORE its live teardown, and ATOMICALLY return the
+   *  authoritative set of committed member uids (and the display names), so the
+   *  caller never has to trust an eventually-consistent KV list for who to tear
+   *  down or whether a closure is warranted. Idempotent. */
   fenceLeague({ now = 0 } = {}) {
     this.sql.exec("INSERT OR REPLACE INTO teardowns (scope, kind, ts) VALUES (?, 'league', ?)", LEAGUE_SCOPE, now);
-    return { ok: true, fenced: true };
+    const members = this.#rows("SELECT uid, nick FROM claims WHERE state = 'committed'");
+    return { ok: true, fenced: true, uids: members.map((m) => m.uid), members };
+  }
+
+  /** Lift the whole-league fence — used when a closure decision resolves instead
+   *  to succession, so the league lives on. Idempotent. */
+  unfenceLeague() {
+    this.sql.exec("DELETE FROM teardowns WHERE scope = ?", LEAGUE_SCOPE);
+    return { ok: true, unfenced: true };
   }
 
   /** Free a member's name — kick or deletion — and lift their teardown fence, in
@@ -265,14 +282,21 @@ export class LeagueRegistrar {
    * visible (KV is its only record).
    */
   classify({ uids }) {
+    // The authoritative committed roster: the registrar's word on who is a live
+    // member and under exactly which display name. Callers OVERLAY this so a
+    // stale/clobbered KV row can never repaint or resurrect a member.
+    const members = this.#rows("SELECT uid, nick FROM claims WHERE state = 'committed'");
+    const committed = new Set(members.map((m) => m.uid));
     const hide = [];
     for (const uid of uids || []) {
-      const row = this.#row(String(uid || ""));
+      const key = String(uid || "");
+      if (committed.has(key)) continue; // committed -> authoritative, shown
+      const row = this.#row(key);
       if (!row) continue; // unknown to the DO -> legacy member, visible
       if (row.state === "released") hide.push(uid);
       else if (row.state === "pending" && !row.activated) hide.push(uid); // a first join, not yet activated
     }
-    return { ok: true, hide };
+    return { ok: true, hide, members };
   }
 
   /** Read-only availability, for a live sheet check. */
@@ -298,6 +322,7 @@ export class LeagueRegistrar {
       classify: () => this.classify(args),
       fenceMember: () => this.fenceMember(args),
       fenceLeague: () => this.fenceLeague(args),
+      unfenceLeague: () => this.unfenceLeague(args),
     };
     const handler = handlers[op];
     if (!handler) return new Response(JSON.stringify({ error: `unknown op: ${op}` }), { status: 400 });

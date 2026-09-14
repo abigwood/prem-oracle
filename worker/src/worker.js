@@ -530,11 +530,19 @@ async function members(env, league) {
   // released row, so the read is refused (retryably) rather than falling back to
   // the raw KV view. Only when no registrar is configured at all — a world with
   // no provisional rows to hide — do we serve the KV view directly.
-  if (registrarEnabled(env) && found.size) {
-    let hide;
-    try { ({ hide } = await registrarCall(env, code, "classify", { uids: [...found.keys()] })); }
+  if (registrarEnabled(env)) {
+    let cls;
+    try { cls = await registrarCall(env, code, "classify", { uids: [...found.keys()] }); }
     catch { throw new RegistrarUnavailableError("membership visibility is temporarily unavailable"); }
-    for (const uid of hide || []) found.delete(uid);
+    for (const uid of cls.hide || []) found.delete(uid);
+    // Overlay the authoritative committed roster: the registrar's uid+nick wins,
+    // and a committed member whose KV row was clobbered or lost is still shown.
+    // So a losing attempt's stale KV write can never repaint or erase the winner
+    // (Slice A/C).
+    for (const m of cls.members || []) {
+      const existing = found.get(m.uid);
+      found.set(m.uid, { uid: m.uid, nick: m.nick, since: existing?.since ?? 0 });
+    }
   }
   return [...found.values()].sort((a, b) => (a.since || 0) - (b.since || 0) || a.nick.localeCompare(b.nick));
 }
@@ -996,41 +1004,58 @@ async function deleteAccount(env, body) {
   // is erased.
   await kvPut(env, intentKey, { op: "account", uid, codes, recovery, at: Date.now() });
 
-  // 2 · Raise the DO teardown fence for this uid in EVERY league BEFORE any live
-  // teardown — the atomic barrier that makes a concurrent /join or rename by
-  // this uid refuse immediately in each league (Slice A/B). Fail closed if any
-  // cannot; the intent lets a retry re-raise them.
-  try { for (const code of codes) await registrarFenceMember(env, code, uid, "account"); }
-  catch { return teardownIncomplete(env, "account deletion"); }
-
-  // 3 · Per-league LIVE teardown — succession or closure, and drop the member
-  // row. Idempotent, so a retry re-runs it harmlessly.
+  // 2 · Per-league teardown. For a league this account OWNS, the CLOSE-vs-succeed
+  // decision is linearised in the Durable Object: fenceLeague atomically raises
+  // the whole-league fence and returns the authoritative committed set, so a
+  // fresh different UID that committed first legitimately becomes the heir, and
+  // one that arrives after the fence is refused — a closing league can never be
+  // revived, orphaned or left ownerless. Non-owner (and post-succession) leagues
+  // get the departing member's own fence + release. Every branch is idempotent,
+  // so a retry — even after the user record or a league record is gone —
+  // converges. Any failure leaves the intent (and user record) for the retry.
   const succession = [];
   const closed = [];
-  for (const code of codes) {
-    const league = await kvGet(env, `league:${code}`);
-    if (!league) continue;
-    const remaining = (await members(env, league)).filter((member) => member.uid !== uid);
-    await env.KV.delete(leagueMemberKey(code, uid));
-    if (league.owner !== uid) continue;
-    if (!remaining.length) {
-      await env.KV.delete(`league:${code}`);
-      await updateCustomMixIndex(env, code, false);
-      closed.push(code);
-      continue;
+  try {
+    for (const code of codes) {
+      const league = await kvGet(env, `league:${code}`);
+      if (!league) {
+        // Resume: the league was already closed (or deleted by its owner). Purge
+        // any residual claims/fence and drop a lingering member row.
+        await registrarCall(env, code, "purge");
+        await env.KV.delete(leagueMemberKey(code, uid));
+        continue;
+      }
+      if (league.owner === uid) {
+        const fenced = await registrarFenceLeague(env, code); // raise + authoritative committed set
+        const others = (fenced.uids || []).filter((u) => u !== uid);
+        if (others.length === 0) {
+          // CLOSE — the fence blocks any racing join; teardown then purge clears it.
+          await env.KV.delete(`league:${code}`);
+          if (env.KV.list) {
+            const slateKeys = await listAllKeys(env, `custom_slate:${code}:`);
+            await Promise.all(slateKeys.map((key) => env.KV.delete(key)));
+          }
+          await updateCustomMixIndex(env, code, false);
+          await env.KV.delete(leagueMemberKey(code, uid));
+          await registrarCall(env, code, "purge");
+          closed.push(code);
+          continue;
+        }
+        // SUCCESSION — hand the league to the longest-standing committed member,
+        // then lift the whole-league fence so the league lives on.
+        const heir = (await members(env, league)).find((m) => m.uid !== uid) || { uid: others[0], nick: DEFAULT_NICK };
+        league.owner = heir.uid;
+        league.members = (league.members || []).filter((entry) => entry !== uid);
+        await kvPut(env, `league:${code}`, league);
+        await registrarCall(env, code, "unfenceLeague");
+        succession.push({ code, name: league.name, uid: heir.uid, nick: heir.nick });
+      }
+      // Departing member's own teardown: fence, drop the row, release the name.
+      await registrarFenceMember(env, code, uid, "account");
+      await env.KV.delete(leagueMemberKey(code, uid));
+      await registrarRelease(env, code, uid);
     }
-    const heir = remaining[0];
-    league.owner = heir.uid;
-    league.members = (league.members || []).filter((entry) => entry !== uid);
-    await kvPut(env, `league:${code}`, league);
-    succession.push({ code, name: league.name, uid: heir.uid, nick: heir.nick });
-  }
-
-  // 4 · Release the account's name in every league — frees the name AND lifts
-  // its fence. Idempotent; if any cannot complete, the intent (and the user
-  // record) remain and the call is retryable.
-  try { for (const code of codes) await registrarRelease(env, code, uid); }
-  catch { return teardownIncomplete(env, "account deletion"); }
+  } catch { return teardownIncomplete(env, "account deletion"); }
 
   // 5 · Only now erase the credential, push token and user record.
   if (recovery) await env.KV.delete(`recovery:${recovery}`);
@@ -1119,9 +1144,10 @@ async function registrarFenceMember(env, code, uid, kind) {
   await registrarCall(env, code, "fenceMember", { uid, kind, now: Date.now() });
 }
 
-/** Raise the DO teardown fence for the whole league BEFORE its live teardown. */
+/** Raise the DO teardown fence for the whole league BEFORE its live teardown, and
+ *  return the authoritative committed member uids (never trust a KV list alone). */
 async function registrarFenceLeague(env, code) {
-  await registrarCall(env, code, "fenceLeague", { now: Date.now() });
+  return await registrarCall(env, code, "fenceLeague", { now: Date.now() });
 }
 
 /**
@@ -1225,6 +1251,12 @@ async function joinLeague(env, body) {
     if (begin.scope === "league") return json({ error: "league not found" }, 404, env);
     return teardownIncomplete(env, "joining");
   }
+  if (begin.inflight) {
+    // Another attempt for this account is already in flight under a different
+    // name; do not supersede it. Retryable — the in-flight one will settle
+    // (Slice A/C).
+    return teardownIncomplete(env, "joining");
+  }
   if (begin.taken) {
     return json({ error: begin.error || "That name is taken in this league", taken: true,
       suggestions: begin.suggestions || [] }, 409, env);
@@ -1284,17 +1316,29 @@ async function joinLeague(env, body) {
  * the account and its recovery credential, so a refused join strands no recovery.
  * An existing account, and any account with other memberships, is left intact.
  */
-async function cleanupUnactivatedJoin(env, code, uid, { wasMember, existedBefore, offeredNorm, fence }) {
+async function cleanupUnactivatedJoin(env, code, uid, { wasMember, existedBefore, fence }) {
+  // If ANY attempt for this uid won — the registrar shows the uid as a committed
+  // member of this league — a winner owns the membership, account link and
+  // recovery. Touch NOTHING (Slice A/C).
+  let confirmedNotCommitted = false;
+  try {
+    const cls = await registrarCall(env, code, "classify", { uids: [uid] });
+    if ((cls.members || []).some((m) => m.uid === uid)) return; // a winner exists
+    confirmedNotCommitted = true;
+  } catch { /* cannot confirm — remove only strictly fence-owned state below */ }
+
+  // Remove ONLY this attempt's fence-owned provisional row (no name fallback, so
+  // a losing attempt can never delete a row a competing attempt wrote).
   if (!wasMember) {
     const row = await kvGet(env, leagueMemberKey(code, uid));
-    if (row && (row.fence === fence || normaliseJoinNick(row.nick) === offeredNorm)) {
-      await env.KV.delete(leagueMemberKey(code, uid));
-    }
-    // Release this fresh attempt's pending name so it is not over-reserved until
-    // the TTL; best effort — expiry is the backstop. Never release for an
-    // existing member (their claim is real).
-    try { await registrarRelease(env, code, uid); } catch { /* expiry frees it */ }
+    if (row && row.fence === fence) await env.KV.delete(leagueMemberKey(code, uid));
+    try { await registrarRelease(env, code, uid); } catch { /* expiry frees the name */ }
   }
+
+  // The account link and recovery are only removed once we have CONFIRMED the
+  // uid is not a committed member — otherwise a losing cleanup could strip the
+  // winner's account. Skip account mutation entirely on an unconfirmed check.
+  if (!confirmedNotCommitted) return;
   const user = await kvGet(env, `user:${uid}`);
   if (!user?.leagues?.includes(code)) return;
   user.leagues = user.leagues.filter((entry) => entry !== code);
@@ -1323,18 +1367,25 @@ async function deleteLeague(env, body) {
   // silently skip cleanup — fail closed (Slice A/C).
   if (!registrarEnabled(env)) return teardownIncomplete(env, "deletion");
 
-  // 1 · Record the deletion intent (owner + member uids) so a retry can finish
-  // even after the league record is gone. Use the RAW KV rows, not the filtered
-  // roster, so a provisional or released row is still torn down.
-  const memberUids = [...new Set([...(await allMemberUids(env, code)), ...(intent?.members || [])])];
-  await kvPut(env, intentKey, { op: "league", code, owner, members: memberUids, at: Date.now() });
-
-  // 2 · Raise the DO league fence BEFORE any live teardown — the atomic barrier
+  // 1 · Raise the DO league fence BEFORE any live teardown — the atomic barrier
   // that makes every concurrent begin (any join) refuse immediately, independent
-  // of KV visibility (Slice A/B). Fail closed if it cannot; the intent lets a
-  // retry re-raise it.
-  try { await registrarFenceLeague(env, code); }
+  // of KV visibility (Slice A/B) — and take its AUTHORITATIVE committed uid set in
+  // the same step. Fail closed if it cannot; the league record is still intact,
+  // so a retry re-raises it.
+  let fenced;
+  try { fenced = await registrarFenceLeague(env, code); }
   catch { return teardownIncomplete(env, "deletion"); }
+
+  // 2 · The deletion set is the UNION of the authoritative registrar uids (which
+  // include a member activated just before the fence that a lagging KV list would
+  // miss), the raw KV rows, and any prior intent. Persist it so a retry recovers
+  // exactly the same set even after the league record is gone.
+  const memberUids = [...new Set([
+    ...(fenced.uids || []),
+    ...(await allMemberUids(env, code)),
+    ...(intent?.members || []),
+  ])];
+  await kvPut(env, intentKey, { op: "league", code, owner, members: memberUids, at: Date.now() });
 
   // 3 · Make the league INACCESSIBLE — strip it from members, drop the member
   // rows and slates, and delete the league record. A crash here leaves the

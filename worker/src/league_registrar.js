@@ -51,10 +51,11 @@ CREATE TABLE IF NOT EXISTS claims (
 );
 CREATE INDEX IF NOT EXISTS claims_norm ON claims (norm);
 CREATE TABLE IF NOT EXISTS teardowns (
-  scope TEXT PRIMARY KEY,
+  scope TEXT NOT NULL,
   kind  TEXT NOT NULL,
   token TEXT NOT NULL DEFAULT '',
-  ts    INTEGER NOT NULL
+  ts    INTEGER NOT NULL,
+  PRIMARY KEY (scope, kind, token)
 );
 `;
 // A teardown fence lives HERE, in the single-threaded DO — not in eventually
@@ -134,11 +135,16 @@ export class LeagueRegistrar {
     return suggestFor(display, (n) => !held.has(n));
   }
 
-  /** An active teardown fence blocks the whole league, or one member's scope. */
+  /** An active teardown fence blocks the whole league, or one member's scope.
+   *  Each fence is owned by (kind, token); several may coexist on one scope, and
+   *  ANY of them blocks begin/commit. */
   #leagueFenced() { return this.#rows("SELECT 1 FROM teardowns WHERE scope = ? LIMIT 1", LEAGUE_SCOPE).length > 0; }
   #memberFenced(uid) { return this.#rows("SELECT 1 FROM teardowns WHERE scope = ? LIMIT 1", memberScope(uid)).length > 0; }
-  /** The teardown that owns a scope, if any — its kind and opaque token. */
-  #teardown(scope) { return this.#rows("SELECT kind, token FROM teardowns WHERE scope = ?", scope)[0]; }
+  /** Is a FOREIGN (non-abort) teardown active on a member's scope? A join abort
+   *  must defer to a kick/account teardown rather than touch it. */
+  #foreignMemberTeardown(uid) {
+    return this.#rows("SELECT 1 FROM teardowns WHERE scope = ? AND kind != 'abort' LIMIT 1", memberScope(uid)).length > 0;
+  }
 
   /** Is this uid's own claim to `norm` still live (committed, or fresh pending)? */
   #ownsLive(row, norm, now) {
@@ -236,9 +242,10 @@ export class LeagueRegistrar {
   }
 
   /** Fence a member's scope for a HARD teardown (kick / account deletion), owned
-   *  by (kind, token). A hard teardown dominates a soft abort fence, so it may
-   *  replace one; it is idempotent for its own (kind, token). Its own release —
-   *  matching (kind, token) — is the only thing that lifts it. */
+   *  by (kind, token). Each operation installs its OWN row: a kick and an account
+   *  deletion of the same uid coexist and neither overwrites the other. It is
+   *  idempotent for its own (kind, token), and only its own release — matching
+   *  (kind, token) — lifts it. */
   fenceMember({ uid, kind = "kick", token = "", now = 0 }) {
     this.sql.exec("INSERT OR REPLACE INTO teardowns (scope, kind, token, ts) VALUES (?, ?, ?, ?)",
       memberScope(uid), String(kind), String(token), now);
@@ -314,6 +321,8 @@ export class LeagueRegistrar {
     uid = String(uid || "");
     const changed = this.sql.exec("UPDATE claims SET state = 'released', ts = ?, fence = '' WHERE uid = ? AND state != 'released'",
       now, uid).rowsWritten;
+    // Lift ONLY this operation's own fence — never another operation's row on the
+    // same scope (a concurrent kick and account deletion each keep their own).
     this.sql.exec("DELETE FROM teardowns WHERE scope = ? AND kind = ? AND token = ?",
       memberScope(uid), String(kind), String(token));
     return { ok: true, released: (changed || 0) > 0, uid, kind: String(kind), token: String(token) };
@@ -335,10 +344,9 @@ export class LeagueRegistrar {
     const state = row ? row.state : "absent";
     const ownsPending = row && row.state === "pending" && row.fence === fence;
     if (!ownsPending) return { ok: true, authorised: false, uid, fence, state };
-    // A dominant league deletion, or a foreign hard member teardown, owns the
-    // scope: defer — never touch their fence.
-    const own = this.#teardown(memberScope(uid));
-    if (this.#leagueFenced() || (own && own.kind !== "abort")) {
+    // A dominant league deletion, or a FOREIGN hard member teardown (kick /
+    // account), owns the scope: defer — never overwrite or touch their fence.
+    if (this.#leagueFenced() || this.#foreignMemberTeardown(uid)) {
       return { ok: true, authorised: false, deferred: true, uid, fence, state };
     }
     this.sql.exec("INSERT OR REPLACE INTO teardowns (scope, kind, token, ts) VALUES (?, 'abort', ?, ?)",
@@ -346,24 +354,27 @@ export class LeagueRegistrar {
     return { ok: true, authorised: true, uid, fence, state };
   }
 
-  /** Finish an attempt-owned abort: fence-validated, it tombstones ONLY that
-   *  pending attempt and lifts ONLY its own abort fence (matching token). A
-   *  mismatched, newer or committed fence, or a foreign teardown owning the
-   *  scope, refuses (finished:false) — so a stray finish can never release a
-   *  winner or lift a kick/account/league fence. Echoes uid + fence. */
+  /** Finish an attempt-owned abort. Idempotent and strictly own-scoped: it lifts
+   *  ONLY this abort's own fence (kind='abort', token=fence) — never a
+   *  kick/account/league fence — and tombstones the claim ONLY while it is still
+   *  this pending attempt, so it can never release a winner. Echoes uid + fence. */
   finishAbort({ uid, fence, now = 0 }) {
     uid = String(uid || "");
     fence = String(fence || "");
-    const row = this.#row(uid);
-    const own = this.#teardown(memberScope(uid));
-    const ownsPending = row && row.state === "pending" && row.fence === fence;
-    if (!ownsPending || !(own && own.kind === "abort" && own.token === fence)) {
-      return { ok: true, finished: false, uid, fence };
-    }
-    this.sql.exec("UPDATE claims SET state = 'released', ts = ?, fence = '' WHERE uid = ? AND fence = ? AND state = 'pending'",
-      now, uid, fence);
+    // Always lift ONLY this abort's own fence (kind='abort', token=fence) — never
+    // a foreign kick/account/league fence. Idempotent.
     this.sql.exec("DELETE FROM teardowns WHERE scope = ? AND kind = 'abort' AND token = ?", memberScope(uid), fence);
-    return { ok: true, finished: true, uid, fence };
+    // Complete (tombstone the pending claim) ONLY when it is still this attempt's
+    // AND no foreign teardown owns the scope — never complete THROUGH another
+    // operation's fence, and never release a winner.
+    const row = this.#row(uid);
+    if (row && row.state === "pending" && row.fence === fence
+        && !this.#leagueFenced() && !this.#foreignMemberTeardown(uid)) {
+      this.sql.exec("UPDATE claims SET state = 'released', ts = ?, fence = '' WHERE uid = ? AND fence = ? AND state = 'pending'",
+        now, uid, fence);
+      return { ok: true, finished: true, uid, fence };
+    }
+    return { ok: true, finished: false, uid, fence };
   }
 
   /** Drop every claim and every fence — league deletion. Idempotent. */

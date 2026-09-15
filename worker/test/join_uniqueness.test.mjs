@@ -1424,11 +1424,15 @@ test("A · league deletion tears down a PENDING prepared join and a LEGACY membe
   assert.ok(store.has(`member:${code}:pend`), "test needs a prepared pending row");
 
   assert.equal((await post("/league/delete", { uid: "host", code })).status, 200);
-  // Both the legacy and the pending member rows AND their account links are gone.
-  for (const u of ["legacy", "pend"]) {
-    assert.equal(store.has(`member:${code}:${u}`), false, `${u} member row orphaned`);
-    assert.ok(!(JSON.parse(store.get(`user:${u}`)).leagues || []).includes(code), `${u} league link orphaned`);
-  }
+  // Both member rows are gone.
+  assert.equal(store.has(`member:${code}:legacy`), false, "legacy member row orphaned");
+  assert.equal(store.has(`member:${code}:pend`), false, "pending member row orphaned");
+  // The LEGACY member is a real account (reconciled to committed): kept, link stripped.
+  assert.ok(store.has("user:legacy"), "a real (legacy) account was destroyed");
+  assert.ok(!(JSON.parse(store.get("user:legacy")).leagues || []).includes(code), "legacy league link orphaned");
+  // The PENDING provisional-only account leaves no orphan at all — account + recovery gone.
+  assert.equal(store.has("user:pend"), false, "a provisional pending account was orphaned");
+  assert.deepEqual(recoveriesFor(store, "pend"), [], "a provisional pending recovery was orphaned");
   assert.equal(store.has(`league:${code}`), false);
 });
 
@@ -1721,9 +1725,11 @@ test("B · ordinary league deletion includes a pending join but never treats it 
   ctl.failNext("commit", 2);
   await post("/join", { uid: "u2", code, nick: "Pending" });
   assert.equal((await post("/league/delete", { uid: "host", code })).status, 200);
-  // The pending join's row and account link are torn down (in the all-UID set).
+  // The pending join is torn down (in the all-UID set) and, being provisional-
+  // only, leaves no orphaned row, account or recovery.
   assert.equal(store.has(`member:${code}:u2`), false, "the pending row was orphaned by league deletion");
-  assert.ok(!(JSON.parse(store.get("user:u2"))?.leagues || []).includes(code), "the pending account link was orphaned");
+  assert.equal(store.has("user:u2"), false, "the pending provisional account was orphaned");
+  assert.deepEqual(recoveriesFor(store, "u2"), [], "the pending provisional recovery was orphaned");
 });
 
 test("B · succession never picks a pending member as heir", async () => {
@@ -1754,4 +1760,111 @@ test("C · succession ignores a present stale KV time and picks the true longest
   await post("/account/delete", { uid: "host" });
   assert.equal(JSON.parse(store.get(`league:${code}`)).owner, "u_early",
     "a stale KV time overrode the authoritative since in succession");
+});
+
+// === ELEVENTH REVIEW ========================================================
+
+// --- 1 · kick and account fences are genuinely operation-owned --------------
+
+test("1 · a concurrent kick and account fence on the same uid coexist; neither overwrites the other", async () => {
+  const { env, code } = await withLeague();
+  const rpc = rpcTo(env, code);
+  const now = Date.now();
+  await rpc("begin", { uid: "u1", nick: "Name", roster: [], now });
+  await rpc("fenceMember", { uid: "u1", kind: "kick", token: "K" });
+  await rpc("fenceMember", { uid: "u1", kind: "account", token: "A" });
+  // Both fences block the uid.
+  assert.equal((await rpc("begin", { uid: "u1", nick: "X", roster: [], now })).fenced, true);
+  // The kick's release lifts ONLY the kick fence; the account fence still blocks.
+  await rpc("release", { uid: "u1", kind: "kick", token: "K", now });
+  assert.equal((await rpc("begin", { uid: "u1", nick: "X", roster: [], now })).fenced, true,
+    "releasing the kick lifted the account fence too");
+  // Only the account op's own release lifts the account fence.
+  await rpc("release", { uid: "u1", kind: "account", token: "A", now });
+  assert.notEqual((await rpc("begin", { uid: "u1", nick: "X", roster: [], now })).fenced, true);
+});
+
+test("1 · one operation's release/finish never completes through another's fence", async () => {
+  const { env, code } = await withLeague();
+  const rpc = rpcTo(env, code);
+  const now = Date.now();
+  const b = await rpc("begin", { uid: "u1", nick: "Name", roster: [], now });
+  await rpc("fenceMember", { uid: "u1", kind: "account", token: "A" });
+  // A kick release with a different token cannot lift the account fence.
+  await rpc("release", { uid: "u1", kind: "kick", token: "OTHER", now });
+  assert.equal((await rpc("begin", { uid: "u1", nick: "X", roster: [], now })).fenced, true,
+    "a foreign-token release lifted the account fence");
+  // finishAbort cannot complete through the account fence, nor lift it.
+  assert.equal((await rpc("finishAbort", { uid: "u1", fence: b.fence, now })).finished, false);
+  assert.equal((await rpc("begin", { uid: "u1", nick: "X", roster: [], now })).fenced, true);
+  // Only the account op's own release lifts it.
+  await rpc("release", { uid: "u1", kind: "account", token: "A", now });
+  assert.notEqual((await rpc("begin", { uid: "u1", nick: "X", roster: [], now })).fenced, true);
+});
+
+// --- 2 · an in-flight join never orphans anything if league deletion wins ----
+
+/** A registrar where u_new's activation loses to a league deletion that wins
+ *  right at commit: it raises a REAL league fence, then reports fenced. */
+function leagueWinsAtCommit() {
+  const real = registrarNamespace();
+  const namespace = {
+    idFromName: (n) => real.idFromName(n),
+    get(id) {
+      const inner = real.get(id);
+      return { fetch: async (url, init) => {
+        const b = JSON.parse(init.body);
+        if (b.op === "commit" && b.uid === "u_new") {
+          await inner.fetch(url, { ...init, body: JSON.stringify({ op: "fenceLeague", roster: [], now: Date.now() }) });
+          return new Response(JSON.stringify({ ok: true, committed: false, uid: b.uid, norm: b.norm, fenced: true }),
+            { status: 200, headers: { "content-type": "application/json" } });
+        }
+        return inner.fetch(url, init);
+      }};
+    },
+  };
+  return namespace;
+}
+
+test("2 · league deletion wins mid-join: the in-flight join leaves no orphan (row, link, recovery, intent)", async () => {
+  const { post, store, code } = await withLeague({ registrar: leagueWinsAtCommit() });
+  const res = await post("/join", { uid: "u_new", code, nick: "Newbie" });
+  assert.notEqual(res.status, 200, "the join reported success against a winning league deletion");
+  // Nothing of the in-flight join survives.
+  assert.equal(store.has(`member:${code}:u_new`), false, "an orphaned member row survived");
+  assert.equal(store.has("user:u_new"), false, "an orphaned account/link survived");
+  assert.deepEqual(recoveriesFor(store, "u_new"), [], "an orphaned recovery record survived");
+  assert.equal(store.has(`intent:abort:${code}:u_new`), false, "an orphaned abort intent survived");
+});
+
+test("2 · join wins first, then league deletion: the account survives, the membership is torn down", async () => {
+  const { post, store, code } = await withLeague();
+  assert.equal((await post("/join", { uid: "u1", code, nick: "Winner" })).status, 200);
+  const rec = JSON.parse(store.get("user:u1")).recovery;
+  assert.equal((await post("/league/delete", { uid: "host", code })).status, 200);
+  // The membership is gone with the league; the account (device) and its recovery remain.
+  assert.equal(store.has(`member:${code}:u1`), false, "the membership survived league deletion");
+  assert.ok(store.has("user:u1"), "a real account was destroyed by league deletion");
+  assert.equal(JSON.parse(store.get("user:u1")).recovery, rec, "the account's recovery changed");
+  assert.ok(!(JSON.parse(store.get("user:u1")).leagues || []).includes(code), "the deleted league link lingered");
+});
+
+test("2 · crash mid-join then the league is deleted: a later join by the uid cleans the orphan", async () => {
+  const cr = crashableKV();
+  const env = { KV: cr.kv, LEAGUE_REGISTRAR: registrarNamespace() };
+  const post = (path, body) => worker.fetch(new Request(`https://worker.test${path}`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+  }), env);
+  const code = (await (await post("/league", { uid: "host", nickname: "Host" })).json()).code;
+  // A join by u_new crashes mid-prepare (after the account/recovery are written).
+  cr.crashOn("put", `user:u_new`, 1); // crash on the league-link write (2nd user:u_new put)
+  assert.notEqual((await post("/join", { uid: "u_new", code, nick: "Newbie" })).status, 200);
+  // The league is then deleted out from under the half-finished join.
+  assert.equal((await post("/league/delete", { uid: "host", code })).status, 200);
+  // A later join attempt by the same uid (league now gone) resumes cleanup FIRST,
+  // clearing any stranded account/recovery/intent, then reports the league gone.
+  assert.equal((await post("/join", { uid: "u_new", code, nick: "Newbie" })).status, 404);
+  assert.equal(cr.store.has(`member:${code}:u_new`), false, "an orphaned member row survived");
+  assert.deepEqual(recoveriesFor(cr.store, "u_new"), [], "an orphaned recovery survived");
+  assert.equal(cr.store.has(`intent:abort:${code}:u_new`), false, "an orphaned abort intent survived");
 });

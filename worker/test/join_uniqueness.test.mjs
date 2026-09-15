@@ -1643,3 +1643,115 @@ test("D · an ownerDeparture whose closing verdict contradicts its committed set
   assert.equal(res.status, 503, "an inconsistent closing verdict was trusted");
   assert.ok(store.has("user:h"), "the account was erased on inconsistent data");
 });
+
+// === TENTH REVIEW ===========================================================
+
+// --- A · teardown fences are operation-owned: abort never touches kick/account/league
+
+for (const kind of ["kick", "account"]) {
+  test(`A · a join abort DEFERS to a foreign ${kind} fence and can neither overwrite nor lift it`, async () => {
+    const { env, code } = await withLeague();
+    const rpc = rpcTo(env, code);
+    const now = Date.now();
+    const b = await rpc("begin", { uid: "u1", nick: "Name", roster: [], now });
+    await rpc("fenceMember", { uid: "u1", kind, token: "OWNER-TOK", now });
+    // abort must defer, not clobber the foreign fence.
+    const ab = await rpc("abort", { uid: "u1", fence: b.fence, now });
+    assert.equal(ab.authorised, false, `abort clobbered a ${kind} fence`);
+    assert.equal(ab.deferred, true);
+    // finishAbort must refuse — it may not lift a foreign fence.
+    assert.equal((await rpc("finishAbort", { uid: "u1", fence: b.fence, now })).finished, false);
+    // The foreign fence still blocks the uid.
+    assert.equal((await rpc("begin", { uid: "u1", nick: "Other", roster: [], now })).fenced, true);
+    // A release with the WRONG kind/token cannot lift it.
+    await rpc("release", { uid: "u1", kind: "abort", token: "WRONG", now });
+    assert.equal((await rpc("begin", { uid: "u1", nick: "Other", roster: [], now })).fenced, true,
+      `a foreign release lifted the ${kind} fence`);
+    // Only its own (kind, token) release lifts it.
+    await rpc("release", { uid: "u1", kind, token: "OWNER-TOK", now });
+    assert.notEqual((await rpc("begin", { uid: "u1", nick: "Fresh", roster: [], now })).fenced, true);
+  });
+}
+
+test("A · a join abort DEFERS to a dominant league fence", async () => {
+  const { env, code } = await withLeague();
+  const rpc = rpcTo(env, code);
+  const now = Date.now();
+  const b = await rpc("begin", { uid: "u1", nick: "Name", roster: [], now });
+  await rpc("fenceLeague", { roster: [], now });
+  const ab = await rpc("abort", { uid: "u1", fence: b.fence, now });
+  assert.equal(ab.deferred, true, "abort did not defer to the league fence");
+  // The league fence still blocks every join, and finishAbort refuses.
+  assert.equal((await rpc("finishAbort", { uid: "u1", fence: b.fence, now })).finished, false);
+  assert.equal((await rpc("begin", { uid: "u2", nick: "X", roster: [], now })).fenced, true);
+});
+
+test("A · league deletion clears in-flight join-abort intents (so /join cannot resume once gone)", async () => {
+  const ctl = controllableRegistrar();
+  const { post, store, code } = await withLeague({ registrar: ctl.namespace });
+  // A prepared pending join (unknown activation) leaves a provisional claim/row.
+  ctl.failNext("commit", 2);
+  await post("/join", { uid: "pend", code, nick: "Pending" });
+  // An in-flight abort intent recorded for that pending uid.
+  store.set(`intent:abort:${code}:pend`, JSON.stringify({ uid: "pend", code, fence: "F", wasMember: false, existedBefore: false }));
+  assert.equal((await post("/league/delete", { uid: "host", code })).status, 200);
+  assert.equal(store.has(`intent:abort:${code}:pend`), false, "an abort intent survived league deletion");
+  assert.equal(store.has(`member:${code}:pend`), false, "a pending provisional row survived league deletion");
+});
+
+// --- B · a prepared pending join is never a committed member ------------------
+
+test("B · a prepared pending join does NOT keep a sole-owner league alive on account deletion", async () => {
+  const ctl = controllableRegistrar();
+  const { post, store, code } = await withLeague({ registrar: ctl.namespace });
+  // A fully prepared pending join by u2 (activation stays unknown): provisional
+  // row + account link exist, but the claim is never committed.
+  ctl.failNext("commit", 2);
+  await post("/join", { uid: "u2", code, nick: "Pending" });
+  assert.ok(store.has(`member:${code}:u2`), "test needs a prepared pending row");
+  // Host is the only COMMITTED member; deleting the host account must CLOSE the
+  // league — a provisional row must not keep it alive or become the heir.
+  assert.equal((await post("/account/delete", { uid: "host" })).status, 200);
+  assert.equal(store.has(`league:${code}`), false, "a provisional row kept a sole-owner league alive");
+});
+
+test("B · ordinary league deletion includes a pending join but never treats it as committed", async () => {
+  const ctl = controllableRegistrar();
+  const { post, store, code } = await withLeague({ registrar: ctl.namespace });
+  ctl.failNext("commit", 2);
+  await post("/join", { uid: "u2", code, nick: "Pending" });
+  assert.equal((await post("/league/delete", { uid: "host", code })).status, 200);
+  // The pending join's row and account link are torn down (in the all-UID set).
+  assert.equal(store.has(`member:${code}:u2`), false, "the pending row was orphaned by league deletion");
+  assert.ok(!(JSON.parse(store.get("user:u2"))?.leagues || []).includes(code), "the pending account link was orphaned");
+});
+
+test("B · succession never picks a pending member as heir", async () => {
+  const ctl = controllableRegistrar();
+  const { post, store, code } = await withLeague({ registrar: ctl.namespace });
+  await post("/join", { uid: "committed", code, nick: "Real" }); // a genuine committed member
+  ctl.failNext("commit", 2);
+  await post("/join", { uid: "pending", code, nick: "Ghosty" }); // stays pending
+  // Delete the host account -> succession must go to the committed member.
+  assert.equal((await post("/account/delete", { uid: "host" })).status, 200);
+  assert.equal(JSON.parse(store.get(`league:${code}`)).owner, "committed", "a pending member became the heir");
+});
+
+// --- C · a present-but-stale KV row cannot override the authoritative since ---
+
+test("C · succession ignores a present stale KV time and picks the true longest-standing member", async () => {
+  const ctl = controllableRegistrar();
+  const { post, store, code } = await withLeague({ registrar: ctl.namespace });
+  const lg = JSON.parse(store.get(`league:${code}`));
+  lg.joinedAt = { u_early: 1000, u_late: 2000 };
+  store.set(`league:${code}`, JSON.stringify(lg));
+  await post("/join", { uid: "u_early", code, nick: "Zeb" });  // authoritative since 1000
+  await post("/join", { uid: "u_late", code, nick: "Abe" });   // authoritative since 2000
+  // Clobber u_late's KV row to an EARLIER time than u_early — a stale write that
+  // must NOT make it look like the longest-standing member.
+  store.set(`member:${code}:u_late`, JSON.stringify({ nick: "Abe", since: 1, fence: "stale" }));
+
+  await post("/account/delete", { uid: "host" });
+  assert.equal(JSON.parse(store.get(`league:${code}`)).owner, "u_early",
+    "a stale KV time overrode the authoritative since in succession");
+});

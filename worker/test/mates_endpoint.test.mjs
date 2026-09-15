@@ -61,7 +61,15 @@ async function league(fixtures) {
   const { code } = await (await send("/league", { uid: "host", nickname: "Host" })).json();
   await send("/join", { uid: "m2", code, nickname: "Two" });
   await send("/join", { uid: "m3", code, nickname: "Three" });
+  // Backdate the founders a month, AUTHORITATIVELY. The registrar owns join time
+  // for committed members, so patching KV alone would be overridden; instead drop
+  // the now-stamped claims (purge) and rewrite the KV join time, leaving the
+  // founders as legacy (pre-registrar) members whose KV time is the authority —
+  // a later reconcile re-commits them carrying exactly this backdated time.
   const founded = Date.now() - 30 * 24 * HOUR;
+  await env.LEAGUE_REGISTRAR.get(env.LEAGUE_REGISTRAR.idFromName(code)).fetch(
+    "https://league-registrar/rpc",
+    { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ op: "purge" }) });
   for (const uid of ["host", "m2", "m3"]) {
     const key = `member:${code}:${uid}`;
     const row = JSON.parse(store.get(key));
@@ -207,6 +215,26 @@ test("a member who joined after kick-off is omitted from that fixture only", asy
     assert.equal(kickedOff.eligible, 3);
     assert.doesNotMatch(JSON.stringify(kickedOff), /Latecomer/, "not even as No pick");
     assert.equal(upcoming.eligible, 4, "but counted for the fixture still to come");
+  });
+});
+
+test("a late joiner whose KV row is CLOBBERED to an earlier time stays omitted — authoritative since wins", async () => {
+  // Slice A/C: once a claim is committed the registrar's join time is the
+  // authority UNCONDITIONALLY. A present-but-stale KV row moving the timestamp
+  // backwards must not reopen a locked fixture's picks to a member who joined
+  // after it locked.
+  const fixtures = round();
+  await withFixtures(fixtures, async () => {
+    const { env, code, store, send } = await league(fixtures);
+    await send("/join", { uid: "late", code, nickname: "Latecomer" }); // joins after fixture 1 locked
+    // A stale/clobbered KV row backdates the late joiner to before the founding.
+    const row = JSON.parse(store.get(`member:${code}:late`));
+    store.set(`member:${code}:late`, JSON.stringify({ ...row, since: 1 }));
+
+    const [kickedOff] = await reveal(env, code, "late");
+    assert.equal(kickedOff.picks.some((r) => r.uid === "late"), false,
+      "a clobbered-earlier KV time reopened a locked fixture to a late joiner");
+    assert.doesNotMatch(JSON.stringify(kickedOff), /Latecomer/, "privacy stayed closed against the stale KV time");
   });
 });
 

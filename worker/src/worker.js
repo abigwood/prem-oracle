@@ -541,14 +541,13 @@ async function members(env, league) {
     // never repaint, erase or mistime the winner (Slice A/B, A/C). The KV `since`
     // is used only when the authoritative one is absent.
     for (const m of cls.members || []) {
-      const existing = found.get(m.uid);
-      // The registrar's uid + nick are authoritative (a losing/clobbered write
-      // can never repaint the winner). For join time, a present KV row carries
-      // the real membership timestamp; only when the KV row is MISSING do we fall
-      // back to the authoritative `since`, so a restored member keeps its true
-      // join time instead of 0 and never has its pre-lock picks exposed (A/B).
-      const since = existing ? existing.since : (Number.isFinite(m.since) && m.since >= 0 ? m.since : 0);
-      found.set(m.uid, { uid: m.uid, nick: m.nick, since });
+      // Once a claim is committed the registrar is the authority for uid, nick
+      // AND join time — UNCONDITIONALLY, even when a (possibly stale/clobbered)
+      // KV row is present. So a stale row can never repaint a member, move their
+      // join time backwards to expose pre-lock reveals, or distort succession
+      // (Slice A/C). KV supplies timing only for legacy members the registrar has
+      // not yet reconciled (handled by the non-overlaid rows above).
+      found.set(m.uid, { uid: m.uid, nick: m.nick, since: Number.isFinite(m.since) && m.since >= 0 ? m.since : 0 });
     }
   }
   return [...found.values()].sort((a, b) => (a.since || 0) - (b.since || 0) || a.nick.localeCompare(b.nick));
@@ -1017,11 +1016,14 @@ async function deleteAccount(env, body) {
   // resuming (the user record may already be gone), else from the live user.
   const codes = intent?.codes ?? [...new Set(user?.leagues || [])];
   const recovery = intent?.recovery ?? user?.recovery ?? null;
+  // A stable operation token so this account deletion owns its own teardown
+  // fences (reused verbatim on retry).
+  const token = intent?.token || crypto.randomUUID();
 
-  // 1 · Record the intent, carrying enough context (codes + recovery) to finish
-  // every league's cleanup and revoke the credential even after the user record
-  // is erased.
-  await kvPut(env, intentKey, { op: "account", uid, codes, recovery, at: Date.now() });
+  // 1 · Record the intent, carrying enough context (codes + recovery + token) to
+  // finish every league's cleanup and revoke the credential even after the user
+  // record is erased.
+  await kvPut(env, intentKey, { op: "account", uid, codes, recovery, token, at: Date.now() });
 
   // 2 · Per-league teardown. For a league this account OWNS, the CLOSE-vs-succeed
   // decision is linearised in the Durable Object: fenceLeague atomically raises
@@ -1050,7 +1052,12 @@ async function deleteAccount(env, body) {
         // whole-league fence up (closing) or converts it directly into a fence on
         // the departing uid (succession) — no unfenced gap, no stranded fence.
         const dep = await registrarCall(env, code, "ownerDeparture",
-          { uid, roster: await allMemberRows(env, code), now: Date.now() });
+          { uid, roster: await allMemberRows(env, code), token, now: Date.now() });
+        if (dep.deferred) {
+          // A dominant league deletion already owns this league; it tears this
+          // account's membership down too. Defer entirely and move on.
+          continue;
+        }
         // The closing verdict must agree with whether another committed member
         // exists — an internally inconsistent answer fails closed (Slice A/D).
         if (dep.closing !== (dep.committed.filter((m) => m.uid !== uid).length === 0)) {
@@ -1065,6 +1072,7 @@ async function deleteAccount(env, body) {
             const u = await kvGet(env, `user:${memberUid}`);
             if (u?.leagues?.includes(code)) { u.leagues = u.leagues.filter((e) => e !== code); await kvPut(env, `user:${memberUid}`, u); }
             await env.KV.delete(leagueMemberKey(code, memberUid));
+            await env.KV.delete(abortIntentKey(code, memberUid)); // /join can't resume once the league is gone
           }));
           if (env.KV.list) {
             const slateKeys = await listAllKeys(env, `custom_slate:${code}:`);
@@ -1095,12 +1103,13 @@ async function deleteAccount(env, body) {
         await kvPut(env, `league:${code}`, league);
         succession.push({ code, name: league.name, uid: heir.uid, nick: heir.nick });
       }
-      // Departing member's own teardown. The fence is already up (converted by
-      // ownerDeparture for a succession; raised here for a non-owner league —
-      // idempotent). Drop the row, then release (which clears the fence).
-      await registrarFenceMember(env, code, uid, "account");
+      // Departing member's own teardown, owned by (account, token). The fence is
+      // already up (converted by ownerDeparture for a succession; raised here for
+      // a non-owner league — idempotent). Drop the row, then release (which lifts
+      // only this account op's own fence).
+      await registrarFenceMember(env, code, uid, "account", token);
       await env.KV.delete(leagueMemberKey(code, uid));
-      await registrarRelease(env, code, uid);
+      await registrarRelease(env, code, uid, "account", token);
     }
   } catch { return teardownIncomplete(env, "account deletion"); }
 
@@ -1208,15 +1217,15 @@ async function registrarCall(env, code, op, args = {}) {
  *  refuse to report a final success while the release is still outstanding, and
  *  a retry (KV membership already gone) still finishes the registrar cleanup —
  *  release is idempotent on the uid. */
-async function registrarRelease(env, code, uid) {
-  await registrarCall(env, code, "release", { uid, now: Date.now() });
+async function registrarRelease(env, code, uid, kind, token) {
+  await registrarCall(env, code, "release", { uid, kind, token, now: Date.now() });
 }
 
-/** Raise the DO teardown fence for a member BEFORE their live teardown, so a
- *  concurrent begin/commit for that uid is refused atomically. Throws on
+/** Raise the DO teardown fence for a member BEFORE their live teardown, owned by
+ *  (kind, token) so only this operation's own release lifts it. Throws on
  *  failure so the caller can fail closed; idempotent, so a retry re-raises it. */
-async function registrarFenceMember(env, code, uid, kind) {
-  await registrarCall(env, code, "fenceMember", { uid, kind, now: Date.now() });
+async function registrarFenceMember(env, code, uid, kind, token) {
+  await registrarCall(env, code, "fenceMember", { uid, kind, token, now: Date.now() });
 }
 
 /** Raise the DO teardown fence for the whole league BEFORE its live teardown. The
@@ -1426,37 +1435,54 @@ async function resumeAbortCleanup(env, code, uid) {
   await runAbortCleanup(env, code, uid, intent);
 }
 
+/** Drop this attempt's league link, and — only if the attempt created the
+ *  account and it is now league-less — the account and its recovery. Never
+ *  touches an account with other memberships or a pre-existing account. */
+async function dropJoinAccountLink(env, code, uid, ctx) {
+  const user = await kvGet(env, `user:${uid}`);
+  if (!user) return;
+  const had = user.leagues?.includes(code);
+  if (had) user.leagues = user.leagues.filter((entry) => entry !== code);
+  if (!ctx.existedBefore && (user.leagues || []).length === 0) {
+    await env.KV.delete(`user:${uid}`);
+    if (user.recovery) await env.KV.delete(`recovery:${user.recovery}`);
+  } else if (had) {
+    await kvPut(env, `user:${uid}`, user);
+  }
+}
+
 async function runAbortCleanup(env, code, uid, ctx) {
   const fence = ctx.fence;
-  // authorise + raise the cleanup fence (echoes uid + fence, which must match).
   const ab = await registrarCall(env, code, "abort", { uid, fence, now: Date.now() });
   if (ab.uid !== uid || ab.fence !== fence) throw new Error("abort identity mismatch");
+  if (ab.deferred) {
+    // A dominant league deletion or a foreign kick/account teardown owns the
+    // scope. It will tear this membership down; leave the durable intent so a
+    // later resume converges once it completes. Never touch a foreign fence.
+    return;
+  }
   if (!ab.authorised) {
-    // Superseded, committed (a winner) or already finished — nothing of ours to
-    // remove; drop the intent.
+    if (ab.state !== "committed") {
+      // The claim is gone (a teardown released it, or a prior abort finished):
+      // the member row is already removed by that teardown; clean only a stranded
+      // fresh account this attempt created.
+      await dropJoinAccountLink(env, code, uid, ctx);
+    }
+    // committed -> a winner owns everything; touch nothing.
     await env.KV.delete(abortIntentKey(code, uid));
     return;
   }
-  // Under the cleanup fence, remove ONLY this attempt's fence-owned KV state.
+  // Authorised: the soft abort fence is up. Remove ONLY this attempt's
+  // fence-owned member row, then its account link/recovery.
   if (!ctx.wasMember) {
     const row = await kvGet(env, leagueMemberKey(code, uid));
     if (row && row.fence === fence) await env.KV.delete(leagueMemberKey(code, uid));
   }
-  const user = await kvGet(env, `user:${uid}`);
-  if (user?.leagues?.includes(code)) {
-    user.leagues = user.leagues.filter((entry) => entry !== code);
-    if (!ctx.existedBefore && user.leagues.length === 0) {
-      await env.KV.delete(`user:${uid}`);          // this attempt created the account
-      if (user.recovery) await env.KV.delete(`recovery:${user.recovery}`);
-    } else {
-      await kvPut(env, `user:${uid}`, user);
-    }
-  }
-  // Finish: fence-validated tombstone + lift the cleanup fence. Never a generic
-  // uid release.
+  await dropJoinAccountLink(env, code, uid, ctx);
+  // Finish: fence-validated tombstone + lift ONLY this abort's own fence.
   const fin = await registrarCall(env, code, "finishAbort", { uid, fence, now: Date.now() });
   if (fin.uid !== uid || fin.fence !== fence) throw new Error("finishAbort identity mismatch");
-  if (!fin.finished) throw new Error("abort not finished"); // fence changed under us — retryable
+  if (!fin.finished) throw new Error("abort not finished"); // a foreign teardown took the scope — retryable
   await env.KV.delete(abortIntentKey(code, uid));
 }
 
@@ -1509,6 +1535,10 @@ async function deleteLeague(env, body) {
     await kvPut(env, `user:${memberUid}`, user);
   }));
   await Promise.all(memberUids.map((memberUid) => env.KV.delete(leagueMemberKey(code, memberUid))));
+  // Terminally reconcile any in-flight join-abort intents for this league: once
+  // the league record is gone /join can no longer resume them, so clear them
+  // here (their provisional rows are being dropped in this same teardown).
+  await Promise.all(memberUids.map((memberUid) => env.KV.delete(abortIntentKey(code, memberUid))));
   if (env.KV.list) {
     const slateKeys = await listAllKeys(env, `custom_slate:${code}:`);
     // Every fixture this league published stops being this league's business.
@@ -1550,19 +1580,22 @@ async function kickMember(env, body) {
   if (!registrarEnabled(env)) return teardownIncomplete(env, "removal");
 
   const intentKey = kickIntentKey(code, memberUid);
-  const resuming = !!(await kvGet(env, intentKey));
+  const priorIntent = await kvGet(env, intentKey);
   const existing = await kvGet(env, leagueMemberKey(code, memberUid));
   const legacyMember = (league.members || []).includes(memberUid);
-  if (!existing && !legacyMember && !resuming) return json({ error: "member not found" }, 404, env);
+  if (!existing && !legacyMember && !priorIntent) return json({ error: "member not found" }, 404, env);
 
-  // 1 · Record the authorised removal intent (the durable retry context).
-  await kvPut(env, intentKey, { op: "kick", code, uid: memberUid, at: Date.now() });
+  // 1 · Record the authorised removal intent (the durable retry context), with a
+  // stable operation token so this kick owns its own teardown fence — reused
+  // verbatim on every retry so it neither abandons nor duplicates its fence.
+  const token = priorIntent?.token || crypto.randomUUID();
+  await kvPut(env, intentKey, { op: "kick", code, uid: memberUid, token, at: Date.now() });
 
-  // 2 · Raise the DO teardown fence for this member BEFORE any live teardown —
-  // the atomic barrier that makes a concurrent /join or rename by this uid
-  // refuse immediately, independent of KV visibility (Slice A/B). Fail closed if
-  // it cannot be raised; the intent lets a retry re-raise it.
-  try { await registrarFenceMember(env, code, memberUid, "kick"); }
+  // 2 · Raise this kick's own DO teardown fence BEFORE any live teardown — the
+  // atomic barrier that makes a concurrent /join or rename by this uid refuse
+  // immediately (Slice A/B), owned by (kick, token) so no other operation can
+  // lift it. Fail closed if it cannot be raised; the intent lets a retry re-raise.
+  try { await registrarFenceMember(env, code, memberUid, "kick", token); }
   catch { return teardownIncomplete(env, "removal"); }
 
   // 3 · Remove the LIVE membership. A crash here leaves the name still reserved
@@ -1581,11 +1614,10 @@ async function kickMember(env, body) {
     user ? kvPut(env, `user:${memberUid}`, user) : Promise.resolve(),
   ]);
 
-  // 4 · Release the name AND lift the fence, atomically. Idempotent, so a retry
-  // after the membership is already gone still converges; if it cannot complete,
-  // the intent and fence remain and the call is retryable — never a final
-  // success with the release outstanding.
-  try { await registrarRelease(env, code, memberUid); }
+  // 4 · Release the name AND lift THIS kick's own fence, atomically. Idempotent,
+  // so a retry after the membership is already gone still converges; if it cannot
+  // complete, the intent and fence remain and the call is retryable.
+  try { await registrarRelease(env, code, memberUid, "kick", token); }
   catch { return teardownIncomplete(env, "removal"); }
 
   // 5 · Both sides done — clear the intent.

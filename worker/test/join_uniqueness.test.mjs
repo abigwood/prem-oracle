@@ -519,7 +519,9 @@ test("C · a stale commit after release never resurrects the name", async () => 
   const now = 4_000_000;
   const b = await rpc("begin", { uid: "u1", nick: "Cantona", roster: [], now });
   await rpc("commit", { uid: "u1", norm: b.norm, fence: b.fence, now });
-  await rpc("release", { uid: "u1", now });
+  // A real teardown owns its fence and releases through it.
+  await rpc("fenceMember", { uid: "u1", kind: "kick", token: "T", now });
+  await rpc("release", { uid: "u1", kind: "kick", token: "T", now });
   const stale = await rpc("commit", { uid: "u1", norm: b.norm, fence: b.fence, now });
   assert.equal(stale.committed, false, "a stale commit resurrected a released claim");
   // And the name is genuinely free for a newcomer.
@@ -1867,4 +1869,105 @@ test("2 · crash mid-join then the league is deleted: a later join by the uid cl
   assert.equal(cr.store.has(`member:${code}:u_new`), false, "an orphaned member row survived");
   assert.deepEqual(recoveriesFor(cr.store, "u_new"), [], "an orphaned recovery survived");
   assert.equal(cr.store.has(`intent:abort:${code}:u_new`), false, "an orphaned abort intent survived");
+});
+
+// === TWELFTH REVIEW =========================================================
+
+// --- 1 · an established member stays established during a rename -------------
+
+test("1 · league deletion during an established member's rename preserves their account and recovery", async () => {
+  const { post, env, store, code } = await withLeague();
+  await post("/join", { uid: "u1", code, nick: "Alice" });
+  const rec = JSON.parse(store.get("user:u1")).recovery;
+  // u1's rename to "Bob" is in flight (reserved, not yet committed).
+  const rpc = rpcTo(env, code);
+  const r = await rpc("begin", { uid: "u1", nick: "Bob", roster: [], now: Date.now() });
+  assert.equal(r.rename, true, "expected a rename reservation for an established member");
+  // Deleting the league must PRESERVE the established member's account + recovery.
+  assert.equal((await post("/league/delete", { uid: "host", code })).status, 200);
+  assert.ok(store.has("user:u1"), "an established member mid-rename lost their account");
+  assert.equal(JSON.parse(store.get("user:u1")).recovery, rec, "their recovery was destroyed");
+});
+
+test("1 · owner account deletion during another member's rename succeeds to them, not closure", async () => {
+  const { post, env, store, code } = await withLeague();
+  await post("/join", { uid: "u1", code, nick: "Alice" });
+  const rpc = rpcTo(env, code);
+  await rpc("begin", { uid: "u1", nick: "Bob", roster: [], now: Date.now() }); // u1 rename in flight
+  assert.equal((await post("/account/delete", { uid: "host" })).status, 200);
+  assert.ok(store.has(`league:${code}`), "the league was wrongly closed during a member's rename");
+  assert.equal(JSON.parse(store.get(`league:${code}`)).owner, "u1", "succession skipped a mid-rename established member");
+});
+
+test("1 · a failed rename never frees the old name — no duplicate nicknames", async () => {
+  const { post, env, store, code } = await withLeague();
+  await post("/join", { uid: "u1", code, nick: "Alice" });
+  await post("/join", { uid: "u2", code, nick: "Bob" });
+  // u1 tries to rename to a taken name -> refused, u1 stays "Alice".
+  assert.equal((await post("/league/nick", { uid: "u1", code, nick: "Bob" })).status, 409);
+  assert.equal((await stateNicks(env, code)).byUid.u1, "Alice", "a failed rename changed the member's name");
+  // "Alice" was never released during the attempt, so no one else can hold it.
+  assert.equal((await post("/join", { uid: "u3", code, nick: "Alice" })).status, 409, "the old name leaked during a rename");
+});
+
+test("1 · an EXPIRED rename keeps the committed name held and frees only the reservation", async () => {
+  const { post, env, code } = await withLeague();
+  await post("/join", { uid: "u1", code, nick: "Alice" });
+  const rpc = rpcTo(env, code);
+  const t0 = 90_000_000;
+  await rpc("begin", { uid: "u1", nick: "Zzz", roster: [], now: t0 }); // reservation that will expire
+  const later = t0 + TTL + 1;
+  // The committed name is still held past the reservation's expiry...
+  assert.equal((await rpc("check", { uid: "other", nick: "Alice", roster: [], now: later })).available, false,
+    "the committed name was freed by an expired rename");
+  // ...while the expired reservation itself is free.
+  assert.equal((await rpc("check", { uid: "other", nick: "Zzz", roster: [], now: later })).available, true);
+});
+
+// --- 2 · genuinely delayed provisional write across a completed /league/delete
+
+test("2 · a held provisional write that lands AFTER league deletion, then a crash, is deterministically recovered", async () => {
+  const { post, env, store, code } = await withLeague();
+  const rpc = rpcTo(env, code);
+  // 1 · The join reserves its name.
+  const b = await rpc("begin", { uid: "u_new", nick: "Newbie", roster: [], now: Date.now() });
+  // 2 · /league/delete completes (the join's writes are all still held).
+  assert.equal((await post("/league/delete", { uid: "host", code })).status, 200);
+  // 3 · The held attempt now lands, LATE, after deletion: its durable intent
+  //     (written before the provisional writes) and then the member/account/
+  //     recovery writes — exactly the join's own Phase 2 -> Phase 3 order.
+  store.set(`intent:abort:${code}:u_new`, JSON.stringify(
+    { uid: "u_new", code, fence: b.fence, wasMember: false, existedBefore: false, phase: "prepare" }));
+  store.set(`member:${code}:u_new`, JSON.stringify({ nick: "Newbie", since: 1, fence: b.fence }));
+  store.set("user:u_new", JSON.stringify({ nickname: "Newbie", leagues: [code], recovery: "late-code" }));
+  store.set("recovery:late-code", JSON.stringify("u_new"));
+  // 4 · The join worker crashed before its ordinary cleanup (nothing else runs).
+  // 5 · Deterministic recovery: the next /join by this uid (league now gone)
+  //     removes the late row, account link, account, recovery AND the intent.
+  assert.equal((await post("/join", { uid: "u_new", code, nick: "Newbie" })).status, 404);
+  assert.equal(store.has(`member:${code}:u_new`), false, "the late member row was orphaned");
+  assert.equal(store.has("user:u_new"), false, "the late account was orphaned");
+  assert.deepEqual(recoveriesFor(store, "u_new"), [], "the late recovery was orphaned");
+  assert.equal(store.has(`intent:abort:${code}:u_new`), false, "the attempt intent was orphaned");
+});
+
+// --- 3 · release validates ownership ----------------------------------------
+
+test("3 · release with a wrong/absent token never changes a live claim, and is idempotent once completed", async () => {
+  const { env, code } = await withLeague();
+  const rpc = rpcTo(env, code);
+  const now = Date.now();
+  const b = await rpc("begin", { uid: "u1", nick: "Name", roster: [], now });
+  await rpc("commit", { uid: "u1", norm: b.norm, fence: b.fence, now });
+  // A release that owns no matching fence must NOT complete or tombstone.
+  const wrong = await rpc("release", { uid: "u1", kind: "kick", token: "NOPE", now });
+  assert.equal(wrong.completed, false, "a release with no owning fence reported completed");
+  assert.equal((await rpc("check", { uid: "u2", nick: "Name", roster: [], now })).available, false,
+    "a non-owning release tombstoned a live claim");
+  // A real teardown: raise the fence, then release completes.
+  await rpc("fenceMember", { uid: "u1", kind: "kick", token: "K", now });
+  assert.equal((await rpc("release", { uid: "u1", kind: "kick", token: "K", now })).completed, true);
+  // Idempotent retry after a legitimately completed release: still completed.
+  assert.equal((await rpc("release", { uid: "u1", kind: "kick", token: "K", now })).completed, true,
+    "an idempotent retry after completion was refused");
 });

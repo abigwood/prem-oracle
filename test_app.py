@@ -2470,10 +2470,15 @@ class NamesAndViewportTests(unittest.TestCase):
         self.assertNotIn("leagueMemberKey(code, uid), {", after)  # no provisional/visible member write after activation
         # A: an unknown activation (resolveCommit -> null) is never a 200.
         self.assertIn("if (!activation) return registrarUnavailable(env);", fn)
+        # Durable attempt context is recorded BEFORE the first provisional write,
+        # so a crash (even one whose league is then deleted) can always be
+        # recovered; it is cleared on a confirmed activation.
+        self.assertIn('kvPut(env, abortIntentKey(code, uid),', fn)
+        self.assertLess(fn.index("abortIntentKey(code, uid),"), fn.index("leagueMemberKey(code, uid), {"))
+        self.assertIn("await env.KV.delete(abortIntentKey(code, uid));", fn)
         # A definitive refusal runs the durable, resumable, attempt-owned abort;
-        # a stranded cleanup is resumed at the head of the next join.
-        self.assertIn("abortJoinAttempt(env, code, uid", fn)
-        self.assertIn("resumeAbortCleanup(env, code, uid)", fn)
+        # a stranded cleanup (or a gone league) is recovered at the head of a join.
+        self.assertIn("runAbortCleanup(env, code, uid", fn)
         # The abort protocol is fence-validated and never a generic release.
         cleanup = self.worker[self.worker.index("async function runAbortCleanup(env, code, uid, ctx)"):]
         cleanup = cleanup[:cleanup.index("\n}")]

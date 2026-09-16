@@ -47,7 +47,11 @@ CREATE TABLE IF NOT EXISTS claims (
   ts        INTEGER NOT NULL,
   fence     TEXT NOT NULL DEFAULT '',
   activated INTEGER NOT NULL DEFAULT 0,
-  since     INTEGER NOT NULL DEFAULT 0
+  since     INTEGER NOT NULL DEFAULT 0,
+  pnorm     TEXT NOT NULL DEFAULT '',
+  pnick     TEXT NOT NULL DEFAULT '',
+  pfence    TEXT NOT NULL DEFAULT '',
+  pts       INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS claims_norm ON claims (norm);
 CREATE TABLE IF NOT EXISTS teardowns (
@@ -96,7 +100,7 @@ export class LeagueRegistrar {
   /** An opaque, unguessable fence for one attempt. */
   #fence() { return crypto.randomUUID(); }
 
-  #row(uid) { return this.#rows("SELECT norm, nick, state, ts, fence, activated, since FROM claims WHERE uid = ?", uid)[0]; }
+  #row(uid) { return this.#rows("SELECT norm, nick, state, ts, fence, activated, since, pnorm, pnick, pfence, pts FROM claims WHERE uid = ?", uid)[0]; }
 
   /**
    * Backfill members KV already holds — BACKFILL-ONLY, for a uid the registrar
@@ -120,18 +124,23 @@ export class LeagueRegistrar {
     }
   }
 
-  /** The uid, if any, that currently holds this norm — committed, or fresh pending. */
+  /** The uid, if any, that currently holds this norm — as a committed name, a
+   *  fresh first-join pending name, OR a fresh in-flight rename reservation. */
   #holder(norm, uid, now) {
+    const fresh = now - PENDING_TTL_MS;
     return this.#rows(
-      "SELECT uid FROM claims WHERE norm = ? AND uid != ? "
-      + "AND (state = 'committed' OR (state = 'pending' AND ts > ?)) LIMIT 1",
-      norm, uid, now - PENDING_TTL_MS)[0];
+      "SELECT uid FROM claims WHERE uid != ? AND ("
+      + "(state = 'committed' AND norm = ?) "
+      + "OR (state = 'pending' AND norm = ? AND ts > ?) "
+      + "OR (pnorm = ? AND pts > ?)) LIMIT 1",
+      uid, norm, norm, fresh, norm, fresh)[0];
   }
 
   #suggest(display, now) {
-    const held = new Set(this.#rows(
-      "SELECT norm FROM claims WHERE state = 'committed' OR (state = 'pending' AND ts > ?)",
-      now - PENDING_TTL_MS).map((r) => r.norm));
+    const fresh = now - PENDING_TTL_MS;
+    const held = new Set();
+    for (const r of this.#rows("SELECT norm, state, ts FROM claims WHERE state = 'committed' OR (state = 'pending' AND ts > ?)", fresh)) held.add(r.norm);
+    for (const r of this.#rows("SELECT pnorm FROM claims WHERE pnorm != '' AND pts > ?", fresh)) held.add(r.pnorm);
     return suggestFor(display, (n) => !held.has(n));
   }
 
@@ -153,92 +162,132 @@ export class LeagueRegistrar {
     return row.state === "pending" && row.ts > now - PENDING_TTL_MS;
   }
 
+  #fresh(ts, now) { return ts > now - PENDING_TTL_MS; }
+  /** An established member is committed (activated) — INCLUDING while a rename is
+   *  in flight, because a rename keeps the committed name and reserves the new one
+   *  separately. A never-activated first-join pending is NOT established. */
+  #established(row) { return !!row && row.state === "committed"; }
+
   /**
-   * Reserve a name for a uid as a fresh PENDING attempt, atomically. Single-
-   * threaded, so the conflict read and the write cannot interleave with another
-   * begin. Returns an opaque fence the caller must present to commit().
+   * Reserve a name atomically. Two distinct shapes:
+   *   FIRST JOIN (uid not yet an established member) — reserves the name as a
+   *     never-activated pending claim (activated=0). commit activates it.
+   *   RENAME (uid already committed/established) — keeps the committed name held
+   *     and reserves the NEW name separately in the pending-rename fields, so a
+   *     failed or expired rename cannot lose the old name to another player.
+   * Returns an opaque fence the caller presents to commit().
    */
   begin({ uid, nick, roster, now = 0 }) {
     uid = String(uid || "");
     if (!uid) return { ok: false, error: "uid required" };
     const norm = normaliseJoinNick(nick);
     if (!norm) return { ok: false, error: "name required" };
-    // A teardown in progress is the barrier: the league is being deleted, or
-    // this member is being removed. Refuse atomically — no reconcile, no grant.
     if (this.#leagueFenced()) return { ok: false, fenced: true, scope: "league", error: "league is being deleted" };
     if (this.#memberFenced(uid)) return { ok: false, fenced: true, scope: "member", error: "removal in progress" };
     this.#reconcile(roster);
     const display = String(nick).trim().slice(0, 24);
     const mine = this.#row(uid);
 
-    // Already committed to this exact name: a no-op success, no new attempt.
-    // Echoes uid + norm so the caller can prove the verdict is for THIS op.
-    if (mine && mine.state === "committed" && mine.norm === norm) {
-      return { ok: true, own: true, committed: true, uid, norm, nick: display, fence: mine.fence };
+    if (this.#established(mine)) {
+      // --- RENAME (or no-op) of an established member ---
+      if (mine.norm === norm) return { ok: true, own: true, committed: true, uid, norm, nick: display, fence: mine.fence };
+      // One in-flight rename per member.
+      if (mine.pnorm && this.#fresh(mine.pts, now)) {
+        if (mine.pnorm === norm) {
+          this.sql.exec("UPDATE claims SET pts = ?, pnick = ? WHERE uid = ?", now, display, uid);
+          return { ok: true, own: true, uid, norm, nick: display, fence: mine.pfence };
+        }
+        return { ok: false, inflight: true, uid, error: "a name change is already in progress for this account" };
+      }
+      if (this.#holder(norm, uid, now)) {
+        return { ok: false, taken: true, uid, norm, error: "That name is taken in this league",
+          suggestions: this.#suggest(display, now) };
+      }
+      // Reserve the NEW name separately; the committed name stays held.
+      const fence = this.#fence();
+      this.sql.exec("UPDATE claims SET pnorm = ?, pnick = ?, pfence = ?, pts = ? WHERE uid = ?",
+        norm, display, fence, now, uid);
+      return { ok: true, uid, norm, nick: display, fence, rename: true };
     }
-    // ONE safe in-flight attempt per uid. A live (fresh) pending claim is an
-    // active attempt:
-    //   same name  -> an identical retry CONVERGES on the SAME attempt (same
-    //                 fence), so the original and the retry both finish it.
-    //   other name -> a competing attempt must NOT silently supersede the active
-    //                 one; refuse it. (A committed member changing name goes
-    //                 through the rename path, not here.)
-    if (mine && mine.state === "pending" && mine.ts > now - PENDING_TTL_MS) {
+
+    // --- FIRST JOIN ---
+    // ONE safe in-flight attempt per uid: an identical retry converges on the
+    // same fence; a different name refuses rather than supersede the attempt.
+    if (mine && mine.state === "pending" && this.#fresh(mine.ts, now)) {
       if (mine.norm === norm) {
-        this.sql.exec("UPDATE claims SET ts = ? WHERE uid = ?", now, uid); // keep the fence; refresh the hold
+        this.sql.exec("UPDATE claims SET ts = ? WHERE uid = ?", now, uid);
         return { ok: true, own: true, uid, norm, nick: mine.nick, fence: mine.fence };
       }
       return { ok: false, inflight: true, uid, error: "a join is already in progress for this account" };
     }
-
-    // An EXPIRED pending row is not an owned reservation — contest the name.
     if (this.#holder(norm, uid, now)) {
       return { ok: false, taken: true, uid, norm, error: "That name is taken in this league",
         suggestions: this.#suggest(display, now) };
     }
-
-    // Free: reserve as a fresh pending attempt. UID is the key, so this both
-    // inserts a new joiner and moves an existing member off a previous name.
     const fence = this.#fence();
-    this.sql.exec("INSERT INTO claims (uid, norm, nick, state, ts, fence) VALUES (?, ?, ?, 'pending', ?, ?) "
+    this.sql.exec("INSERT INTO claims (uid, norm, nick, state, ts, fence, activated, pnorm, pnick, pfence, pts) "
+      + "VALUES (?, ?, ?, 'pending', ?, ?, 0, '', '', '', 0) "
       + "ON CONFLICT(uid) DO UPDATE SET norm = excluded.norm, nick = excluded.nick, "
-      + "state = 'pending', ts = excluded.ts, fence = excluded.fence",
+      + "state = 'pending', ts = excluded.ts, fence = excluded.fence, activated = 0, "
+      + "pnorm = '', pnick = '', pfence = '', pts = 0",
       uid, norm, display, now, fence);
     return { ok: true, uid, norm, nick: display, fence };
   }
 
   /**
-   * Convert a uid's pending attempt to committed — but only when it is still the
-   * active, fresh attempt (uid + norm + fence all match, not expired) and no
-   * other uid has acquired the name meanwhile. A stale, expired, superseded or
-   * released attempt returns committed:false and changes nothing, so the caller
-   * knows its fence lost authority and must not report success.
+   * Convert a fenced attempt to committed. A FIRST-JOIN commit activates the
+   * pending claim; a RENAME commit adopts the reserved new name and releases the
+   * old one in the same row. Either only succeeds while it is the still-active,
+   * fresh attempt (fence matches, not expired) and the name is not held by
+   * another uid — else committed:false, changing nothing.
    */
   commit({ uid, norm, fence, since, now = 0 }) {
     uid = String(uid || "");
+    fence = String(fence || "");
     const want = normaliseJoinNick(norm) || String(norm || "");
-    // A teardown of this member or the whole league is in progress: never grant.
     if (this.#leagueFenced() || this.#memberFenced(uid)) {
       return { ok: true, committed: false, uid, norm: want, fenced: true };
     }
     const row = this.#row(uid);
-    // Already committed to this name: idempotent success (a duplicate commit).
-    // Echoes uid + norm so a lost-and-retried commit proves it is this op's.
-    if (row && row.state === "committed" && row.norm === want) return { ok: true, committed: true, uid, norm: want };
+    if (!row) return { ok: true, committed: false, uid, norm: want, reason: "absent" };
+    // Idempotent: already committed to this exact name (first join or a rename
+    // that already adopted it).
+    if (row.state === "committed" && row.norm === want) return { ok: true, committed: true, uid, norm: want };
 
-    const active = row && row.state === "pending" && row.norm === want
-      && row.fence === String(fence || "") && row.ts > now - PENDING_TTL_MS;
-    if (!active) return { ok: true, committed: false, uid, norm: want, reason: "superseded" };
-    // The name may have been acquired by another uid since this attempt began.
-    if (this.#holder(want, uid, now)) {
-      return { ok: true, committed: false, uid, norm: want, taken: true, suggestions: this.#suggest(row.nick, now) };
+    // RENAME commit: the reserved new name for an established member.
+    if (this.#established(row) && row.pnorm === want && row.pfence === fence && this.#fresh(row.pts, now)) {
+      if (this.#holder(want, uid, now)) {
+        return { ok: true, committed: false, uid, norm: want, taken: true, suggestions: this.#suggest(row.pnick, now) };
+      }
+      // Adopt the new name and drop the reservation; the old name is released.
+      this.sql.exec("UPDATE claims SET norm = ?, nick = ?, pnorm = '', pnick = '', pfence = '', pts = 0 WHERE uid = ? AND pfence = ?",
+        want, row.pnick, uid, fence);
+      return { ok: true, committed: true, uid, norm: want };
     }
-    // Store the authoritative join time supplied by the worker (the prepared
-    // membership timestamp), so the committed roster carries a real `since`.
-    const joinTs = Number.isFinite(since) && since >= 0 ? Math.floor(since) : (row.since || now);
-    this.sql.exec("UPDATE claims SET state = 'committed', activated = 1, since = ? WHERE uid = ? AND fence = ? AND state = 'pending'",
-      joinTs, uid, String(fence || ""));
-    return { ok: true, committed: true, uid, norm: want };
+
+    // FIRST-JOIN commit: activate the never-activated pending claim.
+    if (row.state === "pending" && row.norm === want && row.fence === fence && this.#fresh(row.ts, now)) {
+      if (this.#holder(want, uid, now)) {
+        return { ok: true, committed: false, uid, norm: want, taken: true, suggestions: this.#suggest(row.nick, now) };
+      }
+      const joinTs = Number.isFinite(since) && since >= 0 ? Math.floor(since) : (row.since || now);
+      this.sql.exec("UPDATE claims SET state = 'committed', activated = 1, since = ? WHERE uid = ? AND fence = ? AND state = 'pending'",
+        joinTs, uid, fence);
+      return { ok: true, committed: true, uid, norm: want };
+    }
+
+    return { ok: true, committed: false, uid, norm: want, reason: "superseded" };
+  }
+
+  /** Cancel an in-flight rename reservation (a failed/expired rename), keeping
+   *  the member committed under their existing name. Only drops the reservation
+   *  matching this fence, so it never touches a newer rename or a live claim. */
+  cancelRename({ uid, fence, now = 0 }) {
+    uid = String(uid || "");
+    fence = String(fence || "");
+    const changed = this.sql.exec("UPDATE claims SET pnorm = '', pnick = '', pfence = '', pts = 0 WHERE uid = ? AND pfence = ?",
+      uid, fence).rowsWritten;
+    return { ok: true, cancelled: (changed || 0) > 0, uid, fence };
   }
 
   /** Fence a member's scope for a HARD teardown (kick / account deletion), owned
@@ -319,13 +368,26 @@ export class LeagueRegistrar {
    *  reusable. Idempotent, so a retry after a failed teardown always converges. */
   release({ uid, kind = "kick", token = "", now = 0 }) {
     uid = String(uid || "");
-    const changed = this.sql.exec("UPDATE claims SET state = 'released', ts = ?, fence = '' WHERE uid = ? AND state != 'released'",
-      now, uid).rowsWritten;
-    // Lift ONLY this operation's own fence — never another operation's row on the
-    // same scope (a concurrent kick and account deletion each keep their own).
-    this.sql.exec("DELETE FROM teardowns WHERE scope = ? AND kind = ? AND token = ?",
-      memberScope(uid), String(kind), String(token));
-    return { ok: true, released: (changed || 0) > 0, uid, kind: String(kind), token: String(token) };
+    kind = String(kind);
+    token = String(token);
+    // Ownership check: this release completes ONLY through its own fence — the
+    // exact (scope, kind, token) it raised. A wrong or absent token must not
+    // change a live claim.
+    const owns = this.#rows("SELECT 1 FROM teardowns WHERE scope = ? AND kind = ? AND token = ? LIMIT 1",
+      memberScope(uid), kind, token).length > 0;
+    if (owns) {
+      const changed = this.sql.exec(
+        "UPDATE claims SET state = 'released', ts = ?, fence = '', pnorm = '', pnick = '', pfence = '', pts = 0 "
+        + "WHERE uid = ? AND state != 'released'", now, uid).rowsWritten;
+      this.sql.exec("DELETE FROM teardowns WHERE scope = ? AND kind = ? AND token = ?", memberScope(uid), kind, token);
+      return { ok: true, completed: true, released: (changed || 0) > 0, uid, kind, token };
+    }
+    // No owning fence. A release whose work is already done (fence lifted, claim
+    // tombstoned) is an idempotent success; otherwise this operation does not own
+    // the scope and must change nothing.
+    const row = this.#row(uid);
+    if (row && row.state === "released") return { ok: true, completed: true, released: false, uid, kind, token };
+    return { ok: true, completed: false, released: false, uid, kind, token };
   }
 
   /**
@@ -438,6 +500,7 @@ export class LeagueRegistrar {
       ownerDeparture: () => this.ownerDeparture(args),
       abort: () => this.abort(args),
       finishAbort: () => this.finishAbort(args),
+      cancelRename: () => this.cancelRename(args),
     };
     const handler = handlers[op];
     if (!handler) return new Response(JSON.stringify({ error: `unknown op: ${op}` }), { status: 400 });

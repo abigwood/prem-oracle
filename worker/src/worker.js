@@ -1183,7 +1183,9 @@ function validRegistrarShape(op, data) {
       if (typeof data.committed !== "boolean") return false;
       return data.committed === false || typeof data.norm === "string";
     case "release":
-      return typeof data.released === "boolean";
+      return typeof data.completed === "boolean";
+    case "cancelRename":
+      return typeof data.cancelled === "boolean";
     case "purge":
       return data.purged === true || data.ok === true;
     case "fenceMember":
@@ -1229,7 +1231,11 @@ async function registrarCall(env, code, op, args = {}) {
  *  a retry (KV membership already gone) still finishes the registrar cleanup —
  *  release is idempotent on the uid. */
 async function registrarRelease(env, code, uid, kind, token) {
-  await registrarCall(env, code, "release", { uid, kind, token, now: Date.now() });
+  // Release completes only through its own (kind, token) fence. If it does not
+  // complete — a wrong/absent token against a still-live claim — treat it as a
+  // failure so the caller fails closed rather than assuming the name is freed.
+  const res = await registrarCall(env, code, "release", { uid, kind, token, now: Date.now() });
+  if (!res.completed) throw new Error("release did not complete: fence not owned");
 }
 
 /** Raise the DO teardown fence for a member BEFORE their live teardown, owned by
@@ -1304,17 +1310,19 @@ async function joinLeague(env, body) {
   // registrar; it changes nothing and is retryable (Slice A/A).
   if (!registrarEnabled(env)) return registrarUnavailable(env);
 
-  // Finish any interrupted cleanup for this uid FIRST — BEFORE the league-exists
-  // checks — so a previously-failed attempt whose league was deleted concurrently
-  // still gets its stranded intent, account link and recovery cleaned up (its
-  // abort fence lifted), never orphaned just because the league is now gone
-  // (Slice A/1, A/2).
-  try { await resumeAbortCleanup(env, code, uid); }
-  catch { return teardownIncomplete(env, "joining"); }
-
-  // A league with an outstanding deletion intent is on its way out — never let a
-  // join repopulate it (Slice A/C).
-  if (await kvGet(env, leagueIntentKey(code))) return json({ error: "league not found" }, 404, env);
+  // Recover an interrupted prior attempt by this uid. Resume its cleanup now when
+  // either a cleanup was already in progress (an abort fence may be up, which
+  // would otherwise deadlock this join), OR the league is gone (the attempt can
+  // never complete). A prepare-phase intent on a LIVE league is left alone — the
+  // normal retry below re-drives it and thereby repairs it, never minting a
+  // second recovery (Slice A/1, A/2).
+  const priorAttempt = await kvGet(env, abortIntentKey(code, uid));
+  const leagueGone = !!(await kvGet(env, leagueIntentKey(code))) || !(await kvGet(env, `league:${code}`));
+  if (priorAttempt && (priorAttempt.phase === "abort" || leagueGone)) {
+    try { await runAbortCleanup(env, code, uid, priorAttempt); }
+    catch { return teardownIncomplete(env, "joining"); }
+  }
+  if (leagueGone) return json({ error: "league not found" }, 404, env);
   const league = await kvGet(env, `league:${code}`);
   if (!league) return json({ error: "league not found" }, 404, env);
 
@@ -1364,6 +1372,11 @@ async function joinLeague(env, body) {
     return teardownIncomplete(env, "joining");
   }
   if (begin.taken) {
+    // If this uid had an interrupted attempt whose name has since been taken by
+    // someone else (it expired), that attempt can never complete — clean it up.
+    if (priorAttempt) {
+      try { await runAbortCleanup(env, code, uid, priorAttempt); } catch { /* expiry / next retry */ }
+    }
     return json({ error: begin.error || "That name is taken in this league", taken: true,
       suggestions: begin.suggestions || [] }, 409, env);
   }
@@ -1371,40 +1384,36 @@ async function joinLeague(env, body) {
   if (!begin.ok || begin.uid !== uid || begin.norm !== offeredNorm) return registrarUnavailable(env);
   const wasMember = !!(existing || legacyMember);
   const existedBefore = !!(await kvGet(env, `user:${uid}`));
-
-  // Phase 2 — write the PROVISIONAL, transaction-owned membership while the claim
-  // is still pending. The registrar reports a not-yet-activated claim as hidden,
-  // so this row is invisible to every member/state/league read; it carries our
-  // fence so cleanup only ever removes what THIS attempt wrote (Slice A/A, A/B).
   const since = existing?.since || league.joinedAt?.[uid] || Date.now();
-  await kvPut(env, leagueMemberKey(code, uid), {
-    nick: normNick(offered),
-    since,
-    fence: begin.fence,
-  });
 
-  // Phase 3 — PREPARE the crash-idempotent account, recovery and league link,
-  // still WITHOUT making the membership player-visible (the claim is not yet
-  // activated, so the registrar keeps the member hidden). Everything the join
-  // needs now exists but is invisible.
+  // Phase 2 — record DURABLE attempt context BEFORE any provisional KV mutation,
+  // so a crash at any later point (even one where the league is then deleted out
+  // from under the join) can always be recovered from this intent: the member
+  // row, account link, attempt-created account and recovery removed, and any
+  // fence lifted (Slice A/2). Phase 'prepare' means still-drivable — a live-league
+  // retry re-drives it; only a gone league or an in-progress cleanup aborts it.
+  await kvPut(env, abortIntentKey(code, uid),
+    { uid, code, fence: begin.fence, wasMember, existedBefore, phase: "prepare", at: Date.now() });
+
+  // Phase 3 — write the PROVISIONAL, transaction-owned membership while the claim
+  // is still pending (the registrar reports it hidden), carrying our fence so
+  // cleanup only ever removes what THIS attempt wrote; then PREPARE the
+  // crash-idempotent account, recovery and league link — all still invisible.
+  await kvPut(env, leagueMemberKey(code, uid), { nick: normNick(offered), since, fence: begin.fence });
   const user = await ensureUser(env, uid, body.nickname);
   user.leagues = [...new Set([...(user.leagues || []), code])];
   await kvPut(env, `user:${uid}`, user);
 
-  // Phase 4 — the ONE final activation, and the LAST authoritative mutation. It
-  // is serialised in the Durable Object against member and league teardown:
-  //   refuses (committed:false) if a teardown won first -> we remove only the
-  //     state this attempt owns and refuse; a definitive loss mints nothing.
-  //   wins -> every required record already exists, so a following teardown
-  //     necessarily includes this membership. NOTHING is written after this.
-  //   unknown (null) after the safe re-read -> the whole attempt stays hidden and
-  //     an identical retry converges to the same account, membership and code.
+  // Phase 4 — the ONE final activation, and the LAST authoritative mutation.
+  //   committed:true  -> success; clear the attempt intent (both sides done).
+  //   committed:false -> a teardown won or the name was taken: run the attempt-
+  //     owned abort, which removes only this attempt's state and clears the intent.
+  //   unknown (null)  -> leave the intent + provisional writes so an identical
+  //     retry converges; refuse retryably.
   const activation = await resolveCommit(env, code, { uid, norm: begin.norm, fence: begin.fence, since });
   if (!activation) return registrarUnavailable(env);
   if (!activation.committed) {
-    // Durably-resumable, attempt-owned abort. If it cannot finish now, the intent
-    // persists and the next /join resumes it — never a stranded fence (Slice A/A).
-    try { await abortJoinAttempt(env, code, uid, { wasMember, existedBefore, fence: begin.fence }); }
+    try { await runAbortCleanup(env, code, uid, { wasMember, existedBefore, fence: begin.fence }); }
     catch { return teardownIncomplete(env, "joining"); }
     if (activation.taken) {
       return json({ error: "That name is taken in this league", taken: true,
@@ -1413,6 +1422,7 @@ async function joinLeague(env, body) {
     if (activation.fenced) return teardownIncomplete(env, "joining");
     return registrarUnavailable(env);
   }
+  await env.KV.delete(abortIntentKey(code, uid)); // activated — nothing left to recover
   // Activated — no membership, account or link write happens beyond this point.
   return json({ ok: true, code, name: league.name, recovery: user.recovery }, 200, env);
 }
@@ -1426,29 +1436,6 @@ async function joinLeague(env, body) {
  * An existing account, and any account with other memberships, is left intact.
  */
 const abortIntentKey = (code, uid) => `intent:abort:${code}:${uid}`;
-
-/**
- * Abort a failed join attempt — durably resumable and attempt-owned. A cleanup
- * INTENT (carrying the fence and whether the account pre-existed) is persisted
- * BEFORE any registrar/KV mutation, so a crash at any boundary is finished by a
- * retry. abort() authorises only when this uid's pending row still carries THIS
- * fence, and atomically raises a cleanup fence that blocks begin/commit while
- * cleanup runs. finishAbort() — fence-validated, never a generic release —
- * tombstones only this attempt and lifts the cleanup fence. Throws on any
- * unfinished step, leaving the intent for the resume path (Slice A/A, A/C).
- */
-async function abortJoinAttempt(env, code, uid, ctx) {
-  await kvPut(env, abortIntentKey(code, uid), { uid, code, ...ctx, at: Date.now() });
-  await runAbortCleanup(env, code, uid, ctx);
-}
-
-/** Resume an interrupted abort cleanup, if one is recorded for this uid. Called
- *  at the head of every join so a stranded cleanup fence can never lock out. */
-async function resumeAbortCleanup(env, code, uid) {
-  const intent = await kvGet(env, abortIntentKey(code, uid));
-  if (!intent) return;
-  await runAbortCleanup(env, code, uid, intent);
-}
 
 /** Drop this attempt's league link, and — only if the attempt created the
  *  account and it is now league-less — the account and its recovery. Never
@@ -1468,6 +1455,11 @@ async function dropJoinAccountLink(env, code, uid, ctx) {
 
 async function runAbortCleanup(env, code, uid, ctx) {
   const fence = ctx.fence;
+  // Mark the intent as a cleanup-in-progress, so if we crash after raising the
+  // abort fence a later /join knows to RESUME the abort (which lifts the fence)
+  // rather than treat it as a still-drivable attempt (Slice A/2).
+  await kvPut(env, abortIntentKey(code, uid),
+    { uid, code, fence, wasMember: ctx.wasMember, existedBefore: ctx.existedBefore, phase: "abort", at: Date.now() });
   const ab = await registrarCall(env, code, "abort", { uid, fence, now: Date.now() });
   if (ab.uid !== uid || ab.fence !== fence) throw new Error("abort identity mismatch");
   if (ab.state === "committed") {
@@ -1915,23 +1907,26 @@ async function setProfile(env, body) {
     let claim;
     try { claim = await registrarCall(env, code, "begin", { uid, nick: nickname, roster, now: Date.now() }); }
     catch { unconfirmed.push(code); continue; }
-    // A teardown fence, a taken name, or a grant for the wrong uid/name -> leave
-    // the Anon row untouched; never propagate over a removal in progress
-    // (Slice A/B, A/D).
-    if (claim.fenced) { kept.push(code); continue; }
+    // A teardown fence, an in-flight rename, a taken name, or a grant for the
+    // wrong uid/name -> leave the Anon row untouched; never propagate over a
+    // removal in progress (Slice A/B, A/D).
+    if (claim.fenced || claim.inflight) { kept.push(code); continue; }
     if (!claim.ok || claim.taken || claim.uid !== uid || claim.norm !== normaliseJoinNick(nickname)) { kept.push(code); continue; }
     await kvPut(env, leagueMemberKey(code, uid), { ...member, nick: nickname });
     const commit = await resolveCommit(env, code, { uid, norm: claim.norm, fence: claim.fence,
       since: member.since || member.joinedAt || 0 });
     if (!commit) {
       // UNKNOWN even after a re-read: do NOT count it as propagated, and do NOT
-      // restore a possibly-committed name. Leave the fenced pending + provisional
-      // write so an identical retry converges, and mark the call retryable (A/A).
+      // restore a possibly-committed name. Leave the reservation + write so an
+      // identical retry converges, and mark the call retryable (A/A).
       unconfirmed.push(code);
       continue;
     }
     if (!commit.committed) {
-      // Definitive loss — restore the Anon row, never a duplicate (Slice A/C).
+      // Definitive loss — cancel the rename reservation (the member stays
+      // committed as Anon) and restore the Anon row; never a duplicate (Slice A/C).
+      try { await registrarCall(env, code, "cancelRename", { uid, fence: claim.fence, now: Date.now() }); }
+      catch { /* the reservation expires if this fails */ }
       const current = await kvGet(env, leagueMemberKey(code, uid));
       if (current && normaliseJoinNick(current.nick) === claim.norm) {
         await kvPut(env, leagueMemberKey(code, uid), { ...member });
@@ -1981,6 +1976,11 @@ async function updateLeagueNick(env, body) {
     if (begin.scope === "league") return json({ error: "league not found" }, 404, env);
     return teardownIncomplete(env, "the rename");
   }
+  if (begin.inflight) {
+    // Another name change for this account is already in flight — do not
+    // supersede it; retryable (Slice A/C).
+    return teardownIncomplete(env, "the rename");
+  }
   if (begin.taken) {
     return json({ error: begin.error || "That name is taken in this league", taken: true,
       suggestions: begin.suggestions || [] }, 409, env);
@@ -1988,6 +1988,9 @@ async function updateLeagueNick(env, body) {
   // The grant must be for the very uid + name we asked about (Slice A/D).
   if (!begin.ok || begin.uid !== uid || begin.norm !== normaliseJoinNick(nick)) return registrarUnavailable(env);
 
+  // The registrar keeps the member committed under their CURRENT name and holds
+  // the new name only as a separate reservation, so members() keeps showing the
+  // old name until the rename commits — this KV write is invisible until then.
   await kvPut(env, leagueMemberKey(code, uid), { nick, since });
   // A legacy names[] override would otherwise shadow the member row.
   if (league.names && Object.prototype.hasOwnProperty.call(league.names, uid)) {
@@ -1995,18 +1998,19 @@ async function updateLeagueNick(env, body) {
     await kvPut(env, `league:${code}`, league);
   }
   // Commit with our fence.
-  //   committed:false -> another rename won the name (or our attempt expired):
-  //     restore the member's PRIOR name so a crossed rename never leaves them
-  //     holding a name they do not own, and refuse (Slice A/C). A stale roster
-  //     cannot have committed a different name — reconciliation only promotes a
-  //     pending claim of the SAME name (Slice A/B).
-  //   unknown after a safe re-read -> do NOT report success and do NOT restore a
-  //     possibly-committed rename: leave the member row on the new name and the
-  //     fenced pending in place so an identical retry converges, and refuse
-  //     retryably (Slice A/A).
+  //   committed:true  -> the new name is adopted and the old one released.
+  //   committed:false -> the rename definitively lost (taken / expired): CANCEL
+  //     the reservation so the new name is freed, and restore the member's KV row
+  //     to their still-committed name. The old name was never given up, so no
+  //     duplicate can arise (Slice A/1, A/C).
+  //   unknown after a safe re-read -> leave the reservation + KV row; the member
+  //     stays committed under the old name (members() shows it) and an identical
+  //     retry converges (Slice A/A).
   const commit = await resolveCommit(env, code, { uid, norm: begin.norm, fence: begin.fence, since });
   if (!commit) return registrarUnavailable(env);
   if (!commit.committed) {
+    try { await registrarCall(env, code, "cancelRename", { uid, fence: begin.fence, now: Date.now() }); }
+    catch { /* the reservation is only a bounded hold; it expires if this fails */ }
     const current = await kvGet(env, leagueMemberKey(code, uid));
     if (current && normaliseJoinNick(current.nick) === begin.norm) {
       await kvPut(env, leagueMemberKey(code, uid), { nick: normNick(priorNick ?? DEFAULT_NICK), since });

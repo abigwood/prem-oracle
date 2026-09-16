@@ -1971,3 +1971,94 @@ test("3 · release with a wrong/absent token never changes a live claim, and is 
   assert.equal((await rpc("release", { uid: "u1", kind: "kick", token: "K", now })).completed, true,
     "an idempotent retry after completion was refused");
 });
+
+// === THIRTEENTH REVIEW ======================================================
+// A durable prepare-phase attempt's ORIGINAL ownership context must survive a
+// retry: the provisional member row / account it wrote must never make a retry
+// read it as pre-existing, or a later activation loss would preserve them.
+
+test("13 · converged retry uses STORED context: an activation loss removes the attempt-created account (1-4)", async () => {
+  const refuse = commitVerdictRegistrar(() => ({ ok: true, committed: false, fenced: true }));
+  const { post, env, store, code } = await withLeague({ registrar: refuse.namespace });
+  const rpc = rpcTo(env, code);
+  // 1 · A fresh first join by u_new crashed AFTER writing its prepare intent
+  //     (original context wasMember=false, existedBefore=false), member row,
+  //     account and recovery — with its pending claim reserved.
+  const b = await rpc("begin", { uid: "u_new", nick: "Newbie", roster: [], now: Date.now() });
+  store.set(`intent:abort:${code}:u_new`, JSON.stringify(
+    { uid: "u_new", code, fence: b.fence, wasMember: false, existedBefore: false, phase: "prepare" }));
+  store.set(`member:${code}:u_new`, JSON.stringify({ nick: "Newbie", since: 1, fence: b.fence }));
+  store.set("user:u_new", JSON.stringify({ nickname: "Newbie", leagues: [code], recovery: "code1" }));
+  store.set("recovery:code1", JSON.stringify("u_new"));
+  // 2 · Identical retry converges on the same fence; 3 · a teardown wins so its
+  //     activation loses.
+  refuse.failCommits(2);
+  assert.notEqual((await post("/join", { uid: "u_new", code, nick: "Newbie" })).status, 200);
+  // 4 · Nothing the attempt created survives — the stored false/false context was
+  //     used, NOT the true/true that the provisional artifacts would imply.
+  assert.equal(store.has(`member:${code}:u_new`), false, "attempt-created member row preserved");
+  assert.equal(store.has("user:u_new"), false, "attempt-created account preserved");
+  assert.deepEqual(recoveriesFor(store, "u_new"), [], "attempt-created recovery preserved");
+  assert.equal(store.has(`intent:abort:${code}:u_new`), false, "attempt intent stranded");
+});
+
+test("13 · converged retry for a PRE-EXISTING account preserves it, its recovery and unrelated leagues (5)", async () => {
+  const refuse = commitVerdictRegistrar(() => ({ ok: true, committed: false, fenced: true }));
+  const { post, env, store, code } = await withLeague({ registrar: refuse.namespace });
+  const rpc = rpcTo(env, code);
+  // A genuinely pre-existing account with an unrelated league.
+  store.set("user:u1", JSON.stringify({ nickname: "Established", leagues: ["OTHER1"], recovery: "real-code" }));
+  store.set("recovery:real-code", JSON.stringify("u1"));
+  // Its join to THIS league crashed after prepare (existedBefore=true recorded).
+  const b = await rpc("begin", { uid: "u1", nick: "Established", roster: [], now: Date.now() });
+  store.set(`intent:abort:${code}:u1`, JSON.stringify(
+    { uid: "u1", code, fence: b.fence, wasMember: false, existedBefore: true, phase: "prepare" }));
+  store.set(`member:${code}:u1`, JSON.stringify({ nick: "Established", since: 1, fence: b.fence }));
+  store.set("user:u1", JSON.stringify({ nickname: "Established", leagues: ["OTHER1", code], recovery: "real-code" }));
+  refuse.failCommits(2);
+  assert.notEqual((await post("/join", { uid: "u1", code, nick: "Established" })).status, 200);
+  // The pre-existing account, its recovery and the unrelated league all survive;
+  // only the failed league link is dropped.
+  assert.ok(store.has("user:u1"), "a pre-existing account was destroyed");
+  assert.equal(JSON.parse(store.get("user:u1")).recovery, "real-code", "the account's recovery changed");
+  assert.ok(JSON.parse(store.get("user:u1")).leagues.includes("OTHER1"), "an unrelated league was lost");
+  assert.ok(!JSON.parse(store.get("user:u1")).leagues.includes(code), "the failed league link lingered");
+  assert.equal(recoveriesFor(store, "u1").length, 1, "a duplicate recovery credential was created");
+});
+
+test("13 · identical same-name retry converges and completes with one member and one recovery (6)", async () => {
+  const { post, env, store, code } = await withLeague();
+  const rpc = rpcTo(env, code);
+  // A FRESH crashed prepare attempt (its pending claim still live).
+  const b = await rpc("begin", { uid: "u_new", nick: "Alpha", roster: [], now: Date.now() });
+  store.set(`intent:abort:${code}:u_new`, JSON.stringify(
+    { uid: "u_new", code, fence: b.fence, wasMember: false, existedBefore: false, phase: "prepare" }));
+  store.set(`member:${code}:u_new`, JSON.stringify({ nick: "Alpha", since: 1, fence: b.fence }));
+  store.set("user:u_new", JSON.stringify({ nickname: "Alpha", leagues: [code], recovery: "c1" }));
+  store.set("recovery:c1", JSON.stringify("u_new"));
+  // Identical retry converges on the same fence and COMPLETES.
+  assert.equal((await post("/join", { uid: "u_new", code, nick: "Alpha" })).status, 200);
+  assert.equal((await stateNicks(env, code)).byUid.u_new, "Alpha");
+  assert.equal(recoveriesFor(store, "u_new").length, 1, "a duplicate recovery credential was created");
+  assert.equal(store.has(`intent:abort:${code}:u_new`), false, "the intent was left stranded on success");
+});
+
+test("13 · a different-name retry after a SUPERSEDED fence cleans the old attempt and does not route through rename (6)", async () => {
+  const { post, env, store, code } = await withLeague();
+  const rpc = rpcTo(env, code);
+  // A crashed fresh attempt whose pending claim is already EXPIRED (ancient ts),
+  // so the next begin re-acquires a new fence (supersedes it).
+  const b1 = await rpc("begin", { uid: "u_new", nick: "Alpha", roster: [], now: 100_000 });
+  store.set(`intent:abort:${code}:u_new`, JSON.stringify(
+    { uid: "u_new", code, fence: b1.fence, wasMember: false, existedBefore: false, phase: "prepare" }));
+  store.set(`member:${code}:u_new`, JSON.stringify({ nick: "Alpha", since: 1, fence: b1.fence }));
+  store.set("user:u_new", JSON.stringify({ nickname: "Alpha", leagues: [code], recovery: "c1" }));
+  store.set("recovery:c1", JSON.stringify("u_new"));
+  // A DIFFERENT-name retry: a provisional first join must NOT be routed through
+  // rename; the superseded attempt is cleaned and the new one completes.
+  assert.equal((await post("/join", { uid: "u_new", code, nick: "Bravo" })).status, 200);
+  assert.equal((await stateNicks(env, code)).byUid.u_new, "Bravo", "the different-name retry did not take effect");
+  assert.equal(memberNicks(store, code).filter((n) => normaliseJoinNick(n) === "alpha").length, 0, "the old name lingered");
+  assert.equal(recoveriesFor(store, "u_new").length, 1, "a duplicate recovery credential was created");
+  assert.equal(store.has(`intent:abort:${code}:u_new`), false, "a stale intent survived");
+});

@@ -1310,14 +1310,18 @@ async function joinLeague(env, body) {
   // registrar; it changes nothing and is retryable (Slice A/A).
   if (!registrarEnabled(env)) return registrarUnavailable(env);
 
-  // Recover an interrupted prior attempt by this uid. Resume its cleanup now when
-  // either a cleanup was already in progress (an abort fence may be up, which
-  // would otherwise deadlock this join), OR the league is gone (the attempt can
-  // never complete). A prepare-phase intent on a LIVE league is left alone — the
-  // normal retry below re-drives it and thereby repairs it, never minting a
-  // second recovery (Slice A/1, A/2).
-  const priorAttempt = await kvGet(env, abortIntentKey(code, uid));
+  // Recover an interrupted prior attempt by this uid. Its saved intent carries the
+  // ORIGINAL ownership context (wasMember / existedBefore, as they were BEFORE the
+  // attempt) — the source of truth, since the attempt's own provisional member
+  // row and account must never be read as pre-existing state (Slice A/13). Only
+  // trust an intent that belongs to this uid AND league.
+  const rawPrior = await kvGet(env, abortIntentKey(code, uid));
+  const priorAttempt = rawPrior && rawPrior.uid === uid && rawPrior.code === code ? rawPrior : null;
   const leagueGone = !!(await kvGet(env, leagueIntentKey(code))) || !(await kvGet(env, `league:${code}`));
+  // Resume a cleanup already in progress (its abort fence would otherwise
+  // deadlock this join), or, when the league is gone, finish the attempt's
+  // cleanup with its OWN stored context. A prepare-phase intent on a LIVE league
+  // is left for the normal retry below to re-drive and repair.
   if (priorAttempt && (priorAttempt.phase === "abort" || leagueGone)) {
     try { await runAbortCleanup(env, code, uid, priorAttempt); }
     catch { return teardownIncomplete(env, "joining"); }
@@ -1336,11 +1340,15 @@ async function joinLeague(env, body) {
   const legacyMember = (league.members || []).includes(uid);
   const offeredNorm = normaliseJoinNick(offered);
 
-  // /join is NOT a rename route. An existing member offering a DIFFERENT name is
-  // delegated to the fenced rename operation, which restores the prior name on
-  // any failure — the fresh-join path must never overwrite a live member
-  // (Slice A/B). Offering the SAME name falls through to the idempotent path.
-  if (existing || legacyMember) {
+  // Was this uid an ESTABLISHED member BEFORE this attempt? A prior prepare-phase
+  // attempt's stored wasMember is authoritative — a provisional first join's own
+  // member row must never make it look established (Slice A/13).
+  const establishedBefore = priorAttempt ? priorAttempt.wasMember : !!(existing || legacyMember);
+
+  // /join is NOT a rename route. An ESTABLISHED member offering a DIFFERENT name
+  // is delegated to the fenced rename; a provisional first join is never routed
+  // through the rename flow (Slice A/B, A/13).
+  if (establishedBefore) {
     const priorNorm = normaliseJoinNick(existing?.nick ?? league.names?.[uid] ?? "");
     if (priorNorm && priorNorm !== offeredNorm) {
       const renamed = await updateLeagueNick(env, { uid, code, nick: offered });
@@ -1373,7 +1381,8 @@ async function joinLeague(env, body) {
   }
   if (begin.taken) {
     // If this uid had an interrupted attempt whose name has since been taken by
-    // someone else (it expired), that attempt can never complete — clean it up.
+    // someone else (it expired), that attempt can never complete — clean it up
+    // with its own stored context.
     if (priorAttempt) {
       try { await runAbortCleanup(env, code, uid, priorAttempt); } catch { /* expiry / next retry */ }
     }
@@ -1382,9 +1391,31 @@ async function joinLeague(env, body) {
   }
   // The grant must be for the very uid + name we asked about (Slice A/D).
   if (!begin.ok || begin.uid !== uid || begin.norm !== offeredNorm) return registrarUnavailable(env);
-  const wasMember = !!(existing || legacyMember);
-  const existedBefore = !!(await kvGet(env, `user:${uid}`));
-  const since = existing?.since || league.joinedAt?.[uid] || Date.now();
+
+  // Establish THIS attempt's ownership context.
+  let wasMember, existedBefore;
+  if (priorAttempt && priorAttempt.fence === begin.fence) {
+    // Converged on the SAME attempt (identical retry): reuse its ORIGINAL context
+    // verbatim — never re-derive from the provisional artifacts it wrote, or a
+    // subsequent loss would preserve them as though they predated the attempt
+    // (Slice A/13).
+    wasMember = priorAttempt.wasMember;
+    existedBefore = priorAttempt.existedBefore;
+  } else {
+    // A fresh attempt (or begin superseded the prior with a new fence). Clean any
+    // superseded prior with ITS stored context first, so its provisional
+    // artifacts do not pollute this attempt's context, then derive from the
+    // now-clean state (Slice A/13).
+    if (priorAttempt) {
+      try { await runAbortCleanup(env, code, uid, priorAttempt); }
+      catch { return teardownIncomplete(env, "joining"); }
+    }
+    const memberNow = await kvGet(env, leagueMemberKey(code, uid));
+    wasMember = !!(memberNow || legacyMember);
+    existedBefore = !!(await kvGet(env, `user:${uid}`));
+  }
+  const sinceRow = await kvGet(env, leagueMemberKey(code, uid));
+  const since = sinceRow?.since || league.joinedAt?.[uid] || Date.now();
 
   // Phase 2 — record DURABLE attempt context BEFORE any provisional KV mutation,
   // so a crash at any later point (even one where the league is then deleted out

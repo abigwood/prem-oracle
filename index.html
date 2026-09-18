@@ -58,6 +58,11 @@
         <p class="notif-hint">Kick-off reminders, per competition.</p>
         <div id="notificationPrefsList"></div>
       </div>
+      <div id="profileRecovery" class="profile-recovery" hidden>
+        <span class="eyebrow">Account recovery</span>
+        <p class="field-hint">These three words restore your account on another device. Keep them private.</p>
+        <p class="recovery-code" id="profileRecoveryCode"></p>
+      </div>
       <button class="primary wide" value="save">Save name</button>
       <button class="link-quiet" type="button" value="cancel" data-copy-diagnostics>Copy diagnostics</button>
     </form>
@@ -79,6 +84,22 @@
       <div class="join-suggestions" id="joinSuggestions" hidden></div>
       <button class="primary wide" id="joinSubmit" value="join">Join league</button>
       <button class="link-quiet" type="button" value="cancel" data-join-recover>Returning player? Restore with your code</button>
+    </form>
+  </dialog>
+
+  <dialog id="recoveryDialog">
+    <form method="dialog" id="recoveryForm">
+      <div class="dialog-head">
+        <div>
+          <span class="eyebrow">You're in</span>
+          <h2>Save your recovery code</h2>
+        </div>
+      </div>
+      <p class="field-hint">These three words restore your identity, leagues and standings on another device. You can find them later under your profile.</p>
+      <p class="recovery-code" id="recoveryCode"></p>
+      <p class="recovery-copied" id="recoveryCopied" role="status" hidden></p>
+      <button class="secondary wide" type="button" id="recoveryCopy" data-recovery-copy>Copy code</button>
+      <button class="primary wide" value="continue" data-recovery-continue>Continue</button>
     </form>
   </dialog>
 

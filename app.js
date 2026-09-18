@@ -5991,6 +5991,9 @@ async function advanceWizard() {
     wizard.step = "share";
     wizard.busy = false;
     await loadLeagueState();
+    // Same one-time recovery moment as joining. It overlays the share step; the
+    // Continue button simply reveals the invite underneath.
+    if (response.recovery) openRecoveryOnboarding(response.recovery, null);
   } catch (error) {
     wizard.busy = false;
     wizard.error = error.message;
@@ -6091,7 +6094,6 @@ function leagueSettings(state, isOwner) {
 }
 
 function leagueView() {
-  const recovery = localStorage.getItem(STORAGE.recovery);
   const joinDefault = inviteCode && !leagueCodes.includes(inviteCode) ? inviteCode : "";
   const controls = `<div class="league-actions">
     ${createLeagueCard()}
@@ -6104,8 +6106,10 @@ function leagueView() {
       <button class="primary wide" type="submit">Join league</button>
     </form>
   </div>`;
+  // The credential never appears on a league screen. This is the returning-
+  // player input only; viewing your own code lives behind the Profile avatar.
   const restore = `<form class="restore-card" data-restore>
-    <div><strong>${recovery ? "Your recovery code" : "Returning on another device?"}</strong><p>${recovery ? `<code>${recovery}</code> - save this privately.` : "Enter your three-word recovery code to restore your identity, leagues and standings."}</p></div>
+    <div><strong>Returning on another device?</strong><p>Enter your three-word recovery code to restore your identity, leagues and standings.</p></div>
     <input name="recovery" placeholder="amber-score-oracle">
     <button class="secondary" type="submit">Restore</button>
   </form>`;
@@ -7552,7 +7556,10 @@ async function submitJoinSheet() {
     dialog.close();
     setFlash(`Joined ${data.name}`);
     launchRouted = true;
-    await navigateToView("picks");
+    // The v1.8 recovery moment: show the code once, before My Picks. Continuing
+    // (or a missing code) lands on My Picks exactly as before.
+    if (data.recovery) openRecoveryOnboarding(data.recovery, () => navigateToView("picks"));
+    else await navigateToView("picks");
   } catch (error) {
     if (superseded()) return;
     joinSubmitInFlight = false;
@@ -7590,9 +7597,72 @@ document.getElementById("joinDialog").addEventListener("close", () => {
   restoreViewport();
 });
 
+/**
+ * v1.8 recovery onboarding — the one-time moment shown right after a join or a
+ * create, before the player continues. It ONLY displays the code. It never
+ * touches the clipboard on its own: copying happens solely on the explicit
+ * "Copy code" tap, and the clipboard is never cleared. The credential is
+ * display-only here (textContent, never innerHTML, never logged) and its later
+ * home is behind the Profile avatar, never a league screen, share card or
+ * diagnostics blob.
+ */
+let recoveryContinue = null;
+
+function openRecoveryOnboarding(code, onContinue) {
+  recoveryContinue = typeof onContinue === "function" ? onContinue : null;
+  const dialog = document.getElementById("recoveryDialog");
+  const codeEl = document.getElementById("recoveryCode");
+  const copied = document.getElementById("recoveryCopied");
+  const copyBtn = document.getElementById("recoveryCopy");
+  codeEl.textContent = code || "";
+  copied.hidden = true;
+  copied.textContent = "";
+  copyBtn.disabled = false;
+  if (!dialog.open) dialog.showModal();
+}
+
+// Only ever from the explicit Copy tap. Confirms on success; on failure it says
+// so honestly and leaves the code on screen to copy by hand.
+async function copyRecovery() {
+  const code = document.getElementById("recoveryCode").textContent;
+  const copied = document.getElementById("recoveryCopied");
+  if (!code) return;
+  try {
+    if (!navigator.clipboard || !navigator.clipboard.writeText) throw new Error("clipboard unavailable");
+    await navigator.clipboard.writeText(code);
+    copied.textContent = "Copied — store it somewhere safe.";
+  } catch {
+    copied.textContent = "Couldn't copy automatically — select the code above and save it by hand.";
+  }
+  copied.hidden = false;
+}
+
+// Runs the stored continuation exactly once. A second close (or an Escape after
+// Continue) does nothing.
+function continueRecovery() {
+  const go = recoveryContinue;
+  recoveryContinue = null;
+  if (go) go();
+}
+
+document.getElementById("recoveryDialog").addEventListener("click", (event) => {
+  if (event.target.closest("[data-recovery-copy]")) copyRecovery();
+});
+document.getElementById("recoveryDialog").addEventListener("close", () => {
+  continueRecovery();
+  restoreViewport();
+});
+
 document.getElementById("profileButton").addEventListener("click", () => {
   document.getElementById("playerName").value = playerName;
   renderNotificationPrefs();
+  // Later recovery access lives here, behind the avatar — the only place the
+  // player's own code is shown.
+  const rec = localStorage.getItem(STORAGE.recovery);
+  const panel = document.getElementById("profileRecovery");
+  const codeEl = document.getElementById("profileRecoveryCode");
+  if (rec) { codeEl.textContent = rec; panel.hidden = false; }
+  else { codeEl.textContent = ""; panel.hidden = true; }
   document.getElementById("profileDialog").showModal();
 });
 

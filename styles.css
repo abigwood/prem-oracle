@@ -974,6 +974,27 @@ dialog form { padding: 20px; }
 .dialog-head h2 { margin: 4px 0 16px; }
 .icon-button { width: 34px; height: 34px; border: 0; border-radius: 50%; color: var(--muted); background: #eef1ec; font-size: 1.35rem; }
 dialog label { display: block; margin-bottom: 6px; color: var(--muted); font-size: .75rem; font-weight: 800; }
+
+/* v1.8 recovery onboarding: the code is the strongest object in the sheet, and
+   user-selectable so a copy-failure fallback ("copy it by hand") is real. */
+.recovery-code {
+  margin: 14px 0 12px;
+  padding: 14px 16px;
+  border-radius: 12px;
+  background: #f2f4ef;
+  color: var(--purple);
+  font-weight: 900;
+  font-size: 1.15rem;
+  letter-spacing: .01em;
+  text-align: center;
+  overflow-wrap: anywhere;
+  user-select: all;
+  -webkit-user-select: all;
+}
+.recovery-copied { margin: 0 0 12px; color: var(--green); font-weight: 800; font-size: .82rem; text-align: center; }
+#recoveryDialog .primary { margin-top: 8px; }
+.profile-recovery { margin: 8px 0 4px; }
+.profile-recovery .recovery-code { font-size: 1rem; }
 @media (min-width: 700px) {
   main { padding-top: 26px; }
   .hero { padding: 30px; }

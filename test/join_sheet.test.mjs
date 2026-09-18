@@ -23,7 +23,7 @@ function sheetBox({ joinResponse, stateResponse, api, fetch } = {}) {
   dialog.showModal = function () { this.open = true; };
   dialog.close = function () { this.open = false; this.dispatchEvent(new dom.window.Event("close")); };
 
-  const calls = { join: [], nav: [], flash: [], saved: [], savedNames: [] };
+  const calls = { join: [], nav: [], flash: [], saved: [], savedNames: [], recovery: [] };
   const box = load(
     ["openJoinSheet", "submitJoinSheet", "showJoinSuggestions", "clearJoinFeedback"],
     {
@@ -46,6 +46,10 @@ function sheetBox({ joinResponse, stateResponse, api, fetch } = {}) {
       navigateToView: async (v) => { calls.nav.push(v); },
       restoreViewport: () => {},
       launchRouted: false,
+      // The recovery moment is its own unit (recovery_onboarding.test.mjs). Here
+      // it stands in as a spy that records the code and runs the continuation,
+      // so the sheet's "then land on My Picks" contract is still exercised.
+      openRecoveryOnboarding: (code, cont) => { calls.recovery.push(code); if (cont) cont(); },
     });
   return { box, document, calls, dialog };
 }
@@ -104,9 +108,24 @@ test("a successful join saves the league and lands on My Picks", async () => {
   document.getElementById("joinDisplayName").value = "Ferdinand";
   await box.submitJoinSheet();
   assert.deepEqual(calls.saved, ["ABC234"]);
+  assert.deepEqual(calls.recovery, ["amber-score-oracle"], "the recovery moment was not surfaced before continuing");
   assert.deepEqual(calls.nav, ["picks"], "did not land on My Picks");
   assert.match(calls.flash[0], /Joined Sunday Six/);
   assert.equal(document.getElementById("joinDialog").open, false, "the sheet stayed open after success");
+});
+
+test("a successful join with no recovery code still lands on My Picks", async () => {
+  const { box, document, calls } = sheetBox({
+    stateResponse: { code: "ABC234", name: "Sunday Six" },
+    joinResponse: jsonResponse(200, { ok: true, code: "ABC234", name: "Sunday Six" }),
+  });
+  box.openJoinSheet("ABC234");
+  await flush();
+  document.getElementById("joinDisplayName").value = "Ferdinand";
+  await box.submitJoinSheet();
+  assert.deepEqual(calls.saved, ["ABC234"]);
+  assert.equal(calls.recovery.length, 0, "surfaced a recovery moment with no code");
+  assert.deepEqual(calls.nav, ["picks"], "did not land on My Picks without a code");
 });
 
 test("an empty name is refused inline without a request", async () => {

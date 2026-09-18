@@ -2995,5 +2995,87 @@ class MatesPicksTests(unittest.TestCase):
             self.assertNotIn(banned, section, banned)
 
 
+class RecoveryOnboardingTests(unittest.TestCase):
+    """v1.8 recovery onboarding: the one-time code moment after join/create."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = (ROOT / "app.js").read_text()
+        cls.html = (ROOT / "index.html").read_text()
+
+    def _fn(self, name):
+        start = self.app.index(f"function {name}(")
+        end = self.app.index("\n}", start) + 2
+        return self.app[start:end]
+
+    def test_join_shows_recovery_before_my_picks(self):
+        submit = self._fn("submitJoinSheet")
+        self.assertIn("openRecoveryOnboarding(data.recovery, () => navigateToView(\"picks\"))", submit)
+        # The no-code path still lands on My Picks.
+        self.assertIn("else await navigateToView(\"picks\")", submit)
+
+    def test_create_shows_recovery(self):
+        self.assertIn("openRecoveryOnboarding(response.recovery, null)", self._fn("advanceWizard"))
+
+    def test_open_only_displays_and_never_auto_copies(self):
+        fn = self._fn("openRecoveryOnboarding")
+        # Display-only: textContent, never innerHTML, and no clipboard on open.
+        self.assertIn("codeEl.textContent = code", fn)
+        self.assertNotIn("innerHTML", fn)
+        self.assertNotIn("clipboard", fn)
+        self.assertNotIn("writeText", fn)
+
+    def test_copy_is_explicit_confirms_and_is_honest(self):
+        fn = self._fn("copyRecovery")
+        self.assertIn("navigator.clipboard.writeText(code)", fn)
+        self.assertIn("Copied — store it somewhere safe.", fn)
+        self.assertIn("catch", fn)
+        self.assertIn("Couldn't copy", fn)
+        # Never clears the clipboard, and never writes an empty string.
+        self.assertNotIn('writeText("")', fn)
+        self.assertNotIn("writeText('')", fn)
+
+    def test_copy_is_wired_only_to_the_explicit_tap(self):
+        self.assertIn('if (event.target.closest("[data-recovery-copy]")) copyRecovery();', self.app)
+
+    def test_continue_runs_once_then_clears(self):
+        fn = self._fn("continueRecovery")
+        # The stored callback is captured and cleared BEFORE it is run, so a
+        # second close cannot run it again.
+        self.assertIn("const go = recoveryContinue;", fn)
+        self.assertIn("recoveryContinue = null;", fn)
+        self.assertTrue(fn.index("recoveryContinue = null;") < fn.index("if (go) go();"))
+        self.assertIn('document.getElementById("recoveryDialog").addEventListener("close"', self.app)
+
+    def test_dialog_markup_has_code_copy_and_continue(self):
+        dlg = self.html[self.html.index('<dialog id="recoveryDialog">'):
+                        self.html.index("</dialog>", self.html.index('<dialog id="recoveryDialog">'))]
+        self.assertIn('id="recoveryCode"', dlg)
+        self.assertIn('data-recovery-copy', dlg)
+        self.assertIn('id="recoveryCopied"', dlg)
+        self.assertIn('data-recovery-continue', dlg)
+        self.assertIn('value="continue"', dlg)
+
+    def test_later_access_is_behind_the_profile_avatar(self):
+        # The profile dialog carries the recovery panel...
+        profile = self.html[self.html.index('<dialog id="profileDialog">'):
+                            self.html.index("</dialog>", self.html.index('<dialog id="profileDialog">'))]
+        self.assertIn('id="profileRecovery"', profile)
+        self.assertIn('id="profileRecoveryCode"', profile)
+        # ...and the avatar handler fills it as text, only when a code exists.
+        self.assertIn('const rec = localStorage.getItem(STORAGE.recovery);', self.app)
+        self.assertIn('codeEl.textContent = rec;', self.app)
+
+    def test_credential_is_never_on_a_league_screen(self):
+        league = self._fn("leagueView")
+        self.assertNotIn("STORAGE.recovery", league)
+        self.assertNotIn("<code>${recovery}", league)
+        self.assertNotIn("Your recovery code", league)
+
+    def test_credential_is_never_in_diagnostics(self):
+        diag = self._fn("diagnosticsText")
+        self.assertNotIn("recovery", diag.lower())
+
+
 if __name__ == "__main__":
     unittest.main()

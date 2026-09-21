@@ -137,10 +137,10 @@ test("a create-style open with no continuation just closes cleanly", async () =>
 
 test("creating a league surfaces the recovery code before the share step", async () => {
   const recovered = [];
-  const wizard = { step: "count", name: "Test", competitions: ["EPL"], count: 6, confirmSingle: true, busy: false, error: "" };
+  const wizard = { step: "confirm", name: "Test", competitions: ["EPL"], count: 6, confirmSingle: true, advancedOpen: false, busy: false, error: "" };
   const box = load(["advanceWizard"], {
     wizard,
-    WIZARD_STEPS: ["name", "competitions", "count", "share"],
+    WIZARD_STEPS: ["details", "confirm", "share"],
     wizardStepError: () => "",
     wizardRule: () => ({ method: "manual" }),
     render: () => {},

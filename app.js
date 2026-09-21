@@ -259,6 +259,9 @@ let expandedPickReveal = null;
 // means a long list stays the shape they left it in.
 let collapsedPickSections = new Set(readJSON(STORAGE.pickSections, []));
 let leagueSettingsOpen = readJSON(STORAGE.leagueSettings, false) === true;
+// v1.8 §1: create/join/restore/admin live behind a "Manage leagues" entry, so
+// opening League shows the table first. This toggles that management surface.
+let leagueManageOpen = false;
 // D8: which PAST weeks the viewer has opened, keyed "CODE:period". Past weeks
 // default closed, so this set only ever holds deliberate openings.
 let openPickWeeks = new Set(readJSON(STORAGE.pickWeeks, []));
@@ -5825,17 +5828,22 @@ function trophyCabinet(state) {
 // started" — and the questions arrive one at a time instead of as a form the
 // host has to decode. The old two-form "start a competition" framing is retired.
 
-const WIZARD_STEPS = ["name", "competitions", "count", "share"];
+// v1.8 §2 two-step creation: the input is two steps — details (name +
+// competition) then confirm (standard format, unusual options under Advanced).
+// "share" is the outcome presented after creation, not a third input step.
+const WIZARD_STEPS = ["details", "confirm", "share"];
+const WIZARD_INPUT_STEPS = ["details", "confirm"];
 
 let wizard = null;
 
 function openWizard() {
   wizard = {
-    step: "name",
+    step: "details",
     name: "",
     competitions: [availableCompetitions()[0]],
-    count: DEFAULT_FIXTURE_COUNT,
+    count: DEFAULT_FIXTURE_COUNT,   // §2 default: six fixtures
     confirmSingle: false, // the soft confirm a one-fixture week asks for
+    advancedOpen: false,  // Advanced settings disclosure state
     busy: false,
     code: "",
     error: "",
@@ -5857,65 +5865,73 @@ function wizardRule() {
 }
 
 function wizardProgress() {
-  const index = WIZARD_STEPS.indexOf(wizard.step);
-  return `<div class="wizard-progress" role="presentation">${WIZARD_STEPS.map((step, position) =>
+  const index = WIZARD_INPUT_STEPS.indexOf(wizard.step);
+  return `<div class="wizard-progress" role="presentation">${WIZARD_INPUT_STEPS.map((step, position) =>
     `<span class="wizard-dot${position <= index ? " is-done" : ""}${position === index ? " is-current" : ""}"></span>`
   ).join("")}</div>`;
 }
 
-function wizardStepName() {
-  return `<span class="eyebrow">Step 1 of 4</span>
+// Step 1 — league name and competition(s).
+function wizardStepDetails() {
+  const codes = availableCompetitions();
+  return `<span class="eyebrow">Step 1 of 2</span>
     <h3>Name your league</h3>
     <p class="wizard-hint">Your mates will see this at the top of the table.</p>
     <input name="leagueName" maxlength="40" placeholder="Saturday Super 6" value="${escapeHTML(wizard.name)}" data-wizard-name autofocus>
-    <div class="wizard-actions">
-      <button class="primary wide" type="button" data-wizard-next>Next</button>
-    </div>`;
-}
-
-function wizardStepCompetitions() {
-  const codes = availableCompetitions();
-  return `<span class="eyebrow">Step 2 of 4</span>
-    <h3>Choose competitions</h3>
-    <p class="wizard-hint">Select everything your league should draw fixtures from.</p>
-    <div class="competition-choice" role="group" aria-label="Competitions">
+    <label class="field-label" for="wizardCompetitions">Competition</label>
+    <p class="wizard-hint">Which competition your league draws fixtures from.</p>
+    <div id="wizardCompetitions" class="competition-choice" role="group" aria-label="Competitions">
       ${codes.map((code) => `<label class="competition-option${wizard.competitions.includes(code) ? " is-selected" : ""}">
         <input type="checkbox" name="competitions" value="${code}" data-wizard-competition="${code}"${wizard.competitions.includes(code) ? " checked" : ""}>
         <span>${escapeHTML(competitionMeta(code).short)}</span>
       </label>`).join("")}
     </div>
     <div class="wizard-actions">
-      <button class="secondary" type="button" data-wizard-back>Back</button>
-      <button class="primary" type="button" data-wizard-next>Next</button>
+      <button class="primary wide" type="button" data-wizard-next>Next</button>
     </div>`;
 }
 
-function wizardStepCount() {
+// Step 2 — confirm the standard format; unusual options live under Advanced.
+function wizardStepConfirm() {
   const single = wizard.count === 1;
-  return `<span class="eyebrow">Step 3 of 4</span>
-    <h3>Fixtures each week</h3>
-    <p class="wizard-hint">How many fixtures should your mates predict each week? You can change this — and pick the fixtures yourself — every week.</p>
-    <div class="fixture-count" data-fixture-count>
-      <span>Fixtures each week</span>
-      <div class="count-stepper">
-        <button type="button" data-count-step="-1" aria-label="Fewer fixtures">−</button>
-        <b data-count-value>${wizard.count}</b>
-        <button type="button" data-count-step="1" aria-label="More fixtures">＋</button>
+  const scope = wizard.competitions.length > 1
+    ? "your selected competitions"
+    : escapeHTML(competitionMeta(wizard.competitions[0]).short);
+  return `<span class="eyebrow">Step 2 of 2</span>
+    <h3>Confirm your league</h3>
+    <p class="wizard-hint">Your league will run on the standard weekly format:</p>
+    <ul class="format-summary">
+      <li><b data-format-count>${wizard.count}</b> fixtures each week</li>
+      <li>You pick the fixtures yourself, every week</li>
+      <li>Drawn from ${scope}</li>
+    </ul>
+    <details class="wizard-advanced" data-wizard-advanced${wizard.advancedOpen ? " open" : ""}>
+      <summary>Advanced settings</summary>
+      <div class="wizard-advanced-body">
+        <div class="fixture-count" data-fixture-count>
+          <span>Fixtures each week</span>
+          <div class="count-stepper">
+            <button type="button" data-count-step="-1" aria-label="Fewer fixtures">−</button>
+            <b data-count-value>${wizard.count}</b>
+            <button type="button" data-count-step="1" aria-label="More fixtures">＋</button>
+          </div>
+          <input type="hidden" name="fixtureLimit" value="${wizard.count}">
+        </div>
+        ${single ? `<label class="wizard-confirm">
+          <input type="checkbox" data-wizard-confirm-single${wizard.confirmSingle ? " checked" : ""}>
+          <span>Short week — just one fixture to call!</span>
+        </label>` : ""}
       </div>
-      <input type="hidden" name="fixtureLimit" value="${wizard.count}">
-    </div>
-    ${single ? `<label class="wizard-confirm">
-      <input type="checkbox" data-wizard-confirm-single${wizard.confirmSingle ? " checked" : ""}>
-      <span>Short week — just one fixture to call!</span>
-    </label>` : ""}
+    </details>
     <div class="wizard-actions">
       <button class="secondary" type="button" data-wizard-back>Back</button>
       <button class="primary" type="button" data-wizard-next ${wizard.busy ? "disabled" : ""}>${wizard.busy ? "Creating…" : "Create league"}</button>
     </div>`;
 }
 
+// The outcome, presented after creation (and after the recovery moment).
 function wizardStepShare() {
-  return `<span class="eyebrow">Step 4 of 4</span>
+  return `<span class="eyebrow">League created</span>
     <h3>Share your code</h3>
     <p class="wizard-hint">Anyone with this code can join ${escapeHTML(wizard.name || "your league")}.</p>
     <div class="league-code wizard-code"><span>League code</span><strong>${escapeHTML(wizard.code)}</strong></div>
@@ -5926,9 +5942,8 @@ function wizardStepShare() {
 }
 
 const WIZARD_VIEWS = {
-  name: wizardStepName,
-  competitions: wizardStepCompetitions,
-  count: wizardStepCount,
+  details: wizardStepDetails,
+  confirm: wizardStepConfirm,
   share: wizardStepShare,
 };
 
@@ -5950,10 +5965,12 @@ function createLeagueCard() {
 
 /** Validates the step the host is on. Returns an error string, or "". */
 function wizardStepError() {
-  if (wizard.step === "name" && !wizard.name.trim()) return "Give your league a name";
-  if (wizard.step === "competitions" && !wizard.competitions.length) return "Choose at least one competition";
+  if (wizard.step === "details") {
+    if (!wizard.name.trim()) return "Give your league a name";
+    if (!wizard.competitions.length) return "Choose at least one competition";
+  }
   // A one-fixture week is legal, but it is unusual enough to be worth a nod.
-  if (wizard.step === "count" && wizard.count === 1 && !wizard.confirmSingle) {
+  if (wizard.step === "confirm" && wizard.count === 1 && !wizard.confirmSingle) {
     return "Short week — just one fixture to call! Tick to confirm.";
   }
   return "";
@@ -5964,7 +5981,8 @@ async function advanceWizard() {
   if (error) { wizard.error = error; render(); return; }
   wizard.error = "";
   const index = WIZARD_STEPS.indexOf(wizard.step);
-  if (wizard.step !== "count") {
+  // Only the final input step ("confirm") creates; earlier steps just advance.
+  if (wizard.step !== "confirm") {
     wizard.step = WIZARD_STEPS[index + 1];
     render();
     return;
@@ -6095,35 +6113,44 @@ function leagueSettings(state, isOwner) {
 
 function leagueView() {
   const joinDefault = inviteCode && !leagueCodes.includes(inviteCode) ? inviteCode : "";
-  const controls = `<div class="league-actions">
+  const state = leagueState;
+  const isOwner = state && !state.error && state.owner === uid();
+
+  // v1.8 §1: the management surface — create, manual join, restore, and (for
+  // the active league) administration — lives behind the "Manage leagues"
+  // entry so the table leads. The one-step invite join sheet is a separate,
+  // unchanged route and never comes through here.
+  const managePanel = () => `<div class="manage-panel" data-manage-panel>
     ${createLeagueCard()}
     <form class="league-form" data-join-league>
-      <span class="eyebrow">Got an invitation?</span><h3>Join a league</h3>
+      <span class="eyebrow">Got a code?</span><h3>Join a league</h3>
       <input name="leagueCode" maxlength="6" value="${joinDefault}" placeholder="ABC234" required>
       <label class="field-label" for="joinNick">Your name in this league</label>
       <input id="joinNick" name="joinNick" maxlength="24" value="${escapeHTML(playerName)}" placeholder="Your name" required>
       <p class="field-hint">This is what your mates will see on the table.</p>
       <button class="primary wide" type="submit">Join league</button>
     </form>
+    <form class="restore-card" data-restore>
+      <div><strong>Returning on another device?</strong><p>Enter your three-word recovery code to restore your identity, leagues and standings.</p></div>
+      <input name="recovery" placeholder="amber-score-oracle">
+      <button class="secondary" type="submit">Restore</button>
+    </form>
+    ${leagueCodes.length && state && !state.error ? leagueSettings(state, isOwner) : ""}
   </div>`;
-  // The credential never appears on a league screen. This is the returning-
-  // player input only; viewing your own code lives behind the Profile avatar.
-  const restore = `<form class="restore-card" data-restore>
-    <div><strong>Returning on another device?</strong><p>Enter your three-word recovery code to restore your identity, leagues and standings.</p></div>
-    <input name="recovery" placeholder="amber-score-oracle">
-    <button class="secondary" type="submit">Restore</button>
-  </form>`;
+
+  // No leagues yet: management IS the screen — there is no table to lead with.
   if (!leagueCodes.length) {
-    return `<div class="section-head"><div><span class="eyebrow">Private predictor leagues</span><h2>Play against your mates</h2></div></div>${flash()}${controls}${restore}`;
+    return `<div class="section-head"><div><span class="eyebrow">Private predictor leagues</span><h2>Manage leagues</h2></div></div>${flash()}${managePanel()}`;
   }
-  const state = leagueState;
-  const isOwner = state && !state.error && state.owner === uid();
+
+  // Manage view: the standings switcher stays; the panel replaces the table.
+  if (leagueManageOpen) {
+    return `<div class="section-head"><div><span class="eyebrow">Private predictor leagues</span><h2>Manage leagues</h2></div><button class="secondary" type="button" data-manage-close>Back to table</button></div>${flash()}${leagueSwitcher()}${managePanel()}`;
+  }
+
+  // Default: the current table is the first substantial object.
   const supportsRounds = leagueSupportsRounds(state);
-  // A PLACEHOLDER, never a built panel. Any global render while Season is
-  // selected used to rebuild the whole heavy Season panel synchronously — which
-  // is what made a pill switch cost four seconds even after the pill itself was
-  // acknowledged. The panel is mounted after this shell paints, from a retained
-  // DOM node or progressively.
+  // A PLACEHOLDER, never a built panel. Mounted after this shell paints.
   const inner = `<div class="league-results" data-league-results></div>`;
   const content = !state
     ? `<div class="empty"><strong>Loading league...</strong></div>`
@@ -6135,9 +6162,8 @@ function leagueView() {
           ${supportsRounds ? `${roundToggle()}<div class="picker-island" data-picker-island></div>` : ""}
           <div class="slate-slot">${hostSlateControl(state)}</div>
           ${inner}
-          ${leagueSettings(state, isOwner)}
         </section>`;
-  return `<div class="section-head"><div><span class="eyebrow">Private predictor leagues</span><h2>League table</h2></div></div>${flash()}${leagueSwitcher()}${content}${controls}${restore}`;
+  return `<div class="section-head"><div><span class="eyebrow">Private predictor leagues</span><h2>League table</h2></div></div>${flash()}${leagueSwitcher()}${content}<div class="league-actions-foot"><button class="secondary wide" type="button" data-manage-open>Manage leagues</button></div>`;
 }
 
 function rulesView() {
@@ -6917,6 +6943,7 @@ async function handleWizardClick(event) {
   }
   if (event.target.closest("[data-wizard-done]")) {
     closeWizard();
+    leagueManageOpen = false; // land on the freshly-created league's table
     render();
     return true;
   }
@@ -7078,6 +7105,7 @@ document.addEventListener("click", async (event) => {
     if (wizard) {
       wizard.count = Math.max(MIN_FIXTURE_COUNT, Math.min(MAX_FIXTURE_COUNT, wizard.count + delta));
       if (wizard.count !== 1) wizard.confirmSingle = false;
+      wizard.advancedOpen = true; // the stepper lives under Advanced; keep it open
       wizard.error = "";
       render();
       return;
@@ -7088,6 +7116,13 @@ document.addEventListener("click", async (event) => {
     const next = Math.max(MIN_FIXTURE_COUNT, Math.min(MAX_FIXTURE_COUNT, Number(value.textContent) + delta));
     value.textContent = next;
     hidden.value = next;
+    return;
+  }
+  if (event.target.closest("[data-manage-open]")) { leagueManageOpen = true; render(); return; }
+  if (event.target.closest("[data-manage-close]")) {
+    leagueManageOpen = false;
+    if (wizard) closeWizard();
+    render();
     return;
   }
   if (await handleWizardClick(event)) return;
@@ -7397,9 +7432,17 @@ async function saveNotificationPrefs() {
   }
 }
 
+// Advanced settings is a native <details>; sync its open state so a re-render
+// (e.g. a fixture-count step) keeps it as the host left it. `toggle` does not
+// bubble, hence capture.
+document.addEventListener("toggle", (event) => {
+  if (wizard && event.target.matches?.("[data-wizard-advanced]")) wizard.advancedOpen = event.target.open;
+}, true);
+
 document.addEventListener("change", (event) => {
   const competition = event.target.closest("[data-wizard-competition]");
   if (competition && wizard) {
+    readWizardInputs(); // name now shares this step — preserve it across the re-render
     const code = competition.dataset.wizardCompetition;
     wizard.competitions = competition.checked
       ? availableCompetitions().filter((entry) => entry === code || wizard.competitions.includes(entry))

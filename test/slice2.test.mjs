@@ -254,15 +254,22 @@ test("S1 · the season browser is deleted, and its honest empty state lives on M
 
 // --- L1 -------------------------------------------------------------------
 
-test("L1 · the table and segments come before administration", () => {
+test("L1 · the table leads; administration is behind Manage leagues", () => {
   const view = sourceOf("leagueView");
-  const card = view.slice(view.indexOf('<section class="league-card">'));
-  assert.ok(card.indexOf("roundToggle()") < card.indexOf("${inner}"));
-  assert.ok(card.indexOf("${inner}") < card.indexOf("leagueSettings(state, isOwner)"));
+  // The table card, up to the results placeholder.
+  const card = view.slice(view.indexOf('<section class="league-card">'), view.indexOf("${inner}"));
+  assert.ok(card.indexOf("roundToggle()") < card.indexOf("slate-slot"));
+  // v1.8 §1: the table card carries NO administration — it moved behind Manage
+  // leagues (host-selected fixtures via hostSlateControl stay with the table).
   for (const admin of ["data-share-league", "data-league-nick", "data-delete-league",
-    "weeklyCountControl", "league-code"]) {
-    assert.ok(!card.includes(admin), `${admin} is still above the table`);
+    "weeklyCountControl", "league-code", "leagueSettings"]) {
+    assert.ok(!card.includes(admin), `${admin} is on the table card`);
   }
+  assert.ok(card.includes("hostSlateControl(state)"), "host-selected fixtures must stay with the table");
+  // Administration + create/join/restore live in the manage panel, reached by a
+  // clearly-labelled entry; the default table view offers that entry.
+  assert.match(view, /data-manage-open/);
+  assert.match(view, /leagueSettings\(state, isOwner\)/);
 });
 
 test("L1 · the collapse holds exactly the five administrative controls", () => {

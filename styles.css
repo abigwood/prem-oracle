@@ -1690,6 +1690,21 @@ body.picker-open { overflow: hidden; }
 }
 .wizard-actions { display: flex; gap: 9px; margin-top: 15px; }
 .wizard-actions button { flex: 1; }
+
+/* v1.8 §2 two-step creation: standard-format summary + Advanced disclosure. */
+.format-summary { margin: 10px 0 4px; padding-left: 18px; color: var(--ink); font-size: .86rem; line-height: 1.7; }
+.format-summary b { color: var(--purple); }
+.wizard-advanced { margin: 12px 0 2px; border-top: 1px solid var(--line); padding-top: 10px; }
+.wizard-advanced > summary { cursor: pointer; color: var(--muted); font-size: .78rem; font-weight: 800; list-style: none; }
+.wizard-advanced > summary::-webkit-details-marker { display: none; }
+.wizard-advanced > summary::before { content: "▸ "; }
+.wizard-advanced[open] > summary::before { content: "▾ "; }
+.wizard-advanced-body { margin-top: 10px; }
+
+/* v1.8 §1 Manage leagues: the management surface, and the entry that opens it. */
+.manage-panel { display: flex; flex-direction: column; gap: 13px; margin-top: 13px; }
+.league-actions-foot { margin: 16px 0 4px; }
+.section-head [data-manage-close] { flex: 0 0 auto; }
 .wizard-actions .wide { flex: 1 1 100%; }
 .wizard-cancel {
   width: 100%;

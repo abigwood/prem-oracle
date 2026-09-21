@@ -729,16 +729,15 @@ class CompetitionAppTests(unittest.TestCase):
         self.assertIn("function availableCompetitions()", self.app.replace("const availableCompetitions = ()", "function availableCompetitions()"))
 
     def test_competitions_are_checkboxes_not_an_either_or(self):
-        # v1.5: the checkboxes moved onto step 2 of the wizard, unchanged in kind.
-        self.assertIn("function wizardStepCompetitions()", self.app)
+        # v1.8 §2: the checkboxes live on step 1 (details), unchanged in kind.
+        self.assertIn("function wizardStepDetails()", self.app)
         self.assertIn('name="competitions"', self.app)
         self.assertIn("data-wizard-competition", self.app)
         self.assertIn('role="group"', self.app)
         self.assertNotIn('type="radio" name="competition"', self.app)
-        # Scoped to the competition step: the weekly rule IS a one-of-N choice
-        # and is legitimately a radiogroup, but competitions never are.
-        step = self.app[self.app.index("function wizardStepCompetitions()"):]
-        step = step[:step.index("function wizardStepCount()")]
+        # Scoped to the details step: competitions are never a one-of-N choice.
+        step = self.app[self.app.index("function wizardStepDetails()"):]
+        step = step[:step.index("function wizardStepConfirm()")]
         self.assertNotIn('role="radiogroup"', step)
         self.assertIn('type="checkbox"', step)
         self.assertIn(".competition-choice", self.css)
@@ -1202,14 +1201,20 @@ class WeeklyLoopTests(unittest.TestCase):
         for source in (self.app, self.html, self.css):
             self.assertNotIn("Start a competition", source)
 
-    def test_the_wizard_is_four_named_steps(self):
-        self.assertIn('const WIZARD_STEPS = ["name", "competitions", "count", "share"];', self.app)
-        for step in ("wizardStepName", "wizardStepCompetitions", "wizardStepCount", "wizardStepShare"):
+    def test_the_wizard_is_two_input_steps(self):
+        # v1.8 §2: two input steps (details, confirm) then the share outcome.
+        self.assertIn('const WIZARD_STEPS = ["details", "confirm", "share"];', self.app)
+        self.assertIn('const WIZARD_INPUT_STEPS = ["details", "confirm"];', self.app)
+        for step in ("wizardStepDetails", "wizardStepConfirm", "wizardStepShare"):
             self.assertIn(f"function {step}()", self.app, step)
         self.assertIn("<h3>Name your league</h3>", self.app)
-        self.assertIn("<h3>Choose competitions</h3>", self.app)
-        self.assertIn("<h3>Fixtures each week</h3>", self.app)
+        self.assertIn("<h3>Confirm your league</h3>", self.app)
         self.assertIn("<h3>Share your code</h3>", self.app)
+        self.assertIn("Step 1 of 2", self.app)
+        self.assertIn("Step 2 of 2", self.app)
+        # The old 4-step shape is gone.
+        for gone in ("wizardStepName", "wizardStepCompetitions", "wizardStepCount", "Step 1 of 4"):
+            self.assertNotIn(gone, self.app, gone)
         self.assertIn(".wizard-progress", self.css)
 
     def test_the_competition_step_uses_the_green_selected_state(self):
@@ -1234,15 +1239,19 @@ class WeeklyLoopTests(unittest.TestCase):
         self.assertGreaterEqual(round(contrast("#064d41", "#eaf7f1"), 2), 4.5)
         self.assertGreaterEqual(round(contrast("#0a7f58", "#ffffff"), 2), 3.0)
 
-    def test_step_three_offers_the_count_and_nothing_else(self):
-        # v1.5j: the rule list is gone from the product entirely.
-        step = self.app[self.app.index("function wizardStepCount()"):]
+    def test_confirm_step_puts_the_count_under_advanced(self):
+        # v1.8 §2: the confirm step shows the standard format; the fixture count
+        # is an Advanced setting, and Create lives here. The rule list is gone.
+        step = self.app[self.app.index("function wizardStepConfirm()"):]
         step = step[:step.index("function wizardStepShare()")]
         self.assertIn("data-count-step", step)
-        self.assertIn("How many fixtures should your mates predict each week?", step)
-        self.assertIn("You can change this — and pick the fixtures yourself — every week.", step)
+        self.assertIn("Advanced settings", step)
+        self.assertIn("format-summary", step)             # the standard-format summary
+        self.assertIn("You pick the fixtures yourself, every week", step)
         self.assertIn('"Create league"}</button>', step)
-        # The count control comes first, before anything else on the step.
+        # Standard format is shown before Advanced; the count sits under Advanced.
+        self.assertLess(step.index("format-summary"), step.index("wizard-advanced"))
+        self.assertLess(step.index("wizard-advanced"), step.index("data-count-step"))
         self.assertLess(step.index("data-fixture-count"), step.index("wizard-actions"))
         # No rule choice survives anywhere: no markup, no model, no styles.
         for gone in ("data-wizard-rule", "ruleOptions", "wizardOptionSelected",
@@ -1294,9 +1303,10 @@ class WeeklyLoopTests(unittest.TestCase):
         control = control[:control.index("function leagueView()")]
         self.assertIn('if (method === "allEligible" || method === "allCompetition") return "";', control)
 
-    def test_step_two_copy_says_select(self):
-        self.assertIn("Select everything your league should draw fixtures from.", self.app)
-        self.assertNotIn("Tick everything your league should draw fixtures from.", self.app)
+    def test_details_step_names_the_competition_choice(self):
+        # v1.8 §2: competition selection lives on step 1 (details).
+        self.assertIn("Which competition your league draws fixtures from.", self.app)
+        self.assertNotIn("Select everything your league should draw fixtures from.", self.app)
 
     def test_a_one_fixture_week_soft_confirms(self):
         self.assertIn("Short week — just one fixture to call!", self.app)
@@ -2709,13 +2719,12 @@ class NamesAndViewportTests(unittest.TestCase):
         self.assertIn("flex: 1;", lock)
         self.assertIn("margin: 0 !important;", lock)
 
-        # The slot sits above the results and the settings collapse, which is
-        # the whole point: line-up control is deadline-bound and belongs beside
-        # Weekly, while invite and rename are administration (D4).
-        # ${inner} is the results placeholder; data-league-results is declared
-        # above the template, so the template's own order is what to compare.
+        # The slot leads the results in the table card. (v1.8 §1: administration
+        # moved behind Manage leagues, so the table card no longer carries it.)
         self.assertLess(view.index("slate-slot"), view.index("${inner}"))
-        self.assertLess(view.index("slate-slot"), view.index("leagueSettings(state, isOwner)"))
+        card = view[view.index('<section class="league-card">'):view.index("${inner}")]
+        self.assertNotIn("leagueSettings", card)                # admin not in the table card
+        self.assertIn("leagueSettings(state, isOwner)", view)   # it lives in the manage panel
         settings = self.app[self.app.index("function leagueSettings(state, isOwner)"):]
         settings = settings[:settings.index("\n}")]
         for control in ("league-code", "data-share-league", "data-league-nick",
@@ -3075,6 +3084,72 @@ class RecoveryOnboardingTests(unittest.TestCase):
     def test_credential_is_never_in_diagnostics(self):
         diag = self._fn("diagnosticsText")
         self.assertNotIn("recovery", diag.lower())
+
+
+class ManageLeaguesAndCreationTests(unittest.TestCase):
+    """v1.8 §1 League-table-first + Manage leagues, §2 two-step creation."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = (ROOT / "app.js").read_text()
+        cls.css = (ROOT / "styles.css").read_text()
+
+    def _fn(self, name):
+        start = self.app.index(f"function {name}(")
+        end = self.app.index("\n}", start) + 2
+        return self.app[start:end]
+
+    def test_manage_surface_is_behind_a_labelled_entry(self):
+        view = self._fn("leagueView")
+        self.assertIn("data-manage-open", view)          # opens the surface
+        self.assertIn("data-manage-close", view)         # back to the table
+        self.assertIn("manage-panel", view)
+        self.assertIn(">Manage leagues<", view)          # clearly labelled
+        self.assertIn("let leagueManageOpen = false;", self.app)
+
+    def test_table_card_carries_no_create_join_restore_or_admin(self):
+        view = self._fn("leagueView")
+        card = view[view.index('<section class="league-card">'):view.index("${inner}")]
+        for behind in ("createLeagueCard", "data-join-league", "data-restore",
+                       "leagueSettings", "data-delete-league"):
+            self.assertNotIn(behind, card, behind)
+        # host-selected fixtures stay with the table.
+        self.assertIn("hostSlateControl(state)", card)
+
+    def test_manage_open_close_handlers_exist(self):
+        self.assertIn('event.target.closest("[data-manage-open]")', self.app)
+        self.assertIn('event.target.closest("[data-manage-close]")', self.app)
+        self.assertIn("leagueManageOpen = true;", self.app)
+        self.assertIn("leagueManageOpen = false;", self.app)
+
+    def test_two_step_creation_defaults_and_advanced(self):
+        self.assertIn('const WIZARD_STEPS = ["details", "confirm", "share"];', self.app)
+        self.assertIn("count: DEFAULT_FIXTURE_COUNT", self._fn("openWizard"))
+        self.assertIn("const DEFAULT_FIXTURE_COUNT = 6;", self.app)
+        confirm = self._fn("wizardStepConfirm")
+        self.assertIn("Advanced settings", confirm)
+        self.assertIn("data-count-step", confirm)
+        self.assertLess(confirm.index("format-summary"), confirm.index("wizard-advanced"))
+
+    def test_advanced_disclosure_state_is_synced(self):
+        # Native <details> toggle is captured so a re-render keeps it as left.
+        self.assertIn('event.target.matches?.("[data-wizard-advanced]")', self.app)
+        self.assertIn("wizard.advancedOpen = event.target.open", self.app)
+        self.assertIn(".wizard-advanced", self.css)
+        self.assertIn(".format-summary", self.css)
+
+    def test_creation_only_creates_on_the_confirm_step(self):
+        adv = self._fn("advanceWizard")
+        self.assertIn('if (wizard.step !== "confirm") {', adv)
+        # recovery onboarding is surfaced after create, before the invite step.
+        self.assertIn("openRecoveryOnboarding(response.recovery, null)", adv)
+
+    def test_invite_journey_is_not_routed_through_manage_or_creation(self):
+        # The join sheet never toggles the management surface.
+        self.assertNotIn("leagueManageOpen", self._fn("submitJoinSheet"))
+        self.assertNotIn("leagueManageOpen", self._fn("openJoinSheet"))
+        # Invite links still open the one-step sheet at launch.
+        self.assertIn("if (joinInvite && API) openJoinSheet(joinInvite)", self.app)
 
 
 if __name__ == "__main__":

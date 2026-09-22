@@ -103,6 +103,21 @@
     </form>
   </dialog>
 
+  <dialog id="notifyDialog" aria-labelledby="notifyTitle">
+    <form method="dialog" id="notifyForm">
+      <div class="dialog-head">
+        <div>
+          <span class="eyebrow">Nice pick</span>
+          <h2 id="notifyTitle">Want a kickoff reminder?</h2>
+        </div>
+        <button class="icon-button" value="cancel" aria-label="Close" data-notify-dismiss>×</button>
+      </div>
+      <p class="field-hint">We can nudge you before kickoff so you never miss a week. You choose which competitions — change it any time in your profile.</p>
+      <button class="primary wide" type="button" data-notify-allow>Remind me</button>
+      <button class="link-quiet" type="button" value="cancel" data-notify-later>Not now</button>
+    </form>
+  </dialog>
+
   <dialog id="nickDialog">
     <form method="dialog" id="nickForm">
       <div class="dialog-head">

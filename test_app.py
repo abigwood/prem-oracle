@@ -3152,5 +3152,74 @@ class ManageLeaguesAndCreationTests(unittest.TestCase):
         self.assertIn("if (joinInvite && API) openJoinSheet(joinInvite)", self.app)
 
 
+class ContextualNotificationAskTests(unittest.TestCase):
+    """v1.8 §4: the notification ask is contextual, one-time and opt-in only."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = (ROOT / "app.js").read_text()
+        cls.html = (ROOT / "index.html").read_text()
+        cls.worker = (ROOT / "worker/src/worker.js").read_text()
+
+    def _fn(self, name):
+        start = self.app.index(f"function {name}(")
+        end = self.app.index("\n}", start) + 2
+        return self.app[start:end]
+
+    def test_launch_never_requests_permission(self):
+        setup = self._fn("setupNativePushNotifications")
+        self.assertNotIn("requestPermissions", setup)   # launch must not ask
+        self.assertIn('permission.receive === "granted"', setup)  # only registers if already granted
+
+    def test_the_only_permission_request_is_remind_me(self):
+        # requestPermissions appears exactly once in the whole client, in
+        # requestReminders (the Remind me action).
+        self.assertEqual(self.app.count("requestPermissions"), 1)
+        self.assertIn("requestPermissions", self._fn("requestReminders"))
+
+    def test_ask_is_gated_native_prompt_and_at_most_once(self):
+        fn = self._fn("maybeOfferReminders")
+        self.assertIn('localStorage.getItem(STORAGE.notifyAsk) === "shown"', fn)  # at most once
+        self.assertIn("isNativePlatform", fn)                                     # native only
+        self.assertIn('permission.receive !== "prompt"', fn)                      # not granted/denied
+        self.assertIn('localStorage.setItem(STORAGE.notifyAsk, "shown")', fn)     # marked on show
+        # The check is wrapped so a native failure is quiet.
+        self.assertIn("try { permission = await push.checkPermissions(); } catch { return; }", fn)
+
+    def test_a_saved_prediction_triggers_the_offer_after_it_settles(self):
+        save = self._fn("savePick")
+        self.assertIn('setFlash("Pick saved.");', save)
+        self.assertIn("scheduleReminderOffer();", save)
+        self.assertLess(save.index('setFlash("Pick saved.")'), save.index("scheduleReminderOffer()"))
+        self.assertIn("setTimeout(", self._fn("scheduleReminderOffer"))  # lets the save settle
+
+    def test_dialog_offers_exactly_remind_me_and_not_now_and_is_labelled(self):
+        dlg = self.html[self.html.index('<dialog id="notifyDialog"'):
+                        self.html.index("</dialog>", self.html.index('<dialog id="notifyDialog"'))]
+        self.assertIn("data-notify-allow", dlg)      # Remind me
+        self.assertIn("data-notify-later", dlg)      # Not now
+        self.assertIn("data-notify-dismiss", dlg)    # the ×
+        self.assertIn("aria-labelledby", dlg)        # accessible name
+        self.assertIn(">Remind me<", dlg)
+        self.assertIn(">Not now<", dlg)
+
+    def test_dismissal_behaves_like_not_now(self):
+        # Only the allow control requests; later/dismiss just close.
+        self.assertIn('event.target.closest("[data-notify-allow]")) { requestReminders();', self.app)
+        self.assertIn('[data-notify-later], [data-notify-dismiss]', self.app)
+
+    def test_profile_preferences_and_server_are_unchanged(self):
+        # Existing per-competition prefs under Profile remain.
+        self.assertIn("function renderNotificationPrefs()", self.app)
+        self.assertIn('id="notificationPrefs"', self.html)
+        # No new notification endpoint or broadened type on the worker; the
+        # client still posts only the existing push token.
+        self.assertIn("/push-token", self.app)
+        # No analytics / tracking / funnel added by this slice.
+        for banned in ("analytics", "gtag", "sendBeacon", "funnel", "trackEvent"):
+            self.assertNotIn(banned, self._fn("maybeOfferReminders"))
+            self.assertNotIn(banned, self._fn("requestReminders"))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -25,6 +25,7 @@ const STORAGE = {
   roundStates: "prem_oracle_round_states",
   leagueSettings: "prem_oracle_league_settings",
   pickWeeks: "prem_oracle_pick_weeks",
+  notifyAsk: "prem_oracle_notify_ask", // v1.8 §4: the contextual ask, shown at most once
 };
 
 function isNativeApp() {
@@ -7297,6 +7298,9 @@ async function savePick(matchId, p1, p2) {
     if (API) await api("/pick", { uid: uid(), nickname: playerName, matchId, p1, p2 });
     localStorage.setItem(STORAGE.picks, JSON.stringify(picks));
     setFlash("Pick saved.");
+    // v1.8 §4: a saved prediction is demonstrated intent — offer reminders once,
+    // after the save settles. No-op on web / when already shown / non-prompt.
+    scheduleReminderOffer();
   } catch (error) {
     setFlash(error.message, "error");
     delete picks[matchId];
@@ -7696,6 +7700,16 @@ document.getElementById("recoveryDialog").addEventListener("close", () => {
   restoreViewport();
 });
 
+// v1.8 §4: "Remind me" is the only path to the native permission dialog. "Not
+// now", the × and any dismissal (Escape, backdrop) all close without asking —
+// the shown flag was already set, so nothing re-pressures the player.
+document.getElementById("notifyDialog").addEventListener("click", (event) => {
+  if (event.target.closest("[data-notify-allow]")) { requestReminders(); return; }
+  if (event.target.closest("[data-notify-later], [data-notify-dismiss]")) {
+    document.getElementById("notifyDialog").close();
+  }
+});
+
 document.getElementById("profileButton").addEventListener("click", () => {
   document.getElementById("playerName").value = playerName;
   renderNotificationPrefs();
@@ -7841,11 +7855,57 @@ async function setupNativePushNotifications() {
         render({ scrollTop: true });
       }
     });
-    let permission = await push.checkPermissions();
-    if (permission.receive === "prompt") permission = await push.requestPermissions();
+    // v1.8 §4: launch never asks. If permission is ALREADY granted we register
+    // straight away (no explanation); "prompt" is deferred to the contextual
+    // ask after the first saved prediction; "denied" is left alone.
+    const permission = await push.checkPermissions();
     if (permission.receive === "granted") await push.register();
   } catch {
     // Native notification permission is optional; the app remains fully usable.
+  }
+}
+
+// v1.8 §4 contextual notification ask.
+//
+// Shown at most once, only after a prediction has been saved, only on native,
+// and only when permission is still "prompt": granted registers at launch with
+// no explanation, and denied is never pressured again. The native iOS dialog is
+// reachable ONLY from the explicit "Remind me" action (requestReminders).
+let reminderOfferScheduled = false;
+
+function scheduleReminderOffer() {
+  if (reminderOfferScheduled) return;
+  if (localStorage.getItem(STORAGE.notifyAsk) === "shown") return;
+  reminderOfferScheduled = true;
+  // Let the save visibly settle (the "Saved" chip and flash) before we ask.
+  setTimeout(() => { reminderOfferScheduled = false; maybeOfferReminders(); }, 900);
+}
+
+async function maybeOfferReminders() {
+  if (localStorage.getItem(STORAGE.notifyAsk) === "shown") return;   // at most once
+  const cap = window.Capacitor;
+  const push = window.capacitorPushNotifications?.PushNotifications || cap?.Plugins?.PushNotifications;
+  if (!cap?.isNativePlatform?.() || !push) return;                   // web / no plugin → quiet
+  let permission;
+  try { permission = await push.checkPermissions(); } catch { return; }
+  if (permission.receive !== "prompt") return;                      // granted or denied → don't ask
+  // Marked shown the moment it appears, so a dismissal is never re-pressured.
+  localStorage.setItem(STORAGE.notifyAsk, "shown");
+  const dialog = document.getElementById("notifyDialog");
+  if (dialog && !dialog.open) dialog.showModal();
+}
+
+// The ONLY path that may trigger the native iOS permission dialog.
+async function requestReminders() {
+  const dialog = document.getElementById("notifyDialog");
+  if (dialog) dialog.close();
+  const push = window.capacitorPushNotifications?.PushNotifications || window.Capacitor?.Plugins?.PushNotifications;
+  if (!push) return;
+  try {
+    const permission = await push.requestPermissions();
+    if (permission.receive === "granted") await push.register();
+  } catch {
+    // Denied or unavailable — prediction entry is unaffected.
   }
 }
 

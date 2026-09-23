@@ -283,6 +283,7 @@ function island({ buildMs = 0 } = {}) {
     const pulsingStatus = (m) => '<p class="view-loading is-pulsing">' + m + "</p>";
     const roundBanner = () => "<rbanner>";
     const roundTableHtml = () => "<roundtable>";
+    const scheduleRoundReview = () => {};   // v1.8 §6 rating hook — inert in this paint harness
 
     ${lift("const weekLabelFor = (period) => {")}
     const RETAINED_PANEL_LIMIT = 8;

@@ -1,6 +1,10 @@
 # Prem Oracle
 
-A Premier League 2026/27 score predictor based on the SW19 Oracle league model.
+A private weekly score-prediction game you play with mates through invitations.
+Each week the league host picks the fixtures; players predict the final scores
+before kick-off (predictions lock at kick-off), and the league table settles once
+the results are in. Built on the SW19 Oracle league model over the 2026/27
+top-flight season.
 
 ## Prediction scope
 

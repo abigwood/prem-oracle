@@ -3229,5 +3229,90 @@ class ContextualNotificationAskTests(unittest.TestCase):
             self.assertNotIn(banned, self._fn("requestReminders"))
 
 
+class AcquisitionAndRatingTests(unittest.TestCase):
+    """v1.8 §6: aligned acquisition promise + restrained native rating request."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = (ROOT / "app.js").read_text()
+        cls.manifest = (ROOT / "manifest.webmanifest").read_text()
+        cls.readme = (ROOT / "README.md").read_text()
+        cls.store_doc = (ROOT / "docs/appstore-v1.8-copy.md").read_text()
+
+    def _fn(self, name):
+        start = self.app.index(f"function {name}(")
+        end = self.app.index("\n}", start) + 2
+        return self.app[start:end]
+
+    # --- the aligned promise --------------------------------------------------
+
+    def test_all_surfaces_lead_with_the_same_promise(self):
+        promise = "private weekly score-prediction game"
+        onboarding = self._fn("onboardingState")
+        for surface, text in (("onboarding", onboarding), ("manifest", self.manifest),
+                              ("README", self.readme), ("app-store doc", self.store_doc)):
+            self.assertIn(promise, text, f"{surface} must lead with the shared promise")
+            self.assertIn("mates", text, surface)
+        # Invitations are named on the outward-facing surfaces.
+        for text in (self.manifest, self.readme, self.store_doc):
+            self.assertTrue("invit" in text.lower())
+
+    def test_promise_is_truthful_about_the_weekly_mechanics(self):
+        # host-selected weekly fixtures, kick-off locks and league tables.
+        doc = self.store_doc.lower()
+        self.assertIn("host", doc)
+        self.assertIn("kick-off", doc)
+        self.assertIn("table", doc)
+
+    def test_app_store_metadata_names_no_real_competition_club_or_broadcaster(self):
+        blob = self.store_doc.lower()
+        for banned in ("premier league", "epl", "champions league", "efl championship",
+                       "bundesliga", "la liga", "serie a",
+                       "arsenal", "chelsea", "liverpool", "tottenham", "man city",
+                       "man united", "newcastle",
+                       "sky sports", "tnt", "bbc", "amazon", "prime video", "itv"):
+            self.assertNotIn(banned, blob, f"App Store copy must stay neutral: '{banned}'")
+        # And it is explicitly a proposal, not published metadata.
+        self.assertIn("DO NOT PUBLISH", self.store_doc)
+
+    # --- the rating request ---------------------------------------------------
+
+    def test_rating_key_is_scoped_to_identity_and_version(self):
+        self.assertIn("const ratingAskedKey = () => `${STORAGE.ratingAsked}:${uid()}:${APP_BUILD}`;", self.app)
+
+    def test_rating_is_only_offered_after_a_settled_participated_week(self):
+        sched = self._fn("scheduleRoundReview")
+        self.assertIn("!round.complete", sched)                 # fully settled only
+        self.assertIn("participatedInRound(round)", sched)      # took part
+        self.assertIn('localStorage.getItem(ratingAskedKey()) === "asked"', sched)  # at most once
+        self.assertIn("setTimeout(", sched)                     # after the UI stabilises
+        # The ONLY trigger is the settled-week render, gated on completeness.
+        self.assertEqual(self.app.count("scheduleRoundReview(roundState)"), 1)
+        self.assertIn("if (roundState && roundState.complete) scheduleRoundReview(roundState);", self.app)
+
+    def test_rating_uses_native_bridge_and_is_quiet_and_honest(self):
+        fn = self._fn("maybeRequestReview")
+        self.assertIn("isNativePlatform", fn)                   # native only
+        self.assertIn("InAppReview", fn)                        # Apple's native mechanism via the bridge
+        self.assertIn("typeof review.requestReview !== \"function\"", fn)  # feature-detected
+        self.assertIn("await review.requestReview()", fn)
+        self.assertIn("catch { /* system-controlled; continue quietly */ }", fn)
+        self.assertIn('localStorage.setItem(ratingAskedKey(), "asked")', fn)  # marked on attempt
+        # No sentiment gate, no positive-ask, no claim it displayed.
+        for banned in ("enjoy", "love", "positive", "happy", "5 star", "five star"):
+            self.assertNotIn(banned, fn.lower())
+
+    def test_rating_never_triggered_from_launch_join_create_or_predicting(self):
+        for fn in ("savePick", "submitJoinSheet", "advanceWizard", "setupNativePushNotifications"):
+            self.assertNotIn("scheduleRoundReview", self._fn(fn), fn)
+            self.assertNotIn("maybeRequestReview", self._fn(fn), fn)
+
+    def test_rating_adds_no_analytics_or_counters(self):
+        for name in ("scheduleRoundReview", "maybeRequestReview", "participatedInRound"):
+            fn = self._fn(name)
+            for banned in ("analytics", "gtag", "sendBeacon", "funnel", "trackEvent", "counter"):
+                self.assertNotIn(banned, fn.lower(), f"{name}: {banned}")
+
+
 if __name__ == "__main__":
     unittest.main()

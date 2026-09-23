@@ -26,6 +26,7 @@ const STORAGE = {
   leagueSettings: "prem_oracle_league_settings",
   pickWeeks: "prem_oracle_pick_weeks",
   notifyAsk: "prem_oracle_notify_ask", // v1.8 §4: the contextual ask, shown at most once
+  ratingAsked: "prem_oracle_rating_asked", // v1.8 §6: the review request, attempted at most once per identity+version
 };
 
 function isNativeApp() {
@@ -2383,9 +2384,9 @@ function applyLaunchBranch() {
 }
 
 function onboardingState() {
-  return `<div class="section-head"><div><span class="eyebrow">Welcome to Prem Oracle</span><h2>Play against your mates</h2></div></div>
+  return `<div class="section-head"><div><span class="eyebrow">Welcome to Prem Oracle</span><h2>Predict the week with your mates</h2></div></div>
     <div class="launch-card">
-      <p>Set up a private league, choose your competitions and how each week works, then share the code.</p>
+      <p>A private weekly score-prediction game you play with mates. Join by invite or start a league — each week the host picks the fixtures, your predictions lock at kick-off, and the league table settles once the results are in.</p>
       <button class="primary wide" type="button" data-view="league" data-launch-create>Create a league</button>
       <button class="secondary wide" type="button" data-view="league">Join a league</button>
     </div>`;
@@ -3312,6 +3313,10 @@ async function fillPanelProgressively(panel, capture) {
         : `${roundBanner(roundState)}${roundTableHtml(roundState)}<div class="season-share">${shareIconButton(state, "weekly")}</div>`;
     traceTap("chunk", { stage: "week", chars: html.length });
     panel.insertAdjacentHTML("beforeend", html);
+    // v1.8 §6: the completed-week result has now rendered. If it is a fully
+    // settled week the player took part in, this is the only place the rating
+    // request becomes eligible (after a stability delay, at most once).
+    if (roundState && roundState.complete) scheduleRoundReview(roundState);
     return true;
   }
   if (!leagueSupportsRounds(state)) {
@@ -7912,6 +7917,50 @@ async function requestReminders() {
   } catch {
     // Denied or unavailable — prediction entry is unaffected.
   }
+}
+
+// v1.8 §6 restrained rating request.
+//
+// Uses Apple's native review mechanism through a feature-detected Capacitor
+// bridge (the community in-app-review plugin's shape). The SYSTEM decides
+// whether the prompt actually appears; we never gate by sentiment, never ask for
+// a positive rating, and never assume it was shown. Attempted at most once per
+// player identity AND app version, and only after a fully settled week the
+// player took part in has rendered and the interface has stabilised. Never on
+// launch, onboarding, joining, creating or while predicting. Quiet on web /
+// when the bridge is absent or fails.
+let reviewScheduled = false;
+
+// Scoped to identity + version so one account (or an older build) never
+// suppresses another's single eligible ask.
+const ratingAskedKey = () => `${STORAGE.ratingAsked}:${uid()}:${APP_BUILD}`;
+
+function participatedInRound(round) {
+  for (const id of slateIdsOf(round) || []) if (picks[id]) return true;
+  return false;
+}
+
+function scheduleRoundReview(round) {
+  if (reviewScheduled) return;
+  if (!round || !round.complete) return;                          // fully settled week only
+  if (localStorage.getItem(ratingAskedKey()) === "asked") return; // at most once per identity+version
+  if (!participatedInRound(round)) return;                        // must have taken part
+  reviewScheduled = true;
+  // Only after the completed result has rendered and the interface is stable.
+  setTimeout(() => { reviewScheduled = false; maybeRequestReview(); }, 1200);
+}
+
+async function maybeRequestReview() {
+  if (localStorage.getItem(ratingAskedKey()) === "asked") return;
+  const cap = window.Capacitor;
+  const review = window.capacitorInAppReview?.InAppReview || cap?.Plugins?.InAppReview;
+  // Web, no native bridge, or a bridge without the method → stay quiet.
+  if (!cap?.isNativePlatform?.() || !review || typeof review.requestReview !== "function") return;
+  // Marked on attempt: iOS controls whether the prompt shows, so we can neither
+  // know nor claim it appeared — we simply never attempt again for this identity
+  // and version.
+  localStorage.setItem(ratingAskedKey(), "asked");
+  try { await review.requestReview(); } catch { /* system-controlled; continue quietly */ }
 }
 
 // Pull a ?league=CODE invite out of an incoming URL (universal link or web).

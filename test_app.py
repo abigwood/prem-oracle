@@ -3179,12 +3179,20 @@ class ContextualNotificationAskTests(unittest.TestCase):
 
     def test_ask_is_gated_native_prompt_and_at_most_once(self):
         fn = self._fn("maybeOfferReminders")
-        self.assertIn('localStorage.getItem(STORAGE.notifyAsk) === "shown"', fn)  # at most once
-        self.assertIn("isNativePlatform", fn)                                     # native only
-        self.assertIn('permission.receive !== "prompt"', fn)                      # not granted/denied
-        self.assertIn('localStorage.setItem(STORAGE.notifyAsk, "shown")', fn)     # marked on show
+        self.assertIn('localStorage.getItem(notifyAskKey()) === "shown"', fn)  # at most once
+        self.assertIn("isNativePlatform", fn)                                  # native only
+        self.assertIn('permission.receive !== "prompt"', fn)                   # not granted/denied
+        self.assertIn('localStorage.setItem(notifyAskKey(), "shown")', fn)     # marked on show
         # The check is wrapped so a native failure is quiet.
         self.assertIn("try { permission = await push.checkPermissions(); } catch { return; }", fn)
+
+    def test_shown_flag_is_scoped_to_the_player_identity(self):
+        # The flag key includes the uid, so a device restored to a different
+        # account gets its own one-time ask (no cross-identity leak).
+        self.assertIn("const notifyAskKey = () => `${STORAGE.notifyAsk}:${uid()}`;", self.app)
+        # No un-scoped read/write of the bare key survives.
+        for fn in ("maybeOfferReminders", "scheduleReminderOffer"):
+            self.assertNotIn("STORAGE.notifyAsk)", self._fn(fn))
 
     def test_a_saved_prediction_triggers_the_offer_after_it_settles(self):
         save = self._fn("savePick")

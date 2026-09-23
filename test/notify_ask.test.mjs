@@ -18,9 +18,12 @@ function pushStub({ permission = "prompt", grantOnRequest, throwCheck = false, t
   return { calls, plugin };
 }
 
-function harness({ native = true, plugin = null, stored = null } = {}) {
+const scopedKey = (u) => `${NOTIFY_KEY}:${u}`;
+
+function harness({ native = true, plugin = null, stored = null, uid = "u1" } = {}) {
   const store = {};
-  if (stored) store[NOTIFY_KEY] = stored;
+  let currentUid = uid;
+  if (stored) store[scopedKey(uid)] = stored;   // the flag is per-identity
   const dialog = { open: false, shows: 0, closes: 0,
     showModal() { this.open = true; this.shows++; },
     close() { this.open = false; this.closes++; } };
@@ -32,7 +35,7 @@ function harness({ native = true, plugin = null, stored = null } = {}) {
     capacitorPushNotifications: plugin ? { PushNotifications: plugin } : undefined,
   };
   const box = load(
-    ["maybeOfferReminders", "requestReminders", "setupNativePushNotifications", "registerPushToken", "scheduleReminderOffer"],
+    ["notifyAskKey", "maybeOfferReminders", "requestReminders", "setupNativePushNotifications", "registerPushToken", "scheduleReminderOffer"],
     {
       window,
       document: { getElementById: (id) => (id === "notifyDialog" ? dialog : null) },
@@ -40,13 +43,13 @@ function harness({ native = true, plugin = null, stored = null } = {}) {
       STORAGE: { notifyAsk: NOTIFY_KEY, pushToken: "pt" },
       API: "https://api.test",
       api: async (path, body) => { apiCalls.push([path, body]); },
-      uid: () => "u1",
+      uid: () => currentUid,
       playerName: "Adam",
       reminderOfferScheduled: false,
       setTimeout: (fn) => { fn(); return 0; },  // run the deferred offer synchronously
       console,
     });
-  return { box, dialog, store, apiCalls };
+  return { box, dialog, store, apiCalls, setUid: (u) => { currentUid = u; }, scoped: (u = currentUid) => scopedKey(u) };
 }
 
 // --- launch: never asks -----------------------------------------------------
@@ -82,10 +85,11 @@ test("§4 · launch does nothing further when permission is denied", async () =>
 
 test("§4 · first save on native+prompt shows the explanation and marks it shown", async () => {
   const { calls, plugin } = pushStub({ permission: "prompt" });
-  const { box, dialog, store } = harness({ plugin });
+  const h = harness({ plugin });
+  const { box, dialog, store } = h;
   await box.maybeOfferReminders();
   assert.equal(dialog.shows, 1, "the explanation appears");
-  assert.equal(store[NOTIFY_KEY], "shown", "marked shown for at-most-once");
+  assert.equal(store[h.scoped()], "shown", "marked shown (per identity) for at-most-once");
   assert.equal(calls.request, 0, "showing the explanation must not request permission");
 });
 
@@ -108,10 +112,11 @@ test("§4 · a prior dismissal is never re-pressured", async () => {
 
 test("§4 · already-granted never shows the explanation", async () => {
   const { plugin } = pushStub({ permission: "granted" });
-  const { box, dialog, store } = harness({ plugin });
+  const h = harness({ plugin });
+  const { box, dialog, store } = h;
   await box.maybeOfferReminders();
   assert.equal(dialog.shows, 0);
-  assert.equal(store[NOTIFY_KEY], undefined, "granted does not consume the one-time ask");
+  assert.equal(store[h.scoped()], undefined, "granted does not consume the one-time ask");
 });
 
 test("§4 · denied permission is never asked again via the explanation", async () => {
@@ -129,10 +134,11 @@ test("§4 · on the web the ask is silent and prediction entry is untouched", as
 
 test("§4 · a native permission-check failure fails quietly", async () => {
   const { plugin } = pushStub({ permission: "prompt", throwCheck: true });
-  const { box, dialog, store } = harness({ plugin });
+  const h = harness({ plugin });
+  const { box, dialog, store } = h;
   await assert.doesNotReject(box.maybeOfferReminders());
   assert.equal(dialog.shows, 0);
-  assert.equal(store[NOTIFY_KEY], undefined, "a failed check does not burn the one-time ask");
+  assert.equal(store[h.scoped()], undefined, "a failed check does not burn the one-time ask");
 });
 
 // --- Remind me / Not now ----------------------------------------------------
@@ -193,4 +199,33 @@ test("§4 · scheduleReminderOffer respects the already-shown flag", async () =>
   const { box, dialog } = harness({ plugin, stored: "shown" });
   box.scheduleReminderOffer();
   assert.equal(dialog.shows, 0);
+});
+
+// --- identity scoping + concurrency (regression for the review defect) -------
+
+test("§4 · the shown flag is per-identity and never leaks across accounts on one device", async () => {
+  const { plugin } = pushStub({ permission: "prompt" });
+  const h = harness({ plugin, uid: "playerA" });
+  await h.box.maybeOfferReminders();                 // A's first save
+  assert.equal(h.dialog.shows, 1);
+  assert.equal(h.store[h.scoped("playerA")], "shown");
+  h.dialog.close();                                  // A dismisses
+  // A DIFFERENT identity is restored on the same device (same store).
+  h.setUid("playerB");
+  await h.box.maybeOfferReminders();                 // B's first save
+  assert.equal(h.dialog.shows, 2, "the restored identity gets its own one-time ask");
+  assert.equal(h.store[h.scoped("playerB")], "shown");
+  h.dialog.close();
+  // Switching back to A does not re-ask.
+  h.setUid("playerA");
+  await h.box.maybeOfferReminders();
+  assert.equal(h.dialog.shows, 2, "A stays suppressed — no leak either way");
+});
+
+test("§4 · rapid overlapping saves show the explanation only once", async () => {
+  const { plugin } = pushStub({ permission: "prompt" });
+  const h = harness({ plugin });
+  // Two offers in flight at once (not awaited between) — the race the guard covers.
+  await Promise.all([h.box.maybeOfferReminders(), h.box.maybeOfferReminders(), h.box.maybeOfferReminders()]);
+  assert.equal(h.dialog.shows, 1, "overlapping saves never double-show");
 });

@@ -7873,16 +7873,21 @@ async function setupNativePushNotifications() {
 // reachable ONLY from the explicit "Remind me" action (requestReminders).
 let reminderOfferScheduled = false;
 
+// Scoped to the current identity: a device shared or restored to a different
+// account gets its own one-time ask, and the "shown" state never leaks between
+// player identities.
+const notifyAskKey = () => `${STORAGE.notifyAsk}:${uid()}`;
+
 function scheduleReminderOffer() {
   if (reminderOfferScheduled) return;
-  if (localStorage.getItem(STORAGE.notifyAsk) === "shown") return;
+  if (localStorage.getItem(notifyAskKey()) === "shown") return;
   reminderOfferScheduled = true;
   // Let the save visibly settle (the "Saved" chip and flash) before we ask.
   setTimeout(() => { reminderOfferScheduled = false; maybeOfferReminders(); }, 900);
 }
 
 async function maybeOfferReminders() {
-  if (localStorage.getItem(STORAGE.notifyAsk) === "shown") return;   // at most once
+  if (localStorage.getItem(notifyAskKey()) === "shown") return;   // at most once, per identity
   const cap = window.Capacitor;
   const push = window.capacitorPushNotifications?.PushNotifications || cap?.Plugins?.PushNotifications;
   if (!cap?.isNativePlatform?.() || !push) return;                   // web / no plugin → quiet
@@ -7890,7 +7895,7 @@ async function maybeOfferReminders() {
   try { permission = await push.checkPermissions(); } catch { return; }
   if (permission.receive !== "prompt") return;                      // granted or denied → don't ask
   // Marked shown the moment it appears, so a dismissal is never re-pressured.
-  localStorage.setItem(STORAGE.notifyAsk, "shown");
+  localStorage.setItem(notifyAskKey(), "shown");
   const dialog = document.getElementById("notifyDialog");
   if (dialog && !dialog.open) dialog.showModal();
 }

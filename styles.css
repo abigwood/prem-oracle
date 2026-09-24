@@ -58,6 +58,19 @@ input {
 }
 input:focus { border-color: var(--purple); box-shadow: 0 0 0 3px var(--purple-soft); }
 
+/* v1.8 §7: one consistent, visible keyboard-focus ring for every interactive
+   control that doesn't already define its own (components with a bespoke ring
+   override this). Keyboard-only, so pointer taps stay clean. */
+button:focus-visible,
+a:focus-visible,
+summary:focus-visible,
+[role="button"]:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid var(--purple);
+  outline-offset: 2px;
+  border-radius: 10px;
+}
+
 .app-header {
   flex: none;
   position: relative;
@@ -950,12 +963,12 @@ th.wins-col { font-size: .92rem; }
   transform: translateZ(0);
 }
 .bottom-nav button { height: 52px; min-height: 52px; padding: 3px 0 5px; border: 0; color: #839087; background: transparent; font-size: .62rem; font-weight: 800; }
-/* Greyscale alone cannot dim the football — the emoji is already black and
-   white — so inactive icons carry opacity too, which is what actually reads as
-   "not this tab". */
-.bottom-nav button span { display: block; margin-bottom: 2px; font-size: 1.15rem; filter: grayscale(1); opacity: .45; transition: opacity .15s ease, filter .15s ease; }
+/* v1.8 §7: one consistent line-icon language. Icons stroke in currentColor, so
+   the active tab (purple) and inactive tabs (muted) read from colour AND from
+   opacity — never colour alone, and the text label is always present. */
+.bottom-nav .nav-icon { display: block; width: 22px; height: 22px; margin: 0 auto 2px; opacity: .55; transition: opacity .15s ease; }
 .bottom-nav button.active { color: var(--purple); }
-.bottom-nav button.active span { filter: none; opacity: 1; }
+.bottom-nav button.active .nav-icon { opacity: 1; }
 
 /* Native shell only: tighten the bottom-nav's home-indicator padding so the
    icons sit lower while the bar still clears the indicator and its background

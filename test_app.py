@@ -2735,14 +2735,14 @@ class NamesAndViewportTests(unittest.TestCase):
     # --- C. the nav -------------------------------------------------------
 
     def test_inactive_nav_icons_are_visibly_dimmed(self):
-        span = self.css[self.css.index(".bottom-nav button span {"):]
-        span = span[:span.index("}")]
-        self.assertIn("filter: grayscale(1);", span)
-        # Greyscale alone cannot dim a football, which is already monochrome.
-        self.assertIn("opacity: .45;", span)
-        active = self.css[self.css.index(".bottom-nav button.active span {"):]
+        # v1.8 §7: line icons stroke in currentColor, so a tab reads from BOTH
+        # colour (muted vs purple) and opacity — never colour alone — with the
+        # text label always present.
+        icon = self.css[self.css.index(".bottom-nav .nav-icon {"):]
+        icon = icon[:icon.index("}")]
+        self.assertIn("opacity: .55;", icon)
+        active = self.css[self.css.index(".bottom-nav button.active .nav-icon {"):]
         active = active[:active.index("}")]
-        self.assertIn("filter: none;", active)
         self.assertIn("opacity: 1;", active)
 
 
@@ -3328,6 +3328,65 @@ class AcquisitionAndRatingTests(unittest.TestCase):
             fn = self._fn(name)
             for banned in ("analytics", "gtag", "sendBeacon", "funnel", "trackEvent", "counter"):
                 self.assertNotIn(banned, fn.lower(), f"{name}: {banned}")
+
+
+class Section7VisualRefinementTests(unittest.TestCase):
+    """v1.8 §7: restrained visual hierarchy, icon language and accessibility."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = (ROOT / "app.js").read_text()
+        cls.css = (ROOT / "styles.css").read_text()
+        cls.html = (ROOT / "index.html").read_text()
+        cls.pkg = (ROOT / "package.json").read_text()
+
+    def test_consistent_line_icon_language_for_navigation(self):
+        nav = self.html[self.html.index('<nav class="bottom-nav"'):self.html.index("</nav>")]
+        self.assertEqual(nav.count('svg class="nav-icon"'), 3)   # one per tab
+        self.assertIn('stroke="currentColor"', nav)               # colour = state, not baked in
+        self.assertNotIn("🔮", nav)
+        self.assertNotIn("📋", nav)
+        self.assertIn(".bottom-nav .nav-icon", self.css)
+
+    def test_trophies_and_medals_are_reserved_for_achievement(self):
+        # The decorative trophy is gone from navigation; medals remain only in
+        # the podium vocabulary.
+        nav = self.html[self.html.index('<nav class="bottom-nav"'):self.html.index("</nav>")]
+        for glyph in ("🏆", "🥈", "🥉"):
+            self.assertNotIn(glyph, nav, f"{glyph} used decoratively in nav")
+        self.assertIn('PLACE_EMOJI', self.app)   # medals still exist for real placings
+
+    def test_a_visible_keyboard_focus_ring_exists_globally(self):
+        self.assertIn("button:focus-visible", self.css)
+        self.assertIn("outline: 2px solid var(--purple);", self.css)
+
+    def test_reduced_motion_is_respected(self):
+        self.assertIn("@media (prefers-reduced-motion: reduce)", self.css)
+
+    def test_movement_uses_a_non_colour_cue_not_colour_alone(self):
+        fn = self.app[self.app.index("function weeklyMovementBadge("):]
+        fn = fn[:fn.index("\n}")]
+        for glyph in ("▲", "▼", "–"):
+            self.assertIn(glyph, fn)                 # shape, not just colour
+        self.assertIn('aria-label="Up ', fn)         # and a screen-reader cue
+        self.assertIn('aria-label="No change"', fn)
+
+    def test_typography_floor_and_touch_targets_preserved(self):
+        # Nav buttons keep a comfortable height (touch target).
+        self.assertIn(".bottom-nav button { height: 52px; min-height: 52px;", self.css)
+
+    def test_no_external_design_dependency_added(self):
+        # No CDN font/stylesheet/script in the shell, and no design library in deps.
+        self.assertNotIn('href="https://fonts', self.html)
+        self.assertNotIn("cdn.", self.html)
+        for lib in ("tailwind", "bootstrap", "font-awesome", "fontawesome", "@fortawesome"):
+            self.assertNotIn(lib, self.pkg.lower(), lib)
+
+    def test_three_tabs_and_routes_preserved(self):
+        nav = self.html[self.html.index('<nav class="bottom-nav"'):self.html.index("</nav>")]
+        self.assertEqual(nav.count("<button"), 3)
+        for view in ('data-view="picks"', 'data-view="league"', 'data-view="rules"'):
+            self.assertIn(view, nav)
 
 
 if __name__ == "__main__":

@@ -6523,7 +6523,11 @@ function render(options = {}) {
   if (currentView === "league") mountResults();
   renderPickerLayer();
   document.getElementById("profileInitial").textContent = playerInitial();
-  document.querySelectorAll(".bottom-nav button").forEach((button) => button.classList.toggle("active", button.dataset.view === currentView));
+  document.querySelectorAll(".bottom-nav button").forEach((button) => {
+    const on = button.dataset.view === currentView;
+    button.classList.toggle("active", on);
+    button.setAttribute("aria-current", on ? "page" : "false"); // non-colour active cue
+  });
   // Re-centring a strip nobody rebuilt would only fight a viewer who has
   // scrolled it themselves.
   if (changed) centreWeekStrip();
@@ -6619,7 +6623,11 @@ function paintShell(view) {
 function markActiveTab() {
   const active = normaliseView(currentView);
   document.querySelectorAll(".bottom-nav button")
-    .forEach((button) => button.classList.toggle("active", button.dataset.view === active));
+    .forEach((button) => {
+      const on = button.dataset.view === active;
+      button.classList.toggle("active", on);
+      button.setAttribute("aria-current", on ? "page" : "false"); // non-colour active cue
+    });
 }
 
 /** Lets the browser paint what has just been written before more work starts. */

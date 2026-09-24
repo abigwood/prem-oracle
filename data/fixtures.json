@@ -4,7 +4,7 @@
   "season": "2026/27",
   "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
   "sourcePublished": "2026-06-19",
-  "generatedAt": "2026-09-15T10:36:59Z",
+  "generatedAt": "2026-09-22T10:28:51Z",
   "note": "Premier League fixtures are subject to change.",
   "fixtures": [
     {
@@ -27,8 +27,8 @@
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
         75,
-        18,
-        7
+        17,
+        8
       ]
     },
     {
@@ -50,9 +50,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        27,
         25,
-        48
+        25,
+        50
       ]
     },
     {
@@ -74,9 +74,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        61,
-        22,
-        17
+        64,
+        21,
+        15
       ]
     },
     {
@@ -98,9 +98,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        53,
-        24,
-        23
+        50,
+        25,
+        25
       ]
     },
     {
@@ -122,9 +122,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        36,
+        35,
         26,
-        38
+        39
       ]
     },
     {
@@ -146,9 +146,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        70,
-        18,
-        12
+        75,
+        16,
+        9
       ]
     },
     {
@@ -170,9 +170,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        57,
-        23,
-        20
+        64,
+        21,
+        15
       ]
     },
     {
@@ -218,9 +218,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        28,
+        29,
         25,
-        47
+        46
       ]
     },
     {
@@ -242,9 +242,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        28,
-        25,
-        47
+        35,
+        26,
+        39
       ]
     },
     {
@@ -290,9 +290,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        66,
-        20,
-        14
+        72,
+        17,
+        11
       ]
     },
     {
@@ -314,9 +314,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        50,
-        25,
-        25
+        42,
+        26,
+        32
       ]
     },
     {
@@ -338,9 +338,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        52,
-        24,
-        24
+        60,
+        22,
+        18
       ]
     },
     {
@@ -362,9 +362,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        31,
         26,
-        43
+        25,
+        49
       ]
     },
     {
@@ -386,9 +386,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        40,
-        26,
-        34
+        25,
+        25,
+        50
       ]
     },
     {
@@ -410,9 +410,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        44,
+        36,
         26,
-        30
+        38
       ]
     },
     {
@@ -434,9 +434,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        56,
-        23,
-        21
+        52,
+        24,
+        24
       ]
     },
     {
@@ -458,9 +458,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        61,
-        22,
-        17
+        63,
+        21,
+        16
       ]
     },
     {
@@ -482,9 +482,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        8,
+        10,
         17,
-        75
+        73
       ]
     },
     {
@@ -506,9 +506,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        38,
+        30,
         26,
-        36
+        44
       ]
     },
     {
@@ -530,9 +530,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        37,
+        44,
         26,
-        37
+        30
       ]
     },
     {
@@ -554,9 +554,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        52,
-        24,
-        24
+        60,
+        22,
+        18
       ]
     },
     {
@@ -578,9 +578,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        57,
-        23,
-        20
+        68,
+        19,
+        13
       ]
     },
     {
@@ -674,9 +674,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        44,
+        37,
         26,
-        30
+        37
       ]
     },
     {
@@ -698,9 +698,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        25,
-        25,
-        50
+        31,
+        26,
+        43
       ]
     },
     {
@@ -746,9 +746,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        45,
-        25,
-        30
+        36,
+        26,
+        38
       ]
     },
     {
@@ -770,9 +770,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        55,
-        24,
-        21
+        61,
+        22,
+        17
       ]
     },
     {
@@ -794,9 +794,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        52,
-        24,
-        24
+        50,
+        25,
+        25
       ]
     },
     {
@@ -818,9 +818,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
+        30,
         26,
-        25,
-        49
+        44
       ]
     },
     {
@@ -842,9 +842,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        70,
+        71,
         18,
-        12
+        11
       ]
     },
     {
@@ -866,9 +866,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        27,
-        25,
-        48
+        22,
+        23,
+        55
       ]
     },
     {
@@ -914,9 +914,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        39,
+        34,
         26,
-        35
+        40
       ]
     },
     {
@@ -938,9 +938,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        18,
-        22,
-        60
+        15,
+        21,
+        64
       ]
     },
     {
@@ -962,9 +962,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        54,
-        24,
-        22
+        48,
+        25,
+        27
       ]
     },
     {
@@ -986,9 +986,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        42,
-        26,
-        32
+        56,
+        23,
+        21
       ]
     },
     {
@@ -1010,9 +1010,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        25,
-        24,
-        51
+        21,
+        23,
+        56
       ]
     },
     {
@@ -1034,9 +1034,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        9,
-        16,
-        75
+        21,
+        23,
+        56
       ]
     },
     {
@@ -1058,9 +1058,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        39,
-        26,
-        35
+        48,
+        25,
+        27
       ]
     },
     {
@@ -1082,9 +1082,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        65,
-        20,
-        15
+        62,
+        21,
+        17
       ]
     },
     {
@@ -1107,8 +1107,8 @@
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
         75,
-        18,
-        7
+        19,
+        6
       ]
     },
     {
@@ -1130,9 +1130,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        39,
-        26,
-        35
+        48,
+        25,
+        27
       ]
     },
     {
@@ -1154,9 +1154,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        32,
         26,
-        42
+        25,
+        49
       ]
     },
     {
@@ -1178,9 +1178,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        37,
+        30,
         26,
-        37
+        44
       ]
     },
     {
@@ -1202,9 +1202,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        18,
-        22,
-        60
+        20,
+        23,
+        57
       ]
     },
     {
@@ -1227,8 +1227,8 @@
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
         75,
-        19,
-        6
+        18,
+        7
       ]
     },
     {
@@ -1250,9 +1250,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        43,
+        40,
         26,
-        31
+        34
       ]
     },
     {
@@ -1274,9 +1274,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        50,
+        46,
         25,
-        25
+        29
       ]
     },
     {
@@ -1298,8 +1298,8 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        59,
-        22,
+        58,
+        23,
         19
       ]
     },
@@ -1322,9 +1322,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        37,
+        40,
         26,
-        37
+        34
       ]
     },
     {
@@ -1346,9 +1346,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        48,
-        25,
-        27
+        38,
+        26,
+        36
       ]
     },
     {
@@ -1370,9 +1370,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        63,
-        21,
-        16
+        56,
+        23,
+        21
       ]
     },
     {
@@ -1394,9 +1394,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        13,
-        19,
-        68
+        14,
+        20,
+        66
       ]
     },
     {
@@ -1442,9 +1442,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        31,
-        26,
-        43
+        21,
+        24,
+        55
       ]
     },
     {
@@ -1466,8 +1466,8 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        51,
-        24,
+        50,
+        25,
         25
       ]
     },
@@ -1490,9 +1490,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        37,
+        40,
         26,
-        37
+        34
       ]
     },
     {
@@ -1515,8 +1515,8 @@
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
         75,
-        16,
-        9
+        17,
+        8
       ]
     },
     {
@@ -1538,9 +1538,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        37,
-        26,
-        37
+        48,
+        25,
+        27
       ]
     },
     {
@@ -1562,9 +1562,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        34,
+        40,
         26,
-        40
+        34
       ]
     },
     {
@@ -1586,9 +1586,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        28,
+        29,
         25,
-        47
+        46
       ]
     },
     {
@@ -1634,9 +1634,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        38,
+        39,
         26,
-        36
+        35
       ]
     },
     {
@@ -1658,8 +1658,8 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        7,
-        18,
+        8,
+        17,
         75
       ]
     },
@@ -1682,9 +1682,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
+        17,
         21,
-        23,
-        56
+        62
       ]
     },
     {
@@ -1707,8 +1707,8 @@
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
         75,
-        19,
-        6
+        18,
+        7
       ]
     },
     {
@@ -1754,9 +1754,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        73,
-        17,
-        10
+        69,
+        19,
+        12
       ]
     },
     {
@@ -1778,9 +1778,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        64,
-        21,
-        15
+        66,
+        20,
+        14
       ]
     },
     {
@@ -1802,9 +1802,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        36,
+        33,
         26,
-        38
+        41
       ]
     },
     {
@@ -1826,9 +1826,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        42,
+        32,
         26,
-        32
+        42
       ]
     },
     {
@@ -1850,9 +1850,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        58,
+        57,
         23,
-        19
+        20
       ]
     },
     {
@@ -1874,9 +1874,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        45,
-        25,
-        30
+        39,
+        26,
+        35
       ]
     },
     {
@@ -1898,9 +1898,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        63,
+        64,
         21,
-        16
+        15
       ]
     },
     {
@@ -1922,9 +1922,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        42,
+        41,
         26,
-        32
+        33
       ]
     },
     {
@@ -1946,9 +1946,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        47,
-        25,
-        28
+        45,
+        26,
+        29
       ]
     },
     {
@@ -1970,9 +1970,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        59,
+        60,
         22,
-        19
+        18
       ]
     },
     {
@@ -1994,9 +1994,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        57,
-        23,
-        20
+        66,
+        20,
+        14
       ]
     },
     {
@@ -2018,9 +2018,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        33,
-        26,
-        41
+        29,
+        25,
+        46
       ]
     },
     {
@@ -2042,9 +2042,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        55,
-        23,
-        22
+        60,
+        22,
+        18
       ]
     },
     {
@@ -2090,9 +2090,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        9,
-        16,
-        75
+        17,
+        21,
+        62
       ]
     },
     {
@@ -2115,8 +2115,8 @@
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
         75,
-        17,
-        8
+        16,
+        9
       ]
     },
     {
@@ -2138,9 +2138,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        41,
+        40,
         26,
-        33
+        34
       ]
     },
     {
@@ -2162,9 +2162,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        41,
+        38,
         26,
-        33
+        36
       ]
     },
     {
@@ -2187,8 +2187,8 @@
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
         75,
-        19,
-        6
+        18,
+        7
       ]
     },
     {
@@ -2210,9 +2210,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        55,
+        58,
         23,
-        22
+        19
       ]
     },
     {
@@ -2234,9 +2234,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        20,
-        23,
-        57
+        18,
+        22,
+        60
       ]
     },
     {
@@ -2258,9 +2258,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        37,
+        39,
         26,
-        37
+        35
       ]
     },
     {
@@ -2282,9 +2282,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        40,
+        38,
         26,
-        34
+        36
       ]
     },
     {
@@ -2306,9 +2306,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        48,
+        46,
         25,
-        27
+        29
       ]
     },
     {
@@ -2354,9 +2354,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        64,
-        21,
-        15
+        60,
+        22,
+        18
       ]
     },
     {
@@ -2378,8 +2378,8 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        8,
-        17,
+        7,
+        18,
         75
       ]
     },
@@ -2402,9 +2402,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        37,
+        41,
         26,
-        37
+        33
       ]
     },
     {
@@ -2450,9 +2450,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        49,
-        25,
-        26
+        55,
+        23,
+        22
       ]
     },
     {
@@ -2474,9 +2474,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        51,
+        53,
         24,
-        25
+        23
       ]
     },
     {
@@ -2498,9 +2498,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        51,
-        24,
-        25
+        46,
+        25,
+        29
       ]
     },
     {
@@ -2522,9 +2522,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        69,
-        19,
-        12
+        71,
+        18,
+        11
       ]
     },
     {
@@ -2546,9 +2546,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        33,
-        26,
-        41
+        22,
+        23,
+        55
       ]
     },
     {
@@ -2570,9 +2570,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        38,
+        43,
         26,
-        36
+        31
       ]
     },
     {
@@ -2618,8 +2618,8 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        7,
-        18,
+        9,
+        16,
         75
       ]
     },
@@ -2642,9 +2642,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        22,
         24,
-        54
+        24,
+        52
       ]
     },
     {
@@ -2666,9 +2666,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        54,
-        24,
-        22
+        42,
+        26,
+        32
       ]
     },
     {
@@ -2690,9 +2690,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        65,
-        20,
-        15
+        70,
+        18,
+        12
       ]
     },
     {
@@ -2714,9 +2714,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        29,
+        34,
         26,
-        45
+        40
       ]
     },
     {
@@ -2738,9 +2738,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        32,
+        33,
         26,
-        42
+        41
       ]
     },
     {
@@ -2762,9 +2762,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        31,
+        36,
         26,
-        43
+        38
       ]
     },
     {
@@ -2786,9 +2786,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        49,
-        25,
-        26
+        41,
+        26,
+        33
       ]
     },
     {
@@ -2810,9 +2810,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        41,
+        36,
         26,
-        33
+        38
       ]
     },
     {
@@ -2834,9 +2834,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        62,
-        21,
-        17
+        54,
+        24,
+        22
       ]
     },
     {
@@ -2858,9 +2858,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        31,
+        35,
         26,
-        43
+        39
       ]
     },
     {
@@ -2906,9 +2906,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        36,
-        26,
-        38
+        25,
+        24,
+        51
       ]
     },
     {
@@ -2930,9 +2930,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        49,
+        47,
         25,
-        26
+        28
       ]
     },
     {
@@ -2954,9 +2954,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        8,
-        17,
-        75
+        13,
+        19,
+        68
       ]
     },
     {
@@ -2978,9 +2978,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        69,
-        19,
-        12
+        62,
+        21,
+        17
       ]
     },
     {
@@ -3002,9 +3002,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        48,
-        25,
-        27
+        56,
+        23,
+        21
       ]
     },
     {
@@ -3026,9 +3026,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        54,
+        52,
         24,
-        22
+        24
       ]
     },
     {
@@ -3050,9 +3050,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        60,
-        22,
-        18
+        66,
+        20,
+        14
       ]
     },
     {
@@ -3098,9 +3098,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        22,
-        23,
-        55
+        27,
+        25,
+        48
       ]
     },
     {
@@ -3122,9 +3122,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        37,
+        33,
         26,
-        37
+        41
       ]
     },
     {
@@ -3146,9 +3146,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        48,
+        50,
         25,
-        27
+        25
       ]
     },
     {
@@ -3170,9 +3170,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        64,
-        21,
-        15
+        66,
+        20,
+        14
       ]
     },
     {
@@ -3194,9 +3194,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        9,
-        16,
-        75
+        11,
+        18,
+        71
       ]
     },
     {
@@ -3218,9 +3218,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        40,
+        31,
         26,
-        34
+        43
       ]
     },
     {
@@ -3242,9 +3242,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        56,
-        23,
-        21
+        59,
+        22,
+        19
       ]
     },
     {
@@ -3266,9 +3266,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        43,
-        26,
-        31
+        46,
+        25,
+        29
       ]
     },
     {
@@ -3290,9 +3290,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        59,
-        22,
-        19
+        54,
+        24,
+        22
       ]
     },
     {
@@ -3314,9 +3314,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        41,
-        26,
-        33
+        48,
+        25,
+        27
       ]
     },
     {
@@ -3338,9 +3338,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        26,
-        25,
-        49
+        17,
+        22,
+        61
       ]
     },
     {
@@ -3362,8 +3362,8 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        6,
-        19,
+        7,
+        18,
         75
       ]
     },
@@ -3387,8 +3387,8 @@
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
         75,
-        19,
-        6
+        18,
+        7
       ]
     },
     {
@@ -3410,9 +3410,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        60,
-        22,
-        18
+        65,
+        20,
+        15
       ]
     },
     {
@@ -3434,9 +3434,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        51,
+        52,
         24,
-        25
+        24
       ]
     },
     {
@@ -3458,9 +3458,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        15,
-        20,
-        65
+        17,
+        21,
+        62
       ]
     },
     {
@@ -3482,9 +3482,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        30,
-        26,
-        44
+        27,
+        25,
+        48
       ]
     },
     {
@@ -3506,9 +3506,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        67,
-        19,
-        14
+        65,
+        20,
+        15
       ]
     },
     {
@@ -3530,9 +3530,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        57,
-        23,
-        20
+        48,
+        25,
+        27
       ]
     },
     {
@@ -3554,9 +3554,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        56,
-        23,
-        21
+        62,
+        21,
+        17
       ]
     },
     {
@@ -3579,8 +3579,8 @@
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
         75,
-        17,
-        8
+        18,
+        7
       ]
     },
     {
@@ -3626,9 +3626,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        42,
+        36,
         26,
-        32
+        38
       ]
     },
     {
@@ -3651,8 +3651,8 @@
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
         75,
-        17,
-        8
+        16,
+        9
       ]
     },
     {
@@ -3674,9 +3674,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        56,
+        58,
         23,
-        21
+        19
       ]
     },
     {
@@ -3698,9 +3698,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        54,
-        24,
-        22
+        68,
+        19,
+        13
       ]
     },
     {
@@ -3722,9 +3722,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        51,
-        24,
-        25
+        41,
+        26,
+        33
       ]
     },
     {
@@ -3746,9 +3746,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        60,
-        22,
-        18
+        56,
+        23,
+        21
       ]
     },
     {
@@ -3771,8 +3771,8 @@
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
         75,
-        16,
-        9
+        17,
+        8
       ]
     },
     {
@@ -3795,8 +3795,8 @@
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
         75,
-        18,
-        7
+        19,
+        6
       ]
     },
     {
@@ -3818,9 +3818,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        40,
+        33,
         26,
-        34
+        41
       ]
     },
     {
@@ -3842,9 +3842,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        60,
-        22,
-        18
+        57,
+        23,
+        20
       ]
     },
     {
@@ -3866,9 +3866,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        45,
-        26,
-        29
+        50,
+        25,
+        25
       ]
     },
     {
@@ -3890,9 +3890,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        46,
-        25,
-        29
+        56,
+        23,
+        21
       ]
     },
     {
@@ -3914,8 +3914,8 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        6,
-        19,
+        7,
+        18,
         75
       ]
     },
@@ -3938,9 +3938,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        46,
-        25,
-        29
+        53,
+        24,
+        23
       ]
     },
     {
@@ -3962,9 +3962,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        23,
-        24,
-        53
+        17,
+        22,
+        61
       ]
     },
     {
@@ -3986,9 +3986,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        34,
-        26,
-        40
+        27,
+        25,
+        48
       ]
     },
     {
@@ -4010,9 +4010,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        47,
-        25,
-        28
+        36,
+        26,
+        38
       ]
     },
     {
@@ -4034,8 +4034,8 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        73,
-        17,
+        74,
+        16,
         10
       ]
     },
@@ -4106,9 +4106,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        35,
+        34,
         26,
-        39
+        40
       ]
     },
     {
@@ -4130,9 +4130,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        49,
+        46,
         25,
-        26
+        29
       ]
     },
     {
@@ -4154,9 +4154,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        27,
-        25,
-        48
+        31,
+        26,
+        43
       ]
     },
     {
@@ -4178,8 +4178,8 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        8,
-        17,
+        9,
+        16,
         75
       ]
     },
@@ -4202,8 +4202,8 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        7,
-        18,
+        8,
+        17,
         75
       ]
     },
@@ -4226,9 +4226,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        44,
+        41,
         26,
-        30
+        33
       ]
     },
     {
@@ -4250,9 +4250,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        43,
-        26,
-        31
+        46,
+        25,
+        29
       ]
     },
     {
@@ -4298,9 +4298,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        47,
-        25,
-        28
+        54,
+        24,
+        22
       ]
     },
     {
@@ -4322,9 +4322,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
+        10,
         17,
-        21,
-        62
+        73
       ]
     },
     {
@@ -4346,9 +4346,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        47,
-        25,
-        28
+        41,
+        26,
+        33
       ]
     },
     {
@@ -4394,9 +4394,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        66,
-        20,
-        14
+        71,
+        18,
+        11
       ]
     },
     {
@@ -4418,9 +4418,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        38,
-        26,
-        36
+        50,
+        25,
+        25
       ]
     },
     {
@@ -4442,9 +4442,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        59,
-        22,
-        19
+        48,
+        25,
+        27
       ]
     },
     {
@@ -4466,9 +4466,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        49,
-        25,
-        26
+        43,
+        26,
+        31
       ]
     },
     {
@@ -4490,9 +4490,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        51,
+        52,
         24,
-        25
+        24
       ]
     },
     {
@@ -4515,8 +4515,8 @@
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
         75,
-        19,
-        6
+        20,
+        5
       ]
     },
     {
@@ -4538,9 +4538,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        50,
-        25,
-        25
+        45,
+        26,
+        29
       ]
     },
     {
@@ -4562,9 +4562,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        43,
+        45,
         26,
-        31
+        29
       ]
     },
     {
@@ -4587,8 +4587,8 @@
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
         75,
-        18,
-        7
+        17,
+        8
       ]
     },
     {
@@ -4610,9 +4610,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        56,
-        23,
-        21
+        68,
+        19,
+        13
       ]
     },
     {
@@ -4634,9 +4634,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        24,
-        24,
-        52
+        30,
+        26,
+        44
       ]
     },
     {
@@ -4658,9 +4658,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        42,
+        44,
         26,
-        32
+        30
       ]
     },
     {
@@ -4682,9 +4682,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        55,
-        23,
-        22
+        59,
+        22,
+        19
       ]
     },
     {
@@ -4706,9 +4706,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        43,
+        36,
         26,
-        31
+        38
       ]
     },
     {
@@ -4754,9 +4754,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        72,
-        17,
-        11
+        66,
+        20,
+        14
       ]
     },
     {
@@ -4778,9 +4778,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        38,
+        39,
         26,
-        36
+        35
       ]
     },
     {
@@ -4802,9 +4802,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        32,
         26,
-        42
+        25,
+        49
       ]
     },
     {
@@ -4826,9 +4826,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        44,
+        45,
         26,
-        30
+        29
       ]
     },
     {
@@ -4850,9 +4850,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        28,
-        25,
-        47
+        32,
+        26,
+        42
       ]
     },
     {
@@ -4874,9 +4874,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        37,
+        33,
         26,
-        37
+        41
       ]
     },
     {
@@ -4898,9 +4898,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        55,
-        23,
-        22
+        51,
+        24,
+        25
       ]
     },
     {
@@ -4922,9 +4922,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        54,
+        53,
         24,
-        22
+        23
       ]
     },
     {
@@ -4970,9 +4970,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        74,
+        75,
         16,
-        10
+        9
       ]
     },
     {
@@ -5018,9 +5018,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        51,
+        54,
         24,
-        25
+        22
       ]
     },
     {
@@ -5043,8 +5043,8 @@
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
         24,
-        25,
-        51
+        24,
+        52
       ]
     },
     {
@@ -5067,8 +5067,8 @@
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
         75,
-        19,
-        6
+        18,
+        7
       ]
     },
     {
@@ -5090,9 +5090,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        14,
         19,
-        67
+        22,
+        59
       ]
     },
     {
@@ -5114,9 +5114,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        50,
-        25,
-        25
+        54,
+        24,
+        22
       ]
     },
     {
@@ -5138,9 +5138,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        40,
+        39,
         26,
-        34
+        35
       ]
     },
     {
@@ -5162,9 +5162,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        32,
+        31,
         26,
-        42
+        43
       ]
     },
     {
@@ -5210,9 +5210,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        41,
-        26,
-        33
+        46,
+        25,
+        29
       ]
     },
     {
@@ -5234,9 +5234,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        54,
-        24,
-        22
+        48,
+        25,
+        27
       ]
     },
     {
@@ -5258,9 +5258,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        35,
+        36,
         26,
-        39
+        38
       ]
     },
     {
@@ -5282,9 +5282,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        37,
+        31,
         26,
-        37
+        43
       ]
     },
     {
@@ -5306,9 +5306,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        60,
-        22,
-        18
+        56,
+        23,
+        21
       ]
     },
     {
@@ -5330,9 +5330,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        42,
-        26,
-        32
+        50,
+        25,
+        25
       ]
     },
     {
@@ -5354,9 +5354,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        30,
+        38,
         26,
-        44
+        36
       ]
     },
     {
@@ -5378,9 +5378,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        60,
-        22,
-        18
+        57,
+        23,
+        20
       ]
     },
     {
@@ -5402,9 +5402,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        50,
-        25,
-        25
+        56,
+        23,
+        21
       ]
     },
     {
@@ -5426,9 +5426,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        63,
-        21,
-        16
+        57,
+        23,
+        20
       ]
     },
     {
@@ -5450,9 +5450,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        60,
+        59,
         22,
-        18
+        19
       ]
     },
     {
@@ -5474,9 +5474,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        37,
-        26,
-        37
+        49,
+        25,
+        26
       ]
     },
     {
@@ -5498,9 +5498,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        27,
-        25,
-        48
+        23,
+        24,
+        53
       ]
     },
     {
@@ -5547,8 +5547,8 @@
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
         75,
-        18,
-        7
+        16,
+        9
       ]
     },
     {
@@ -5570,9 +5570,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        58,
-        23,
-        19
+        72,
+        17,
+        11
       ]
     },
     {
@@ -5594,9 +5594,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
+        22,
         24,
-        24,
-        52
+        54
       ]
     },
     {
@@ -5618,8 +5618,8 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        50,
-        25,
+        51,
+        24,
         25
       ]
     },
@@ -5666,9 +5666,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        71,
-        18,
-        11
+        69,
+        19,
+        12
       ]
     },
     {
@@ -5690,9 +5690,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        45,
+        46,
         25,
-        30
+        29
       ]
     },
     {
@@ -5714,9 +5714,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        59,
-        22,
-        19
+        63,
+        21,
+        16
       ]
     },
     {
@@ -5738,9 +5738,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        34,
         26,
-        40
+        25,
+        49
       ]
     },
     {
@@ -5762,9 +5762,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        42,
+        37,
         26,
-        32
+        37
       ]
     },
     {
@@ -5786,9 +5786,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        44,
-        26,
-        30
+        50,
+        25,
+        25
       ]
     },
     {
@@ -5834,9 +5834,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        26,
-        25,
-        49
+        22,
+        24,
+        54
       ]
     },
     {
@@ -5858,9 +5858,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        42,
-        26,
-        32
+        48,
+        25,
+        27
       ]
     },
     {
@@ -5882,9 +5882,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        41,
-        26,
-        33
+        46,
+        25,
+        29
       ]
     },
     {
@@ -5906,9 +5906,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        48,
+        46,
         25,
-        27
+        29
       ]
     },
     {
@@ -5930,8 +5930,8 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        8,
-        17,
+        9,
+        16,
         75
       ]
     },
@@ -5954,9 +5954,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        53,
-        24,
-        23
+        41,
+        26,
+        33
       ]
     },
     {
@@ -5978,9 +5978,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        33,
+        43,
         26,
-        41
+        31
       ]
     },
     {
@@ -6002,8 +6002,8 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        7,
-        18,
+        6,
+        19,
         75
       ]
     },
@@ -6026,9 +6026,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        65,
-        20,
-        15
+        61,
+        22,
+        17
       ]
     },
     {
@@ -6074,9 +6074,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        43,
-        26,
-        31
+        46,
+        25,
+        29
       ]
     },
     {
@@ -6099,8 +6099,8 @@
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
         75,
-        16,
-        9
+        18,
+        7
       ]
     },
     {
@@ -6122,9 +6122,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        48,
+        46,
         25,
-        27
+        29
       ]
     },
     {
@@ -6146,9 +6146,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        46,
-        25,
-        29
+        41,
+        26,
+        33
       ]
     },
     {
@@ -6170,9 +6170,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        57,
-        23,
-        20
+        66,
+        20,
+        14
       ]
     },
     {
@@ -6195,8 +6195,8 @@
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
         75,
-        19,
-        6
+        18,
+        7
       ]
     },
     {
@@ -6218,9 +6218,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        21,
+        20,
         23,
-        56
+        57
       ]
     },
     {
@@ -6242,9 +6242,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        45,
+        38,
         26,
-        29
+        36
       ]
     },
     {
@@ -6266,9 +6266,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        40,
-        26,
-        34
+        50,
+        25,
+        25
       ]
     },
     {
@@ -6290,9 +6290,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        49,
-        25,
-        26
+        56,
+        23,
+        21
       ]
     },
     {
@@ -6314,9 +6314,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        31,
+        35,
         26,
-        43
+        39
       ]
     },
     {
@@ -6338,9 +6338,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        52,
-        24,
-        24
+        59,
+        22,
+        19
       ]
     },
     {
@@ -6362,9 +6362,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        32,
+        35,
         26,
-        42
+        39
       ]
     },
     {
@@ -6386,8 +6386,8 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        9,
-        16,
+        8,
+        17,
         75
       ]
     },
@@ -6410,9 +6410,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        38,
-        26,
-        36
+        25,
+        25,
+        50
       ]
     },
     {
@@ -6434,9 +6434,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        12,
-        19,
-        69
+        18,
+        22,
+        60
       ]
     },
     {
@@ -6458,9 +6458,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        36,
+        34,
         26,
-        38
+        40
       ]
     },
     {
@@ -6482,9 +6482,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        17,
-        21,
-        62
+        13,
+        19,
+        68
       ]
     },
     {
@@ -6506,8 +6506,8 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        70,
-        18,
+        69,
+        19,
         12
       ]
     },
@@ -6531,8 +6531,8 @@
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
         75,
-        20,
-        5
+        19,
+        6
       ]
     },
     {
@@ -6554,9 +6554,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        45,
-        25,
-        30
+        56,
+        23,
+        21
       ]
     },
     {
@@ -6578,9 +6578,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        70,
-        18,
-        12
+        75,
+        16,
+        9
       ]
     },
     {
@@ -6602,9 +6602,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        46,
-        25,
-        29
+        36,
+        26,
+        38
       ]
     },
     {
@@ -6626,9 +6626,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        47,
+        50,
         25,
-        28
+        25
       ]
     },
     {
@@ -6650,9 +6650,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        56,
+        57,
         23,
-        21
+        20
       ]
     },
     {
@@ -6698,9 +6698,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        44,
+        37,
         26,
-        30
+        37
       ]
     },
     {
@@ -6723,8 +6723,8 @@
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
         25,
-        25,
-        50
+        24,
+        51
       ]
     },
     {
@@ -6746,9 +6746,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        55,
-        23,
-        22
+        48,
+        25,
+        27
       ]
     },
     {
@@ -6770,9 +6770,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        47,
-        25,
-        28
+        54,
+        24,
+        22
       ]
     },
     {
@@ -6794,8 +6794,8 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        8,
-        17,
+        9,
+        16,
         75
       ]
     },
@@ -6818,9 +6818,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        10,
-        17,
-        73
+        11,
+        18,
+        71
       ]
     },
     {
@@ -6842,9 +6842,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        41,
+        40,
         26,
-        33
+        34
       ]
     },
     {
@@ -6866,9 +6866,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        35,
-        26,
-        39
+        25,
+        25,
+        50
       ]
     },
     {
@@ -6890,9 +6890,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        53,
-        24,
-        23
+        62,
+        21,
+        17
       ]
     },
     {
@@ -6914,9 +6914,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        68,
-        19,
-        13
+        61,
+        22,
+        17
       ]
     },
     {
@@ -6938,9 +6938,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        40,
+        31,
         26,
-        34
+        43
       ]
     },
     {
@@ -6987,8 +6987,8 @@
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
         75,
-        19,
-        6
+        18,
+        7
       ]
     },
     {
@@ -7010,9 +7010,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        47,
-        25,
-        28
+        56,
+        23,
+        21
       ]
     },
     {
@@ -7034,9 +7034,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        52,
-        24,
-        24
+        58,
+        23,
+        19
       ]
     },
     {
@@ -7058,9 +7058,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        65,
-        20,
-        15
+        72,
+        17,
+        11
       ]
     },
     {
@@ -7082,9 +7082,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
+        22,
         24,
-        24,
-        52
+        54
       ]
     },
     {
@@ -7106,9 +7106,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        39,
+        41,
         26,
-        35
+        33
       ]
     },
     {
@@ -7130,9 +7130,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        67,
-        19,
-        14
+        62,
+        21,
+        17
       ]
     },
     {
@@ -7178,9 +7178,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        37,
+        43,
         26,
-        37
+        31
       ]
     },
     {
@@ -7202,9 +7202,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        36,
+        31,
         26,
-        38
+        43
       ]
     },
     {
@@ -7226,8 +7226,8 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        9,
-        16,
+        8,
+        17,
         75
       ]
     },
@@ -7250,9 +7250,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        35,
-        26,
-        39
+        29,
+        25,
+        46
       ]
     },
     {
@@ -7274,9 +7274,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        65,
-        20,
-        15
+        56,
+        23,
+        21
       ]
     },
     {
@@ -7298,9 +7298,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        8,
-        17,
-        75
+        13,
+        19,
+        68
       ]
     },
     {
@@ -7322,9 +7322,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        31,
-        26,
-        43
+        28,
+        25,
+        47
       ]
     },
     {
@@ -7394,9 +7394,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        66,
-        20,
-        14
+        68,
+        19,
+        13
       ]
     },
     {
@@ -7418,9 +7418,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        39,
+        41,
         26,
-        35
+        33
       ]
     },
     {
@@ -7442,9 +7442,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        23,
-        24,
-        53
+        17,
+        21,
+        62
       ]
     },
     {
@@ -7467,8 +7467,8 @@
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
         75,
-        19,
-        6
+        18,
+        7
       ]
     },
     {
@@ -7490,9 +7490,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        48,
-        25,
-        27
+        56,
+        23,
+        21
       ]
     },
     {
@@ -7514,9 +7514,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        52,
-        24,
-        24
+        68,
+        19,
+        13
       ]
     },
     {
@@ -7538,9 +7538,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        41,
-        26,
-        33
+        49,
+        25,
+        26
       ]
     },
     {
@@ -7562,9 +7562,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        36,
+        40,
         26,
-        38
+        34
       ]
     },
     {
@@ -7586,9 +7586,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        39,
+        32,
         26,
-        35
+        42
       ]
     },
     {
@@ -7610,9 +7610,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        31,
-        26,
-        43
+        29,
+        25,
+        46
       ]
     },
     {
@@ -7658,9 +7658,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        60,
-        22,
-        18
+        67,
+        19,
+        14
       ]
     },
     {
@@ -7682,9 +7682,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        27,
-        25,
-        48
+        22,
+        24,
+        54
       ]
     },
     {
@@ -7706,8 +7706,8 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        8,
-        17,
+        9,
+        16,
         75
       ]
     },
@@ -7730,9 +7730,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        41,
+        40,
         26,
-        33
+        34
       ]
     },
     {
@@ -7754,9 +7754,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        61,
-        22,
-        17
+        66,
+        20,
+        14
       ]
     },
     {
@@ -7778,9 +7778,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        10,
-        17,
-        73
+        9,
+        16,
+        75
       ]
     },
     {
@@ -7802,9 +7802,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        31,
-        26,
-        43
+        27,
+        25,
+        48
       ]
     },
     {
@@ -7826,9 +7826,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        36,
+        30,
         26,
-        38
+        44
       ]
     },
     {
@@ -7851,8 +7851,8 @@
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
         75,
-        17,
-        8
+        16,
+        9
       ]
     },
     {
@@ -7874,9 +7874,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        35,
+        43,
         26,
-        39
+        31
       ]
     },
     {
@@ -7922,9 +7922,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
+        28,
         25,
-        25,
-        50
+        47
       ]
     },
     {
@@ -7947,8 +7947,8 @@
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
         75,
-        20,
-        5
+        19,
+        6
       ]
     },
     {
@@ -7970,9 +7970,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        66,
-        20,
-        14
+        75,
+        16,
+        9
       ]
     },
     {
@@ -7994,9 +7994,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        33,
+        38,
         26,
-        41
+        36
       ]
     },
     {
@@ -8018,9 +8018,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        28,
+        27,
         25,
-        47
+        48
       ]
     },
     {
@@ -8042,9 +8042,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        36,
+        33,
         26,
-        38
+        41
       ]
     },
     {
@@ -8066,9 +8066,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        43,
+        42,
         26,
-        31
+        32
       ]
     },
     {
@@ -8090,9 +8090,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        48,
+        46,
         25,
-        27
+        29
       ]
     },
     {
@@ -8114,9 +8114,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        51,
-        24,
-        25
+        61,
+        22,
+        17
       ]
     },
     {
@@ -8139,8 +8139,8 @@
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
         75,
-        18,
-        7
+        17,
+        8
       ]
     },
     {
@@ -8162,9 +8162,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        50,
-        25,
-        25
+        43,
+        26,
+        31
       ]
     },
     {
@@ -8186,9 +8186,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        29,
-        26,
-        45
+        28,
+        25,
+        47
       ]
     },
     {
@@ -8210,9 +8210,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        48,
+        51,
         25,
-        27
+        24
       ]
     },
     {
@@ -8234,9 +8234,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        61,
-        22,
-        17
+        72,
+        17,
+        11
       ]
     },
     {
@@ -8258,9 +8258,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        43,
-        26,
-        31
+        53,
+        24,
+        23
       ]
     },
     {
@@ -8282,9 +8282,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        30,
-        25,
-        45
+        35,
+        26,
+        39
       ]
     },
     {
@@ -8306,8 +8306,8 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        8,
-        17,
+        9,
+        16,
         75
       ]
     },
@@ -8354,9 +8354,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        33,
+        34,
         26,
-        41
+        40
       ]
     },
     {
@@ -8378,9 +8378,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        55,
-        23,
-        22
+        51,
+        24,
+        25
       ]
     },
     {
@@ -8402,9 +8402,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        21,
-        23,
-        56
+        24,
+        24,
+        52
       ]
     },
     {
@@ -8450,9 +8450,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        54,
+        52,
         24,
-        22
+        24
       ]
     },
     {
@@ -8474,9 +8474,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        54,
-        24,
-        22
+        43,
+        26,
+        31
       ]
     },
     {
@@ -8498,9 +8498,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        73,
-        17,
-        10
+        75,
+        16,
+        9
       ]
     },
     {
@@ -8522,9 +8522,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        19,
-        23,
-        58
+        14,
+        20,
+        66
       ]
     },
     {
@@ -8546,9 +8546,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        58,
-        23,
-        19
+        52,
+        24,
+        24
       ]
     },
     {
@@ -8594,9 +8594,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        54,
+        52,
         24,
-        22
+        24
       ]
     },
     {
@@ -8666,9 +8666,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        42,
+        45,
         26,
-        32
+        29
       ]
     },
     {
@@ -8690,9 +8690,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        49,
-        25,
-        26
+        60,
+        22,
+        18
       ]
     },
     {
@@ -8714,9 +8714,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        47,
-        25,
-        28
+        52,
+        24,
+        24
       ]
     },
     {
@@ -8738,9 +8738,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        8,
-        17,
-        75
+        10,
+        16,
+        74
       ]
     },
     {
@@ -8762,9 +8762,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        28,
+        27,
         25,
-        47
+        48
       ]
     },
     {
@@ -8834,9 +8834,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        56,
-        23,
-        21
+        59,
+        22,
+        19
       ]
     },
     {
@@ -8858,9 +8858,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        33,
+        35,
         26,
-        41
+        39
       ]
     },
     {
@@ -8883,8 +8883,8 @@
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
         12,
-        19,
-        69
+        18,
+        70
       ]
     },
     {
@@ -8906,9 +8906,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        75,
-        18,
-        7
+        73,
+        17,
+        10
       ]
     },
     {
@@ -8930,9 +8930,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        68,
-        19,
-        13
+        73,
+        17,
+        10
       ]
     },
     {
@@ -8954,9 +8954,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        49,
-        25,
-        26
+        36,
+        26,
+        38
       ]
     },
     {
@@ -8978,9 +8978,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        60,
-        22,
-        18
+        66,
+        20,
+        14
       ]
     },
     {
@@ -9002,9 +9002,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        28,
-        25,
-        47
+        30,
+        26,
+        44
       ]
     },
     {
@@ -9026,9 +9026,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        53,
-        24,
-        23
+        43,
+        26,
+        31
       ]
     },
     {
@@ -9050,9 +9050,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        52,
-        24,
-        24
+        43,
+        26,
+        31
       ]
     },
     {
@@ -9074,9 +9074,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        55,
-        23,
-        22
+        62,
+        21,
+        17
       ]
     },
     {
@@ -9098,9 +9098,9 @@
       "result": null,
       "source": "https://www.premierleague.com/en/news/4675097/all-380-fixtures-for-202627-premier-league-season",
       "probabilities": [
-        75,
-        16,
-        9
+        73,
+        17,
+        10
       ]
     },
     {
@@ -9136,224 +9136,224 @@
   },
   "teams": {
     "AFC Bournemouth": {
-      "rating": 1542,
-      "form": "DDLDDD",
+      "rating": 1525,
+      "form": "DLDDDL",
       "played": 38,
       "points": 57,
       "gf": 58,
       "ga": 54,
       "gd": 4,
       "basis": "2025/26 Premier League",
-      "playedCurrent": 4
+      "playedCurrent": 5
     },
     "Arsenal": {
-      "rating": 1924,
-      "form": "WWWWWW",
+      "rating": 1863,
+      "form": "WWWWWL",
       "played": 38,
       "points": 85,
       "gf": 71,
       "ga": 27,
       "gd": 44,
       "basis": "2025/26 Premier League",
-      "playedCurrent": 4
+      "playedCurrent": 5
     },
     "Aston Villa": {
-      "rating": 1537,
-      "form": "WWLLDL",
+      "rating": 1547,
+      "form": "WLLDLW",
       "played": 38,
       "points": 65,
       "gf": 56,
       "ga": 49,
       "gd": 7,
       "basis": "2025/26 Premier League",
-      "playedCurrent": 4
+      "playedCurrent": 5
     },
     "Brentford": {
-      "rating": 1539,
-      "form": "DDWDDD",
+      "rating": 1576,
+      "form": "DWDDDW",
       "played": 38,
       "points": 53,
       "gf": 55,
       "ga": 52,
       "gd": 3,
       "basis": "2025/26 Premier League",
-      "playedCurrent": 4
+      "playedCurrent": 5
     },
     "Brighton & Hove Albion": {
-      "rating": 1602,
-      "form": "LLWLDW",
+      "rating": 1662,
+      "form": "LWLDWW",
       "played": 38,
       "points": 53,
       "gf": 52,
       "ga": 46,
       "gd": 6,
       "basis": "2025/26 Premier League",
-      "playedCurrent": 4
+      "playedCurrent": 5
     },
     "Chelsea": {
-      "rating": 1559,
-      "form": "WLWWLD",
+      "rating": 1522,
+      "form": "LWWLDL",
       "played": 38,
       "points": 52,
       "gf": 58,
       "ga": 52,
       "gd": 6,
       "basis": "2025/26 Premier League",
-      "playedCurrent": 4
+      "playedCurrent": 5
     },
     "Coventry City": {
-      "rating": 1580,
-      "form": "WWLLLL",
+      "rating": 1593,
+      "form": "WLLLLW",
       "played": 46,
       "points": 95,
       "gf": 97,
       "ga": 45,
       "gd": 52,
       "basis": "2025/26 Championship (promoted)",
-      "playedCurrent": 4
+      "playedCurrent": 5
     },
     "Crystal Palace": {
-      "rating": 1399,
-      "form": "DLLLWL",
+      "rating": 1406,
+      "form": "LLLWLD",
       "played": 38,
       "points": 45,
       "gf": 41,
       "ga": 51,
       "gd": -10,
       "basis": "2025/26 Premier League",
-      "playedCurrent": 4
+      "playedCurrent": 5
     },
     "Everton": {
-      "rating": 1502,
-      "form": "LLWDDD",
+      "rating": 1525,
+      "form": "LWDDDW",
       "played": 38,
       "points": 49,
       "gf": 47,
       "ga": 50,
       "gd": -3,
       "basis": "2025/26 Premier League",
-      "playedCurrent": 4
+      "playedCurrent": 5
     },
     "Fulham": {
-      "rating": 1438,
-      "form": "DWLLLD",
+      "rating": 1450,
+      "form": "WLLLDD",
       "played": 38,
       "points": 52,
       "gf": 47,
       "ga": 51,
       "gd": -4,
       "basis": "2025/26 Premier League",
-      "playedCurrent": 4
+      "playedCurrent": 5
     },
     "Hull City": {
-      "rating": 1503,
-      "form": "LWWWDD",
+      "rating": 1481,
+      "form": "WWWDDL",
       "played": 46,
       "points": 73,
       "gf": 70,
       "ga": 66,
       "gd": 4,
       "basis": "2025/26 Championship (promoted)",
-      "playedCurrent": 4
+      "playedCurrent": 5
     },
     "Ipswich Town": {
-      "rating": 1539,
-      "form": "DWWLLW",
+      "rating": 1517,
+      "form": "WWLLWL",
       "played": 46,
       "points": 84,
       "gf": 80,
       "ga": 47,
       "gd": 33,
       "basis": "2025/26 Championship (promoted)",
-      "playedCurrent": 4
+      "playedCurrent": 5
     },
     "Leeds United": {
-      "rating": 1513,
-      "form": "WLWDDW",
+      "rating": 1506,
+      "form": "LWDDWD",
       "played": 38,
       "points": 47,
       "gf": 49,
       "ga": 56,
       "gd": -7,
       "basis": "2025/26 Premier League",
-      "playedCurrent": 4
+      "playedCurrent": 5
     },
     "Liverpool": {
-      "rating": 1598,
-      "form": "LDDDWD",
+      "rating": 1615,
+      "form": "DDDWDW",
       "played": 38,
       "points": 60,
       "gf": 63,
       "ga": 53,
       "gd": 10,
       "basis": "2025/26 Premier League",
-      "playedCurrent": 4
+      "playedCurrent": 5
     },
     "Manchester City": {
-      "rating": 1868,
-      "form": "DLWWWW",
+      "rating": 1874,
+      "form": "LWWWWW",
       "played": 38,
       "points": 78,
       "gf": 77,
       "ga": 35,
       "gd": 42,
       "basis": "2025/26 Premier League",
-      "playedCurrent": 4
+      "playedCurrent": 5
     },
     "Manchester United": {
-      "rating": 1662,
-      "form": "WWLWDL",
+      "rating": 1651,
+      "form": "WLWDLD",
       "played": 38,
       "points": 71,
       "gf": 69,
       "ga": 50,
       "gd": 19,
       "basis": "2025/26 Premier League",
-      "playedCurrent": 4
+      "playedCurrent": 5
     },
     "Newcastle United": {
-      "rating": 1468,
-      "form": "WLDWDL",
+      "rating": 1490,
+      "form": "LDWDLW",
       "played": 38,
       "points": 49,
       "gf": 53,
       "ga": 55,
       "gd": -2,
       "basis": "2025/26 Premier League",
-      "playedCurrent": 4
+      "playedCurrent": 5
     },
     "Nottingham Forest": {
-      "rating": 1452,
-      "form": "LDLDDW",
+      "rating": 1439,
+      "form": "DLDDWL",
       "played": 38,
       "points": 44,
       "gf": 48,
       "ga": 51,
       "gd": -3,
       "basis": "2025/26 Premier League",
-      "playedCurrent": 4
+      "playedCurrent": 5
     },
     "Sunderland": {
-      "rating": 1497,
-      "form": "WWLWDL",
+      "rating": 1490,
+      "form": "WLWDLL",
       "played": 38,
       "points": 54,
       "gf": 42,
       "ga": 48,
       "gd": -6,
       "basis": "2025/26 Premier League",
-      "playedCurrent": 4
+      "playedCurrent": 5
     },
     "Tottenham Hotspur": {
-      "rating": 1365,
-      "form": "LWLLDD",
+      "rating": 1354,
+      "form": "WLLDDL",
       "played": 38,
       "points": 41,
       "gf": 48,
       "ga": 57,
       "gd": -9,
       "basis": "2025/26 Premier League",
-      "playedCurrent": 4
+      "playedCurrent": 5
     }
   }
 }

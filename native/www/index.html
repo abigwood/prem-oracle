@@ -13,7 +13,7 @@
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" href="icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
-  <link rel="stylesheet" href="styles.css?v=20260909a">
+  <link rel="stylesheet" href="styles.css?v=20260924a">
 </head>
 <body>
   <header class="app-header">
@@ -36,9 +36,9 @@
   </footer>
 
   <nav class="bottom-nav" aria-label="Main navigation">
-    <button class="active" type="button" data-view="picks"><span>🔮</span>My Picks</button>
-    <button type="button" data-view="league"><span>🏆</span>League</button>
-    <button type="button" data-view="rules"><span>📋</span>Rules</button>
+    <button class="active" type="button" data-view="picks" aria-current="page"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6h11M9 12h11M9 18h11"/><path d="M3.5 6l1 1 2-2M3.5 12l1 1 2-2M3.5 18l1 1 2-2"/></svg>My Picks</button>
+    <button type="button" data-view="league"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="6" y1="20" x2="6" y2="12"/><line x1="12" y1="20" x2="12" y2="5"/><line x1="18" y1="20" x2="18" y2="14"/><line x1="3" y1="20.5" x2="21" y2="20.5"/></svg>League</button>
+    <button type="button" data-view="rules"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 3.5h8l4 4v13H6z"/><path d="M14 3.5v4h4"/><path d="M9 12.5h6M9 16h6"/></svg>Rules</button>
   </nav>
 
   <dialog id="profileDialog">
@@ -58,8 +58,63 @@
         <p class="notif-hint">Kick-off reminders, per competition.</p>
         <div id="notificationPrefsList"></div>
       </div>
+      <div id="profileRecovery" class="profile-recovery" hidden>
+        <span class="eyebrow">Account recovery</span>
+        <p class="field-hint">These three words restore your account on another device. Keep them private.</p>
+        <p class="recovery-code" id="profileRecoveryCode"></p>
+      </div>
       <button class="primary wide" value="save">Save name</button>
       <button class="link-quiet" type="button" value="cancel" data-copy-diagnostics>Copy diagnostics</button>
+    </form>
+  </dialog>
+
+  <dialog id="joinDialog">
+    <form method="dialog" id="joinForm">
+      <div class="dialog-head">
+        <div>
+          <span class="eyebrow">You're invited</span>
+          <h2 id="joinLeagueName">Join the league</h2>
+        </div>
+        <button class="icon-button" value="cancel" aria-label="Close" data-join-cancel>×</button>
+      </div>
+      <p class="field-hint" id="joinIntro">Pick the name your mates will see, then you're in.</p>
+      <label for="joinDisplayName">Display name</label>
+      <input id="joinDisplayName" name="joinDisplayName" maxlength="24" autocomplete="nickname" placeholder="Your name" required>
+      <p class="join-taken" id="joinTaken" hidden></p>
+      <div class="join-suggestions" id="joinSuggestions" hidden></div>
+      <button class="primary wide" id="joinSubmit" value="join">Join league</button>
+      <button class="link-quiet" type="button" value="cancel" data-join-recover>Returning player? Restore with your code</button>
+    </form>
+  </dialog>
+
+  <dialog id="recoveryDialog">
+    <form method="dialog" id="recoveryForm">
+      <div class="dialog-head">
+        <div>
+          <span class="eyebrow">You're in</span>
+          <h2>Save your recovery code</h2>
+        </div>
+      </div>
+      <p class="field-hint">These three words restore your identity, leagues and standings on another device. You can find them later under your profile.</p>
+      <p class="recovery-code" id="recoveryCode"></p>
+      <p class="recovery-copied" id="recoveryCopied" role="status" hidden></p>
+      <button class="secondary wide" type="button" id="recoveryCopy" data-recovery-copy>Copy code</button>
+      <button class="primary wide" value="continue" data-recovery-continue>Continue</button>
+    </form>
+  </dialog>
+
+  <dialog id="notifyDialog" aria-labelledby="notifyTitle">
+    <form method="dialog" id="notifyForm">
+      <div class="dialog-head">
+        <div>
+          <span class="eyebrow">Nice pick</span>
+          <h2 id="notifyTitle">Want a kickoff reminder?</h2>
+        </div>
+        <button class="icon-button" value="cancel" aria-label="Close" data-notify-dismiss>×</button>
+      </div>
+      <p class="field-hint">We can nudge you before kickoff so you never miss a week. You choose which competitions — change it any time in your profile.</p>
+      <button class="primary wide" type="button" data-notify-allow>Remind me</button>
+      <button class="link-quiet" type="button" value="cancel" data-notify-later>Not now</button>
     </form>
   </dialog>
 
@@ -85,6 +140,7 @@
   <script src="vendor/capacitor/app.js" defer></script>
   <script src="vendor/capacitor/share.js" defer></script>
   <script src="vendor/capacitor/filesystem.js" defer></script>
-  <script src="app.js?v=20260909a" defer></script>
+  <script src="vendor/capacitor/in-app-review.js" defer></script>
+  <script src="app.js?v=20260924a" defer></script>
 </body>
 </html>

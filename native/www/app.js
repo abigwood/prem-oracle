@@ -1,6 +1,6 @@
 const SEASON_START = new Date("2026-08-21T20:00:00+01:00");
 const SEASON_START_DATE = "2026-08-21";
-const APP_BUILD = "20260909a";
+const APP_BUILD = "20260924a";
 const API = window.PREM_API || null;
 // Canonical public home of the web app. Inside the Capacitor shell the page is
 // served from premoracle://localhost, so location.origin can never be used to
@@ -25,6 +25,8 @@ const STORAGE = {
   roundStates: "prem_oracle_round_states",
   leagueSettings: "prem_oracle_league_settings",
   pickWeeks: "prem_oracle_pick_weeks",
+  notifyAsk: "prem_oracle_notify_ask", // v1.8 §4: the contextual ask, shown at most once
+  ratingAsked: "prem_oracle_rating_asked", // v1.8 §6: the review request, attempted at most once per identity+version
 };
 
 function isNativeApp() {
@@ -259,6 +261,9 @@ let expandedPickReveal = null;
 // means a long list stays the shape they left it in.
 let collapsedPickSections = new Set(readJSON(STORAGE.pickSections, []));
 let leagueSettingsOpen = readJSON(STORAGE.leagueSettings, false) === true;
+// v1.8 §1: create/join/restore/admin live behind a "Manage leagues" entry, so
+// opening League shows the table first. This toggles that management surface.
+let leagueManageOpen = false;
 // D8: which PAST weeks the viewer has opened, keyed "CODE:period". Past weeks
 // default closed, so this set only ever holds deliberate openings.
 let openPickWeeks = new Set(readJSON(STORAGE.pickWeeks, []));
@@ -2379,9 +2384,9 @@ function applyLaunchBranch() {
 }
 
 function onboardingState() {
-  return `<div class="section-head"><div><span class="eyebrow">Welcome to Prem Oracle</span><h2>Play against your mates</h2></div></div>
+  return `<div class="section-head"><div><span class="eyebrow">Welcome to Prem Oracle</span><h2>Predict the week with your mates</h2></div></div>
     <div class="launch-card">
-      <p>Set up a private league, choose your competitions and how each week works, then share the code.</p>
+      <p>A private weekly score-prediction game you play with mates. Join by invite or start a league — each week the host picks the fixtures, your predictions lock at kick-off, and the league table settles once the results are in.</p>
       <button class="primary wide" type="button" data-view="league" data-launch-create>Create a league</button>
       <button class="secondary wide" type="button" data-view="league">Join a league</button>
     </div>`;
@@ -3081,8 +3086,8 @@ function picksView() {
   // An invitation in hand but not yet joined: said once, at the top, on the
   // screen the viewer actually lands on.
   const invite = inviteCode && !leagueCodes.includes(inviteCode)
-    ? `<div class="notice invite-notice"><span class="notice-icon">\ud83c\udfc6</span><div><strong>League invitation: ${
-        escapeHTML(inviteCode)}</strong><p>Open the League tab to join.</p></div></div>`
+    ? `<button class="notice invite-notice" type="button" data-open-join="${escapeHTML(inviteCode)}"><span class="notice-icon">\ud83c\udfc6</span><div><strong>League invitation: ${
+        escapeHTML(inviteCode)}</strong><p>Tap to choose your name and join.</p></div></button>`
     : "";
 
   const head = (name, summary, lines) =>
@@ -3308,6 +3313,10 @@ async function fillPanelProgressively(panel, capture) {
         : `${roundBanner(roundState)}${roundTableHtml(roundState)}<div class="season-share">${shareIconButton(state, "weekly")}</div>`;
     traceTap("chunk", { stage: "week", chars: html.length });
     panel.insertAdjacentHTML("beforeend", html);
+    // v1.8 §6: the completed-week result has now rendered. If it is a fully
+    // settled week the player took part in, this is the only place the rating
+    // request becomes eligible (after a stability delay, at most once).
+    if (roundState && roundState.complete) scheduleRoundReview(roundState);
     return true;
   }
   if (!leagueSupportsRounds(state)) {
@@ -5825,17 +5834,22 @@ function trophyCabinet(state) {
 // started" — and the questions arrive one at a time instead of as a form the
 // host has to decode. The old two-form "start a competition" framing is retired.
 
-const WIZARD_STEPS = ["name", "competitions", "count", "share"];
+// v1.8 §2 two-step creation: the input is two steps — details (name +
+// competition) then confirm (standard format, unusual options under Advanced).
+// "share" is the outcome presented after creation, not a third input step.
+const WIZARD_STEPS = ["details", "confirm", "share"];
+const WIZARD_INPUT_STEPS = ["details", "confirm"];
 
 let wizard = null;
 
 function openWizard() {
   wizard = {
-    step: "name",
+    step: "details",
     name: "",
     competitions: [availableCompetitions()[0]],
-    count: DEFAULT_FIXTURE_COUNT,
+    count: DEFAULT_FIXTURE_COUNT,   // §2 default: six fixtures
     confirmSingle: false, // the soft confirm a one-fixture week asks for
+    advancedOpen: false,  // Advanced settings disclosure state
     busy: false,
     code: "",
     error: "",
@@ -5857,65 +5871,73 @@ function wizardRule() {
 }
 
 function wizardProgress() {
-  const index = WIZARD_STEPS.indexOf(wizard.step);
-  return `<div class="wizard-progress" role="presentation">${WIZARD_STEPS.map((step, position) =>
+  const index = WIZARD_INPUT_STEPS.indexOf(wizard.step);
+  return `<div class="wizard-progress" role="presentation">${WIZARD_INPUT_STEPS.map((step, position) =>
     `<span class="wizard-dot${position <= index ? " is-done" : ""}${position === index ? " is-current" : ""}"></span>`
   ).join("")}</div>`;
 }
 
-function wizardStepName() {
-  return `<span class="eyebrow">Step 1 of 4</span>
+// Step 1 — league name and competition(s).
+function wizardStepDetails() {
+  const codes = availableCompetitions();
+  return `<span class="eyebrow">Step 1 of 2</span>
     <h3>Name your league</h3>
     <p class="wizard-hint">Your mates will see this at the top of the table.</p>
     <input name="leagueName" maxlength="40" placeholder="Saturday Super 6" value="${escapeHTML(wizard.name)}" data-wizard-name autofocus>
-    <div class="wizard-actions">
-      <button class="primary wide" type="button" data-wizard-next>Next</button>
-    </div>`;
-}
-
-function wizardStepCompetitions() {
-  const codes = availableCompetitions();
-  return `<span class="eyebrow">Step 2 of 4</span>
-    <h3>Choose competitions</h3>
-    <p class="wizard-hint">Select everything your league should draw fixtures from.</p>
-    <div class="competition-choice" role="group" aria-label="Competitions">
+    <label class="field-label" for="wizardCompetitions">Competition</label>
+    <p class="wizard-hint">Which competition your league draws fixtures from.</p>
+    <div id="wizardCompetitions" class="competition-choice" role="group" aria-label="Competitions">
       ${codes.map((code) => `<label class="competition-option${wizard.competitions.includes(code) ? " is-selected" : ""}">
         <input type="checkbox" name="competitions" value="${code}" data-wizard-competition="${code}"${wizard.competitions.includes(code) ? " checked" : ""}>
         <span>${escapeHTML(competitionMeta(code).short)}</span>
       </label>`).join("")}
     </div>
     <div class="wizard-actions">
-      <button class="secondary" type="button" data-wizard-back>Back</button>
-      <button class="primary" type="button" data-wizard-next>Next</button>
+      <button class="primary wide" type="button" data-wizard-next>Next</button>
     </div>`;
 }
 
-function wizardStepCount() {
+// Step 2 — confirm the standard format; unusual options live under Advanced.
+function wizardStepConfirm() {
   const single = wizard.count === 1;
-  return `<span class="eyebrow">Step 3 of 4</span>
-    <h3>Fixtures each week</h3>
-    <p class="wizard-hint">How many fixtures should your mates predict each week? You can change this — and pick the fixtures yourself — every week.</p>
-    <div class="fixture-count" data-fixture-count>
-      <span>Fixtures each week</span>
-      <div class="count-stepper">
-        <button type="button" data-count-step="-1" aria-label="Fewer fixtures">−</button>
-        <b data-count-value>${wizard.count}</b>
-        <button type="button" data-count-step="1" aria-label="More fixtures">＋</button>
+  const scope = wizard.competitions.length > 1
+    ? "your selected competitions"
+    : escapeHTML(competitionMeta(wizard.competitions[0]).short);
+  return `<span class="eyebrow">Step 2 of 2</span>
+    <h3>Confirm your league</h3>
+    <p class="wizard-hint">Your league will run on the standard weekly format:</p>
+    <ul class="format-summary">
+      <li><b data-format-count>${wizard.count}</b> fixtures each week</li>
+      <li>You pick the fixtures yourself, every week</li>
+      <li>Drawn from ${scope}</li>
+    </ul>
+    <details class="wizard-advanced" data-wizard-advanced${wizard.advancedOpen ? " open" : ""}>
+      <summary>Advanced settings</summary>
+      <div class="wizard-advanced-body">
+        <div class="fixture-count" data-fixture-count>
+          <span>Fixtures each week</span>
+          <div class="count-stepper">
+            <button type="button" data-count-step="-1" aria-label="Fewer fixtures">−</button>
+            <b data-count-value>${wizard.count}</b>
+            <button type="button" data-count-step="1" aria-label="More fixtures">＋</button>
+          </div>
+          <input type="hidden" name="fixtureLimit" value="${wizard.count}">
+        </div>
+        ${single ? `<label class="wizard-confirm">
+          <input type="checkbox" data-wizard-confirm-single${wizard.confirmSingle ? " checked" : ""}>
+          <span>Short week — just one fixture to call!</span>
+        </label>` : ""}
       </div>
-      <input type="hidden" name="fixtureLimit" value="${wizard.count}">
-    </div>
-    ${single ? `<label class="wizard-confirm">
-      <input type="checkbox" data-wizard-confirm-single${wizard.confirmSingle ? " checked" : ""}>
-      <span>Short week — just one fixture to call!</span>
-    </label>` : ""}
+    </details>
     <div class="wizard-actions">
       <button class="secondary" type="button" data-wizard-back>Back</button>
       <button class="primary" type="button" data-wizard-next ${wizard.busy ? "disabled" : ""}>${wizard.busy ? "Creating…" : "Create league"}</button>
     </div>`;
 }
 
+// The outcome, presented after creation (and after the recovery moment).
 function wizardStepShare() {
-  return `<span class="eyebrow">Step 4 of 4</span>
+  return `<span class="eyebrow">League created</span>
     <h3>Share your code</h3>
     <p class="wizard-hint">Anyone with this code can join ${escapeHTML(wizard.name || "your league")}.</p>
     <div class="league-code wizard-code"><span>League code</span><strong>${escapeHTML(wizard.code)}</strong></div>
@@ -5926,9 +5948,8 @@ function wizardStepShare() {
 }
 
 const WIZARD_VIEWS = {
-  name: wizardStepName,
-  competitions: wizardStepCompetitions,
-  count: wizardStepCount,
+  details: wizardStepDetails,
+  confirm: wizardStepConfirm,
   share: wizardStepShare,
 };
 
@@ -5950,10 +5971,12 @@ function createLeagueCard() {
 
 /** Validates the step the host is on. Returns an error string, or "". */
 function wizardStepError() {
-  if (wizard.step === "name" && !wizard.name.trim()) return "Give your league a name";
-  if (wizard.step === "competitions" && !wizard.competitions.length) return "Choose at least one competition";
+  if (wizard.step === "details") {
+    if (!wizard.name.trim()) return "Give your league a name";
+    if (!wizard.competitions.length) return "Choose at least one competition";
+  }
   // A one-fixture week is legal, but it is unusual enough to be worth a nod.
-  if (wizard.step === "count" && wizard.count === 1 && !wizard.confirmSingle) {
+  if (wizard.step === "confirm" && wizard.count === 1 && !wizard.confirmSingle) {
     return "Short week — just one fixture to call! Tick to confirm.";
   }
   return "";
@@ -5964,7 +5987,8 @@ async function advanceWizard() {
   if (error) { wizard.error = error; render(); return; }
   wizard.error = "";
   const index = WIZARD_STEPS.indexOf(wizard.step);
-  if (wizard.step !== "count") {
+  // Only the final input step ("confirm") creates; earlier steps just advance.
+  if (wizard.step !== "confirm") {
     wizard.step = WIZARD_STEPS[index + 1];
     render();
     return;
@@ -5991,6 +6015,9 @@ async function advanceWizard() {
     wizard.step = "share";
     wizard.busy = false;
     await loadLeagueState();
+    // Same one-time recovery moment as joining. It overlays the share step; the
+    // Continue button simply reveals the invite underneath.
+    if (response.recovery) openRecoveryOnboarding(response.recovery, null);
   } catch (error) {
     wizard.busy = false;
     wizard.error = error.message;
@@ -6091,35 +6118,45 @@ function leagueSettings(state, isOwner) {
 }
 
 function leagueView() {
-  const recovery = localStorage.getItem(STORAGE.recovery);
   const joinDefault = inviteCode && !leagueCodes.includes(inviteCode) ? inviteCode : "";
-  const controls = `<div class="league-actions">
+  const state = leagueState;
+  const isOwner = state && !state.error && state.owner === uid();
+
+  // v1.8 §1: the management surface — create, manual join, restore, and (for
+  // the active league) administration — lives behind the "Manage leagues"
+  // entry so the table leads. The one-step invite join sheet is a separate,
+  // unchanged route and never comes through here.
+  const managePanel = () => `<div class="manage-panel" data-manage-panel>
     ${createLeagueCard()}
     <form class="league-form" data-join-league>
-      <span class="eyebrow">Got an invitation?</span><h3>Join a league</h3>
+      <span class="eyebrow">Got a code?</span><h3>Join a league</h3>
       <input name="leagueCode" maxlength="6" value="${joinDefault}" placeholder="ABC234" required>
       <label class="field-label" for="joinNick">Your name in this league</label>
       <input id="joinNick" name="joinNick" maxlength="24" value="${escapeHTML(playerName)}" placeholder="Your name" required>
       <p class="field-hint">This is what your mates will see on the table.</p>
       <button class="primary wide" type="submit">Join league</button>
     </form>
+    <form class="restore-card" data-restore>
+      <div><strong>Returning on another device?</strong><p>Enter your three-word recovery code to restore your identity, leagues and standings.</p></div>
+      <input name="recovery" placeholder="amber-score-oracle">
+      <button class="secondary" type="submit">Restore</button>
+    </form>
+    ${leagueCodes.length && state && !state.error ? leagueSettings(state, isOwner) : ""}
   </div>`;
-  const restore = `<form class="restore-card" data-restore>
-    <div><strong>${recovery ? "Your recovery code" : "Returning on another device?"}</strong><p>${recovery ? `<code>${recovery}</code> - save this privately.` : "Enter your three-word recovery code to restore your identity, leagues and standings."}</p></div>
-    <input name="recovery" placeholder="amber-score-oracle">
-    <button class="secondary" type="submit">Restore</button>
-  </form>`;
+
+  // No leagues yet: management IS the screen — there is no table to lead with.
   if (!leagueCodes.length) {
-    return `<div class="section-head"><div><span class="eyebrow">Private predictor leagues</span><h2>Play against your mates</h2></div></div>${flash()}${controls}${restore}`;
+    return `<div class="section-head"><div><span class="eyebrow">Private predictor leagues</span><h2>Manage leagues</h2></div></div>${flash()}${managePanel()}`;
   }
-  const state = leagueState;
-  const isOwner = state && !state.error && state.owner === uid();
+
+  // Manage view: the standings switcher stays; the panel replaces the table.
+  if (leagueManageOpen) {
+    return `<div class="section-head"><div><span class="eyebrow">Private predictor leagues</span><h2>Manage leagues</h2></div><button class="secondary" type="button" data-manage-close>Back to table</button></div>${flash()}${leagueSwitcher()}${managePanel()}`;
+  }
+
+  // Default: the current table is the first substantial object.
   const supportsRounds = leagueSupportsRounds(state);
-  // A PLACEHOLDER, never a built panel. Any global render while Season is
-  // selected used to rebuild the whole heavy Season panel synchronously — which
-  // is what made a pill switch cost four seconds even after the pill itself was
-  // acknowledged. The panel is mounted after this shell paints, from a retained
-  // DOM node or progressively.
+  // A PLACEHOLDER, never a built panel. Mounted after this shell paints.
   const inner = `<div class="league-results" data-league-results></div>`;
   const content = !state
     ? `<div class="empty"><strong>Loading league...</strong></div>`
@@ -6131,9 +6168,8 @@ function leagueView() {
           ${supportsRounds ? `${roundToggle()}<div class="picker-island" data-picker-island></div>` : ""}
           <div class="slate-slot">${hostSlateControl(state)}</div>
           ${inner}
-          ${leagueSettings(state, isOwner)}
         </section>`;
-  return `<div class="section-head"><div><span class="eyebrow">Private predictor leagues</span><h2>League table</h2></div></div>${flash()}${leagueSwitcher()}${content}${controls}${restore}`;
+  return `<div class="section-head"><div><span class="eyebrow">Private predictor leagues</span><h2>League table</h2></div></div>${flash()}${leagueSwitcher()}${content}<div class="league-actions-foot"><button class="secondary wide" type="button" data-manage-open>Manage leagues</button></div>`;
 }
 
 function rulesView() {
@@ -6487,7 +6523,11 @@ function render(options = {}) {
   if (currentView === "league") mountResults();
   renderPickerLayer();
   document.getElementById("profileInitial").textContent = playerInitial();
-  document.querySelectorAll(".bottom-nav button").forEach((button) => button.classList.toggle("active", button.dataset.view === currentView));
+  document.querySelectorAll(".bottom-nav button").forEach((button) => {
+    const on = button.dataset.view === currentView;
+    button.classList.toggle("active", on);
+    button.setAttribute("aria-current", on ? "page" : "false"); // non-colour active cue
+  });
   // Re-centring a strip nobody rebuilt would only fight a viewer who has
   // scrolled it themselves.
   if (changed) centreWeekStrip();
@@ -6583,7 +6623,11 @@ function paintShell(view) {
 function markActiveTab() {
   const active = normaliseView(currentView);
   document.querySelectorAll(".bottom-nav button")
-    .forEach((button) => button.classList.toggle("active", button.dataset.view === active));
+    .forEach((button) => {
+      const on = button.dataset.view === active;
+      button.classList.toggle("active", on);
+      button.setAttribute("aria-current", on ? "page" : "false"); // non-colour active cue
+    });
 }
 
 /** Lets the browser paint what has just been written before more work starts. */
@@ -6913,6 +6957,7 @@ async function handleWizardClick(event) {
   }
   if (event.target.closest("[data-wizard-done]")) {
     closeWizard();
+    leagueManageOpen = false; // land on the freshly-created league's table
     render();
     return true;
   }
@@ -7024,6 +7069,8 @@ document.addEventListener("click", async (event) => {
   // Navigation answers on the tap. It used to sit behind two awaited handlers,
   // and an await is only free when the main thread is idle — which, on the tap
   // that opens the heaviest screen in the app, is exactly when it is not.
+  const joinNotice = event.target.closest("[data-open-join]");
+  if (joinNotice) { openJoinSheet(joinNotice.dataset.openJoin); return; }
   const nav = event.target.closest("[data-view]");
   if (nav) {
     // The onboarding CTA lands on the League tab with the wizard already open.
@@ -7072,6 +7119,7 @@ document.addEventListener("click", async (event) => {
     if (wizard) {
       wizard.count = Math.max(MIN_FIXTURE_COUNT, Math.min(MAX_FIXTURE_COUNT, wizard.count + delta));
       if (wizard.count !== 1) wizard.confirmSingle = false;
+      wizard.advancedOpen = true; // the stepper lives under Advanced; keep it open
       wizard.error = "";
       render();
       return;
@@ -7082,6 +7130,13 @@ document.addEventListener("click", async (event) => {
     const next = Math.max(MIN_FIXTURE_COUNT, Math.min(MAX_FIXTURE_COUNT, Number(value.textContent) + delta));
     value.textContent = next;
     hidden.value = next;
+    return;
+  }
+  if (event.target.closest("[data-manage-open]")) { leagueManageOpen = true; render(); return; }
+  if (event.target.closest("[data-manage-close]")) {
+    leagueManageOpen = false;
+    if (wizard) closeWizard();
+    render();
     return;
   }
   if (await handleWizardClick(event)) return;
@@ -7256,6 +7311,9 @@ async function savePick(matchId, p1, p2) {
     if (API) await api("/pick", { uid: uid(), nickname: playerName, matchId, p1, p2 });
     localStorage.setItem(STORAGE.picks, JSON.stringify(picks));
     setFlash("Pick saved.");
+    // v1.8 §4: a saved prediction is demonstrated intent — offer reminders once,
+    // after the save settles. No-op on web / when already shown / non-prompt.
+    scheduleReminderOffer();
   } catch (error) {
     setFlash(error.message, "error");
     delete picks[matchId];
@@ -7391,9 +7449,17 @@ async function saveNotificationPrefs() {
   }
 }
 
+// Advanced settings is a native <details>; sync its open state so a re-render
+// (e.g. a fixture-count step) keeps it as the host left it. `toggle` does not
+// bubble, hence capture.
+document.addEventListener("toggle", (event) => {
+  if (wizard && event.target.matches?.("[data-wizard-advanced]")) wizard.advancedOpen = event.target.open;
+}, true);
+
 document.addEventListener("change", (event) => {
   const competition = event.target.closest("[data-wizard-competition]");
   if (competition && wizard) {
+    readWizardInputs(); // name now shares this step — preserve it across the re-render
     const code = competition.dataset.wizardCompetition;
     wizard.competitions = competition.checked
       ? availableCompetitions().filter((entry) => entry === code || wizard.competitions.includes(entry))
@@ -7417,9 +7483,256 @@ document.addEventListener("change", (event) => {
   saveNotificationPrefs();
 });
 
+/**
+ * The one-step invitation join sheet (v1.8 Slice A).
+ *
+ * An invite that names a league the viewer is not yet in opens this sheet with
+ * the league already identified, so the only thing asked is one display name.
+ * It extends the existing ?league= route and the /join endpoint — no parallel
+ * joining mechanism — and on success safe-switches to the joined league and
+ * lands on My Picks. A taken name is reported inline, with the worker's
+ * suggestions, and produces no membership.
+ */
+let joinSheetCode = "";
+// Every opening of the sheet is a new "generation". An identification or a
+// submission binds to the generation (and code) that was live when it started;
+// when a later opening, or a close, supersedes it, its async answer applies
+// NOTHING — it never renames the current sheet, shows another league's error,
+// saves the wrong league, or navigates. Closing the sheet supersedes too.
+let joinSheetGeneration = 0;
+let joinSubmitInFlight = false;
+
+function openJoinSheet(code) {
+  const generation = ++joinSheetGeneration; // supersede any in-flight identify/submit
+  joinSheetCode = String(code || "").toUpperCase();
+  joinSubmitInFlight = false;
+  const code0 = joinSheetCode;
+  const dialog = document.getElementById("joinDialog");
+  const nameEl = document.getElementById("joinLeagueName");
+  const introEl = document.getElementById("joinIntro");
+  const input = document.getElementById("joinDisplayName");
+  const submit = document.getElementById("joinSubmit");
+  clearJoinFeedback();
+  nameEl.textContent = "Joining league…";
+  introEl.textContent = "Pick the name your mates will see, then you're in.";
+  input.value = playerName || "";
+  submit.disabled = false;
+  if (!dialog.open) dialog.showModal();
+  // True once this sheet has been closed or replaced by a newer opening: a late
+  // answer to it must touch nothing.
+  const superseded = () => generation !== joinSheetGeneration || joinSheetCode !== code0 || !dialog.open;
+  // Identify the league by name through the existing read path. Unknown or
+  // deleted leagues fail honestly, in the sheet, without a membership attempt.
+  api(`/state?code=${encodeURIComponent(code0)}`)
+    .then((state) => {
+      if (superseded()) return;
+      // A /state answer that names a DIFFERENT league is never adopted — even
+      // when it carries a name. We only trust an answer for the code we asked
+      // about (Slice A/E).
+      const returned = String(state.code || "").toUpperCase();
+      if (returned && returned !== code0) return;
+      nameEl.textContent = `Join ${state.name || code0}`;
+    })
+    .catch(() => {
+      if (superseded()) return;
+      nameEl.textContent = "League not found";
+      introEl.textContent = "This invitation link is unknown or has expired. Check the code with whoever invited you.";
+      input.disabled = true;
+      submit.disabled = true;
+    });
+}
+
+function clearJoinFeedback() {
+  const taken = document.getElementById("joinTaken");
+  const suggestions = document.getElementById("joinSuggestions");
+  taken.hidden = true; taken.textContent = "";
+  suggestions.hidden = true; suggestions.replaceChildren();
+  document.getElementById("joinDisplayName").disabled = false;
+}
+
+function showJoinSuggestions(message, suggestions) {
+  const taken = document.getElementById("joinTaken");
+  const box = document.getElementById("joinSuggestions");
+  taken.textContent = message || "That name is taken in this league.";
+  taken.hidden = false;
+  box.replaceChildren();
+  for (const name of suggestions || []) {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "join-suggestion";
+    chip.dataset.joinSuggestion = name;
+    chip.textContent = name;
+    box.appendChild(chip);
+  }
+  box.hidden = !(suggestions && suggestions.length);
+}
+
+async function submitJoinSheet() {
+  const dialog = document.getElementById("joinDialog");
+  const input = document.getElementById("joinDisplayName");
+  const submit = document.getElementById("joinSubmit");
+  const nick = String(input.value || "").trim().slice(0, 24);
+  if (!nick) { showJoinSuggestions("Add the name your mates will see.", []); return; }
+  if (joinSubmitInFlight) return; // one request per sheet — a double-submit is ignored
+  // Bind this submission to the sheet open right now, and send THAT code — never
+  // the mutable current one — so a sheet that changes mid-flight cannot make us
+  // save or join the wrong league.
+  const generation = joinSheetGeneration;
+  const code0 = joinSheetCode;
+  const superseded = () => generation !== joinSheetGeneration || joinSheetCode !== code0;
+  joinSubmitInFlight = true;
+  clearJoinFeedback();
+  submit.disabled = true;
+  // A brand-new joiner adopts this as their profile name too, so a later league
+  // is prefilled — mirrors the existing manual join.
+  const profileName = playerName || nick;
+  try {
+    const response = await fetch(`${API}/join`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ uid: uid(), nickname: profileName, nick, code: code0 }),
+    });
+    const data = await response.json().catch(() => ({}));
+    // A late answer to a sheet the viewer has moved on from (or closed) applies
+    // nothing: no suggestions in another league's sheet, no save, no navigation.
+    if (superseded()) return;
+    if (response.status === 409 && data.taken) {
+      joinSubmitInFlight = false;
+      submit.disabled = false;
+      showJoinSuggestions(data.error, data.suggestions);
+      return;
+    }
+    if (response.status === 503) {
+      // No atomic authority right now — retryable, and nothing was written.
+      joinSubmitInFlight = false;
+      submit.disabled = false;
+      showJoinSuggestions(data.error || "Joining is busy right now — please try again in a moment.", []);
+      return;
+    }
+    if (!response.ok) throw new Error(data.error || `Request failed (${response.status})`);
+    if (!playerName) { playerName = nick; localStorage.setItem(STORAGE.name, playerName); }
+    if (data.recovery) localStorage.setItem(STORAGE.recovery, data.recovery);
+    saveLeague(data.code);
+    saveLeagueName(data.code, data.name);
+    dialog.close();
+    setFlash(`Joined ${data.name}`);
+    launchRouted = true;
+    // The v1.8 recovery moment: show the code once, before My Picks. Continuing
+    // (or a missing code) lands on My Picks exactly as before.
+    if (data.recovery) openRecoveryOnboarding(data.recovery, () => navigateToView("picks"));
+    else await navigateToView("picks");
+  } catch (error) {
+    if (superseded()) return;
+    joinSubmitInFlight = false;
+    submit.disabled = false;
+    showJoinSuggestions(error.message, []);
+  }
+}
+
+document.getElementById("joinForm").addEventListener("submit", (event) => {
+  event.preventDefault();
+  submitJoinSheet();
+});
+document.getElementById("joinDialog").addEventListener("click", (event) => {
+  const chip = event.target.closest("[data-join-suggestion]");
+  if (chip) {
+    document.getElementById("joinDisplayName").value = chip.dataset.joinSuggestion;
+    clearJoinFeedback();
+    return;
+  }
+  if (event.target.closest("[data-join-cancel]")) {
+    document.getElementById("joinDialog").close();
+    return;
+  }
+  if (event.target.closest("[data-join-recover]")) {
+    // Returning players go to the existing restore surface, not a new route.
+    document.getElementById("joinDialog").close();
+    navigateToView("league");
+  }
+});
+document.getElementById("joinDialog").addEventListener("close", () => {
+  // Closing supersedes any identification or submission still in flight, so a
+  // late answer to a dismissed sheet never reopens, renames or navigates.
+  joinSheetGeneration++;
+  joinSubmitInFlight = false;
+  restoreViewport();
+});
+
+/**
+ * v1.8 recovery onboarding — the one-time moment shown right after a join or a
+ * create, before the player continues. It ONLY displays the code. It never
+ * touches the clipboard on its own: copying happens solely on the explicit
+ * "Copy code" tap, and the clipboard is never cleared. The credential is
+ * display-only here (textContent, never innerHTML, never logged) and its later
+ * home is behind the Profile avatar, never a league screen, share card or
+ * diagnostics blob.
+ */
+let recoveryContinue = null;
+
+function openRecoveryOnboarding(code, onContinue) {
+  recoveryContinue = typeof onContinue === "function" ? onContinue : null;
+  const dialog = document.getElementById("recoveryDialog");
+  const codeEl = document.getElementById("recoveryCode");
+  const copied = document.getElementById("recoveryCopied");
+  const copyBtn = document.getElementById("recoveryCopy");
+  codeEl.textContent = code || "";
+  copied.hidden = true;
+  copied.textContent = "";
+  copyBtn.disabled = false;
+  if (!dialog.open) dialog.showModal();
+}
+
+// Only ever from the explicit Copy tap. Confirms on success; on failure it says
+// so honestly and leaves the code on screen to copy by hand.
+async function copyRecovery() {
+  const code = document.getElementById("recoveryCode").textContent;
+  const copied = document.getElementById("recoveryCopied");
+  if (!code) return;
+  try {
+    if (!navigator.clipboard || !navigator.clipboard.writeText) throw new Error("clipboard unavailable");
+    await navigator.clipboard.writeText(code);
+    copied.textContent = "Copied — store it somewhere safe.";
+  } catch {
+    copied.textContent = "Couldn't copy automatically — select the code above and save it by hand.";
+  }
+  copied.hidden = false;
+}
+
+// Runs the stored continuation exactly once. A second close (or an Escape after
+// Continue) does nothing.
+function continueRecovery() {
+  const go = recoveryContinue;
+  recoveryContinue = null;
+  if (go) go();
+}
+
+document.getElementById("recoveryDialog").addEventListener("click", (event) => {
+  if (event.target.closest("[data-recovery-copy]")) copyRecovery();
+});
+document.getElementById("recoveryDialog").addEventListener("close", () => {
+  continueRecovery();
+  restoreViewport();
+});
+
+// v1.8 §4: "Remind me" is the only path to the native permission dialog. "Not
+// now", the × and any dismissal (Escape, backdrop) all close without asking —
+// the shown flag was already set, so nothing re-pressures the player.
+document.getElementById("notifyDialog").addEventListener("click", (event) => {
+  if (event.target.closest("[data-notify-allow]")) { requestReminders(); return; }
+  if (event.target.closest("[data-notify-later], [data-notify-dismiss]")) {
+    document.getElementById("notifyDialog").close();
+  }
+});
+
 document.getElementById("profileButton").addEventListener("click", () => {
   document.getElementById("playerName").value = playerName;
   renderNotificationPrefs();
+  // Later recovery access lives here, behind the avatar — the only place the
+  // player's own code is shown.
+  const rec = localStorage.getItem(STORAGE.recovery);
+  const panel = document.getElementById("profileRecovery");
+  const codeEl = document.getElementById("profileRecoveryCode");
+  if (rec) { codeEl.textContent = rec; panel.hidden = false; }
+  else { codeEl.textContent = ""; panel.hidden = true; }
   document.getElementById("profileDialog").showModal();
 });
 
@@ -7555,12 +7868,107 @@ async function setupNativePushNotifications() {
         render({ scrollTop: true });
       }
     });
-    let permission = await push.checkPermissions();
-    if (permission.receive === "prompt") permission = await push.requestPermissions();
+    // v1.8 §4: launch never asks. If permission is ALREADY granted we register
+    // straight away (no explanation); "prompt" is deferred to the contextual
+    // ask after the first saved prediction; "denied" is left alone.
+    const permission = await push.checkPermissions();
     if (permission.receive === "granted") await push.register();
   } catch {
     // Native notification permission is optional; the app remains fully usable.
   }
+}
+
+// v1.8 §4 contextual notification ask.
+//
+// Shown at most once, only after a prediction has been saved, only on native,
+// and only when permission is still "prompt": granted registers at launch with
+// no explanation, and denied is never pressured again. The native iOS dialog is
+// reachable ONLY from the explicit "Remind me" action (requestReminders).
+let reminderOfferScheduled = false;
+
+// Scoped to the current identity: a device shared or restored to a different
+// account gets its own one-time ask, and the "shown" state never leaks between
+// player identities.
+const notifyAskKey = () => `${STORAGE.notifyAsk}:${uid()}`;
+
+function scheduleReminderOffer() {
+  if (reminderOfferScheduled) return;
+  if (localStorage.getItem(notifyAskKey()) === "shown") return;
+  reminderOfferScheduled = true;
+  // Let the save visibly settle (the "Saved" chip and flash) before we ask.
+  setTimeout(() => { reminderOfferScheduled = false; maybeOfferReminders(); }, 900);
+}
+
+async function maybeOfferReminders() {
+  if (localStorage.getItem(notifyAskKey()) === "shown") return;   // at most once, per identity
+  const cap = window.Capacitor;
+  const push = window.capacitorPushNotifications?.PushNotifications || cap?.Plugins?.PushNotifications;
+  if (!cap?.isNativePlatform?.() || !push) return;                   // web / no plugin → quiet
+  let permission;
+  try { permission = await push.checkPermissions(); } catch { return; }
+  if (permission.receive !== "prompt") return;                      // granted or denied → don't ask
+  // Marked shown the moment it appears, so a dismissal is never re-pressured.
+  localStorage.setItem(notifyAskKey(), "shown");
+  const dialog = document.getElementById("notifyDialog");
+  if (dialog && !dialog.open) dialog.showModal();
+}
+
+// The ONLY path that may trigger the native iOS permission dialog.
+async function requestReminders() {
+  const dialog = document.getElementById("notifyDialog");
+  if (dialog) dialog.close();
+  const push = window.capacitorPushNotifications?.PushNotifications || window.Capacitor?.Plugins?.PushNotifications;
+  if (!push) return;
+  try {
+    const permission = await push.requestPermissions();
+    if (permission.receive === "granted") await push.register();
+  } catch {
+    // Denied or unavailable — prediction entry is unaffected.
+  }
+}
+
+// v1.8 §6 restrained rating request.
+//
+// Uses Apple's native review mechanism through a feature-detected Capacitor
+// bridge (the community in-app-review plugin's shape). The SYSTEM decides
+// whether the prompt actually appears; we never gate by sentiment, never ask for
+// a positive rating, and never assume it was shown. Attempted at most once per
+// player identity AND app version, and only after a fully settled week the
+// player took part in has rendered and the interface has stabilised. Never on
+// launch, onboarding, joining, creating or while predicting. Quiet on web /
+// when the bridge is absent or fails.
+let reviewScheduled = false;
+
+// Scoped to identity + version so one account (or an older build) never
+// suppresses another's single eligible ask.
+const ratingAskedKey = () => `${STORAGE.ratingAsked}:${uid()}:${APP_BUILD}`;
+
+function participatedInRound(round) {
+  for (const id of slateIdsOf(round) || []) if (picks[id]) return true;
+  return false;
+}
+
+function scheduleRoundReview(round) {
+  if (reviewScheduled) return;
+  if (!round || !round.complete) return;                          // fully settled week only
+  if (localStorage.getItem(ratingAskedKey()) === "asked") return; // at most once per identity+version
+  if (!participatedInRound(round)) return;                        // must have taken part
+  reviewScheduled = true;
+  // Only after the completed result has rendered and the interface is stable.
+  setTimeout(() => { reviewScheduled = false; maybeRequestReview(); }, 1200);
+}
+
+async function maybeRequestReview() {
+  if (localStorage.getItem(ratingAskedKey()) === "asked") return;
+  const cap = window.Capacitor;
+  const review = window.capacitorInAppReview?.InAppReview || cap?.Plugins?.InAppReview;
+  // Web, no native bridge, or a bridge without the method → stay quiet.
+  if (!cap?.isNativePlatform?.() || !review || typeof review.requestReview !== "function") return;
+  // Marked on attempt: iOS controls whether the prompt shows, so we can neither
+  // know nor claim it appeared — we simply never attempt again for this identity
+  // and version.
+  localStorage.setItem(ratingAskedKey(), "asked");
+  try { await review.requestReview(); } catch { /* system-controlled; continue quietly */ }
 }
 
 // Pull a ?league=CODE invite out of an incoming URL (universal link or web).
@@ -7650,12 +8058,16 @@ Promise.all([loadFixtures(), hydrateIdentity()]).then(() => {
   const linked = inviteCode && leagueCodes.includes(inviteCode) && inviteCode !== activeLeague
     ? inviteCode
     : null;
-  if (inviteCode && !leagueCodes.includes(inviteCode)) { launchRouted = true; currentView = "league"; }
-  else if (asked) { launchRouted = true; currentView = asked; }
+  // An invite to a league the viewer is not in opens the one-step join sheet
+  // over their normal landing screen, rather than dropping them on the League
+  // tab to hunt for a form. The launch branch still decides that landing.
+  const joinInvite = inviteCode && !leagueCodes.includes(inviteCode) ? inviteCode : null;
+  if (asked) { launchRouted = true; currentView = asked; }
   else applyLaunchBranch();
   // The switch renders; without one, the ordinary first paint does.
   if (linked) setActiveLeague(linked);
   else render();
+  if (joinInvite && API) openJoinSheet(joinInvite);
   // A cold launch onto My Picks owes the same one revalidation an entry does.
   // Without this the screen could stand on a cache captured before kick-off
   // and never ask for the picks that have since been revealed.

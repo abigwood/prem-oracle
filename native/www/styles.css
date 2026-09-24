@@ -58,6 +58,19 @@ input {
 }
 input:focus { border-color: var(--purple); box-shadow: 0 0 0 3px var(--purple-soft); }
 
+/* v1.8 §7: one consistent, visible keyboard-focus ring for every interactive
+   control that doesn't already define its own (components with a bespoke ring
+   override this). Keyboard-only, so pointer taps stay clean. */
+button:focus-visible,
+a:focus-visible,
+summary:focus-visible,
+[role="button"]:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid var(--purple);
+  outline-offset: 2px;
+  border-radius: 10px;
+}
+
 .app-header {
   flex: none;
   position: relative;
@@ -950,12 +963,12 @@ th.wins-col { font-size: .92rem; }
   transform: translateZ(0);
 }
 .bottom-nav button { height: 52px; min-height: 52px; padding: 3px 0 5px; border: 0; color: #839087; background: transparent; font-size: .62rem; font-weight: 800; }
-/* Greyscale alone cannot dim the football — the emoji is already black and
-   white — so inactive icons carry opacity too, which is what actually reads as
-   "not this tab". */
-.bottom-nav button span { display: block; margin-bottom: 2px; font-size: 1.15rem; filter: grayscale(1); opacity: .45; transition: opacity .15s ease, filter .15s ease; }
+/* v1.8 §7: one consistent line-icon language. Icons stroke in currentColor, so
+   the active tab (purple) and inactive tabs (muted) read from colour AND from
+   opacity — never colour alone, and the text label is always present. */
+.bottom-nav .nav-icon { display: block; width: 22px; height: 22px; margin: 0 auto 2px; opacity: .55; transition: opacity .15s ease; }
 .bottom-nav button.active { color: var(--purple); }
-.bottom-nav button.active span { filter: none; opacity: 1; }
+.bottom-nav button.active .nav-icon { opacity: 1; }
 
 /* Native shell only: tighten the bottom-nav's home-indicator padding so the
    icons sit lower while the bar still clears the indicator and its background
@@ -974,6 +987,27 @@ dialog form { padding: 20px; }
 .dialog-head h2 { margin: 4px 0 16px; }
 .icon-button { width: 34px; height: 34px; border: 0; border-radius: 50%; color: var(--muted); background: #eef1ec; font-size: 1.35rem; }
 dialog label { display: block; margin-bottom: 6px; color: var(--muted); font-size: .75rem; font-weight: 800; }
+
+/* v1.8 recovery onboarding: the code is the strongest object in the sheet, and
+   user-selectable so a copy-failure fallback ("copy it by hand") is real. */
+.recovery-code {
+  margin: 14px 0 12px;
+  padding: 14px 16px;
+  border-radius: 12px;
+  background: #f2f4ef;
+  color: var(--purple);
+  font-weight: 900;
+  font-size: 1.15rem;
+  letter-spacing: .01em;
+  text-align: center;
+  overflow-wrap: anywhere;
+  user-select: all;
+  -webkit-user-select: all;
+}
+.recovery-copied { margin: 0 0 12px; color: var(--green); font-weight: 800; font-size: .82rem; text-align: center; }
+#recoveryDialog .primary { margin-top: 8px; }
+.profile-recovery { margin: 8px 0 4px; }
+.profile-recovery .recovery-code { font-size: 1rem; }
 @media (min-width: 700px) {
   main { padding-top: 26px; }
   .hero { padding: 30px; }
@@ -1669,6 +1703,21 @@ body.picker-open { overflow: hidden; }
 }
 .wizard-actions { display: flex; gap: 9px; margin-top: 15px; }
 .wizard-actions button { flex: 1; }
+
+/* v1.8 §2 two-step creation: standard-format summary + Advanced disclosure. */
+.format-summary { margin: 10px 0 4px; padding-left: 18px; color: var(--ink); font-size: .86rem; line-height: 1.7; }
+.format-summary b { color: var(--purple); }
+.wizard-advanced { margin: 12px 0 2px; border-top: 1px solid var(--line); padding-top: 10px; }
+.wizard-advanced > summary { cursor: pointer; color: var(--muted); font-size: .78rem; font-weight: 800; list-style: none; }
+.wizard-advanced > summary::-webkit-details-marker { display: none; }
+.wizard-advanced > summary::before { content: "▸ "; }
+.wizard-advanced[open] > summary::before { content: "▾ "; }
+.wizard-advanced-body { margin-top: 10px; }
+
+/* v1.8 §1 Manage leagues: the management surface, and the entry that opens it. */
+.manage-panel { display: flex; flex-direction: column; gap: 13px; margin-top: 13px; }
+.league-actions-foot { margin: 16px 0 4px; }
+.section-head [data-manage-close] { flex: 0 0 auto; }
 .wizard-actions .wide { flex: 1 1 100%; }
 .wizard-cancel {
   width: 100%;

@@ -24,6 +24,7 @@
   },
   "homepage": "https://github.com/abigwood/prem-oracle#readme",
   "dependencies": {
+    "@capacitor-community/in-app-review": "^8.0.0",
     "@capacitor/cli": "8.4.1",
     "@capacitor/core": "8.4.1",
     "@capacitor/filesystem": "^8.1.2",

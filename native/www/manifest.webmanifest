@@ -1,7 +1,7 @@
 {
   "name": "Prem Oracle — 2026/27 Predictor",
   "short_name": "Prem Oracle",
-  "description": "Predict every Premier League 2026/27 score.",
+  "description": "A private weekly score-prediction game you play with mates. Join by invite, predict the host's chosen fixtures before kick-off, and climb your league table.",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",

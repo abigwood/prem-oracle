@@ -3264,6 +3264,22 @@ class AcquisitionAndRatingTests(unittest.TestCase):
         self.assertIn("kick-off", doc)
         self.assertIn("table", doc)
 
+    def test_app_store_fields_are_within_apple_limits(self):
+        import re
+        limits = {
+            "App name": 30,
+            "Subtitle (≤30 chars)": 30,
+            "Promotional text (≤170 chars)": 170,
+            "Keywords (≤100 chars, comma-separated, neutral)": 100,
+        }
+        for label, lim in limits.items():
+            m = re.search(r"## " + re.escape(label) + r"[^\n]*\n(.+?)(?=\n## |\Z)",
+                          self.store_doc, re.S)
+            self.assertIsNotNone(m, f"missing field: {label}")
+            value = " ".join(m.group(1).split())   # single-line fields; promo may wrap
+            self.assertLessEqual(len(value), lim,
+                                 f"{label} is {len(value)} chars, over Apple's {lim}")
+
     def test_app_store_metadata_names_no_real_competition_club_or_broadcaster(self):
         blob = self.store_doc.lower()
         for banned in ("premier league", "epl", "champions league", "efl championship",

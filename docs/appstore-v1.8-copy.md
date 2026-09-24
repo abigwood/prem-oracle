@@ -21,7 +21,7 @@ A private weekly score-prediction game you play with mates. Join by invite,
 predict the host's fixtures before kick-off, and climb your league table.
 
 ## Keywords (≤100 chars, comma-separated, neutral)
-score predictor,prediction league,private league,weekly picks,football scores,sweepstake,predictions,mates
+score predictor,prediction league,private league,weekly picks,football scores,predictions,mates
 
 ## Description
 Prem Oracle is a private weekly score-prediction game you play with your mates

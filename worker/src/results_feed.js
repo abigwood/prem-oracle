@@ -258,6 +258,26 @@ function indexFixtures(fixtures) {
   return indexed;
 }
 
+// Defence-in-depth (schedule-integrity): a home|away index that ignores the
+// date, so a result can still be matched when a kickoff was rescheduled but our
+// feed date hasn't caught up. A pair that appears more than once is dropped — a
+// drifted match is only accepted when the home|away pair is unique, so we never
+// guess between two fixtures. Schedule correction remains the primary defence;
+// this only rescues the rare window where it hasn't landed yet.
+const pairKey = (home, away) => `${canonicalName(home)}|${canonicalName(away)}`;
+
+function indexFixturesByPair(fixtures) {
+  const indexed = new Map();
+  const ambiguous = new Set();
+  for (const match of fixtures || []) {
+    const key = pairKey(match.player1, match.player2);
+    if (indexed.has(key)) { ambiguous.add(key); continue; }
+    indexed.set(key, match);
+  }
+  for (const key of ambiguous) indexed.delete(key);
+  return indexed;
+}
+
 async function fetchFootballDataMatches(env, fixtures, competition) {
   const feed = feedForCompetition(competition);
   if (!feed) throw new Error(`no results feed configured for ${competition}`);
@@ -273,7 +293,19 @@ async function fetchFootballDataMatches(env, fixtures, competition) {
 
 export async function footballDataResults(env, fixtures, competition = "PL") {
   const indexedFixtures = indexFixtures(fixtures);
+  const pairFixtures = indexFixturesByPair(fixtures);
   const feedMatches = await fetchFootballDataMatches(env, fixtures, competition);
+  // A home|away pair with more than one FINISHED feed entry is ambiguous for the
+  // date-drift fallback, so that fallback refuses it (exact-date still works).
+  const finishedByPair = new Map();
+  for (const item of feedMatches) {
+    if (item?.status !== "FINISHED") continue;
+    const h = mapFootballDataTeam(item.homeTeam?.name || item.homeTeam?.shortName, competition);
+    const a = mapFootballDataTeam(item.awayTeam?.name || item.awayTeam?.shortName, competition);
+    if (!h || !a) continue;
+    const k = pairKey(h, a);
+    finishedByPair.set(k, (finishedByPair.get(k) || 0) + 1);
+  }
   const results = {};
   // A fixture two feed entries disagree about is dropped and stays dropped.
   const disputed = new Set();
@@ -287,7 +319,13 @@ export async function footballDataResults(env, fixtures, competition = "PL") {
     if (!home || !away) continue;
     const score = item.score?.fullTime;
     if (!Number.isInteger(score?.home) || !Number.isInteger(score?.away)) continue;
-    const fixture = indexedFixtures.get(fixtureKey(home, away, item.utcDate));
+    // Primary: exact home|away|date. Fallback: unique home|away with drifted
+    // date — only when the pair is unique on BOTH sides (our feed and the
+    // provider), so we never settle the wrong fixture.
+    let fixture = indexedFixtures.get(fixtureKey(home, away, item.utcDate));
+    if (!fixture && finishedByPair.get(pairKey(home, away)) === 1) {
+      fixture = pairFixtures.get(pairKey(home, away));
+    }
     if (!fixture) continue;
     if (disputed.has(fixture.id)) continue;
     const held = results[fixture.id];

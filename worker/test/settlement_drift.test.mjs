@@ -51,6 +51,14 @@ test("ambiguous on PROVIDER side (two FINISHED entries, same pair) → not settl
   assert.equal(res["pl-1"], undefined, "two provider entries for one pair is ambiguous → refuse");
 });
 
+test("reversed home/away is NOT settled by the drift fallback", async () => {
+  // Our fixture is Arsenal(home) v Chelsea(away); provider reports Chelsea v Arsenal.
+  const fixtures = [{ id: "pl-1", player1: "Arsenal", player2: "Chelsea", startAt: "2026-10-10T15:00:00+01:00" }];
+  const res = await withFeed([fin("Chelsea", "Arsenal", "2026-10-11T13:00:00Z", 2, 1)],
+    () => footballDataResults(env, fixtures, "PL"));
+  assert.equal(res["pl-1"], undefined, "a reversed pairing is a different fixture — must not settle");
+});
+
 test("exact-date match wins even if a drifted entry for another fixture exists", async () => {
   const fixtures = [
     { id: "pl-1", player1: "Arsenal", player2: "Chelsea", startAt: "2026-10-10T15:00:00+01:00" },

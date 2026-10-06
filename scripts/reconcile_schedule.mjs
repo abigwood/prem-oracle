@@ -93,23 +93,26 @@ export function reconcileFixtures(ours, provider, nowMs, { competition } = {}) {
   const ourIdx = indexByIdentity(ours, (f) => f.player1, (f) => f.player2);
 
   for (const f of ours) {
-    // Only UPCOMING, unplayed fixtures. Never touch settled/played ones.
+    // Never touch a fixture that already has a result.
     if (f.result != null) { diagnostics.skippedSettled++; continue; }
-    const startMs = Date.parse(f.startAt || f.date);
-    if (Number.isFinite(startMs) && startMs <= nowMs) { diagnostics.skippedPast++; continue; }
     if (!f.player1 || !f.player2) continue;
 
     const key = idKey(f.player1, f.player2);
-    // Our side ambiguous (two fixtures share home|away) → fail closed.
+    // Ambiguous on either side (two fixtures/entries share home|away) → fail closed.
     if (provIdx.ambiguous.has(key) || ourIdx.ambiguous.has(key)) {
       diagnostics.ambiguous++;
       alerts.push({ level: "warn", code: "ambiguous_identity", id: f.id,
         message: `${f.id}: ${f.player1} v ${f.player2} is ambiguous in provider or feed — not reconciled` });
       continue;
     }
-    diagnostics.considered++;
+
     const prov = provIdx.map.get(key);
+    const storedMs = Date.parse(f.startAt || f.date);
     if (!prov) {
+      // The provider feed is upcoming-only (FINISHED/CANCELLED are dropped). A
+      // stored-past fixture with no provider entry has simply been played and is
+      // waiting for settlement — not a reconciliation concern, and not an alert.
+      if (Number.isFinite(storedMs) && storedMs <= nowMs) { diagnostics.skippedPast++; continue; }
       diagnostics.unmatched++;
       alerts.push({ level: "warn", code: "unmatched", id: f.id,
         message: `${f.id}: ${f.player1} v ${f.player2} has no provider entry — kickoff unverified` });
@@ -128,6 +131,14 @@ export function reconcileFixtures(ours, provider, nowMs, { competition } = {}) {
         message: `${f.id}: provider time ${prov.utcKickoff} is unparseable` });
       continue;
     }
+    // Reconcile only kickoffs the PROVIDER still places in the future — judged on
+    // the authoritative time, never our stored one. This is what rescues a stale
+    // stored-past time whose real kickoff was moved later (a postponement), while
+    // still leaving a genuinely-started match to settlement.
+    const wantMs = Date.parse(want.startAt);
+    if (Number.isFinite(wantMs) && wantMs <= nowMs) { diagnostics.skippedPast++; continue; }
+
+    diagnostics.considered++;
     if (f.date === want.date && f.time === want.time && f.startAt === want.startAt) {
       diagnostics.unchanged++;               // already correct → no diff (idempotent)
       continue;

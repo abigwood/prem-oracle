@@ -115,6 +115,44 @@ test("settled/past fixtures are never touched", () => {
   assert.equal(r.diagnostics.skippedPast, 1);
 });
 
+test("stale stored-PAST time but authoritative FUTURE kickoff IS corrected", () => {
+  // Postponed: our feed still shows 1 Oct (now past), provider moved it to 20 Oct.
+  const stale = fx("a", "A", "B", { date: "2026-10-01", time: "15:00", startAt: "2026-10-01T15:00:00+01:00" });
+  const to = only(reconcileFixtures([stale],
+    [prov("A", "B", "2026-10-20T14:00:00Z")], NOW, { competition: "PL" }));
+  assert.deepEqual(to, { date: "2026-10-20", time: "15:00", startAt: "2026-10-20T15:00:00+01:00" });
+});
+test("provider says the match already kicked off → left for settlement, not rewritten", () => {
+  const future = fx("a", "A", "B");                       // stored future
+  const r = reconcileFixtures([future], [prov("A", "B", "2026-10-06T08:00:00Z")], NOW, { competition: "PL" });
+  assert.equal(r.updates.length, 0);                      // provider time is in the past
+  assert.equal(r.diagnostics.skippedPast, 1);
+});
+
+// --- stable identity: no reversal, no cross-wiring ----------------------------
+
+test("reversed home/away is NOT treated as the same fixture", () => {
+  // Our fixture A(home) v B(away); provider lists B(home) v A(away) at a new time.
+  const r = reconcileFixtures([fx("a", "A", "B")], [prov("B", "A", "2026-10-11T13:00:00Z")], NOW, { competition: "PL" });
+  assert.equal(r.updates.length, 0, "must not adopt the reversed fixture's time");
+  assert.ok(r.alerts.some((x) => x.code === "unmatched" && x.id === "a"));
+});
+
+// --- the OTHER DST transition: spring forward (GMT→BST, 29 Mar 2026 / 28 Mar 2027)
+
+test("londonFromUtc: across the spring DST transition", () => {
+  // Spring 2027: clocks go forward 01:00 UTC Sun 28 Mar 2027.
+  assert.equal(londonOffsetMinutes(new Date("2027-03-27T12:00:00Z")), 0, "GMT before the change");
+  assert.equal(londonOffsetMinutes(new Date("2027-03-29T12:00:00Z")), 60, "BST after the change");
+  assert.equal(londonFromUtc("2027-03-27T15:00:00Z").startAt, "2027-03-27T15:00:00+00:00");
+  assert.equal(londonFromUtc("2027-03-29T14:00:00Z").startAt, "2027-03-29T15:00:00+01:00");
+});
+test("spring-forward reschedule lands on the correct BST wall-clock", () => {
+  const to = only(reconcileFixtures([fx("a", "A", "B", { date: "2027-03-29", time: "15:00", startAt: "2027-03-29T15:00:00+01:00" })],
+    [prov("A", "B", "2027-03-29T11:30:00Z")], NOW, { competition: "PL" }));
+  assert.deepEqual(to, { date: "2027-03-29", time: "12:30", startAt: "2027-03-29T12:30:00+01:00" });
+});
+
 // --- minimal deterministic feed edit -----------------------------------------
 
 test("applyFeedUpdates changes only date/startAt/time, nothing else", () => {

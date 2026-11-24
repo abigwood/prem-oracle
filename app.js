@@ -6185,7 +6185,13 @@ async function advanceWizard() {
   render();
 }
 
-/** "Premier League · 6 fixtures/week" — what this league actually includes. */
+/**
+ * "Premier League · 6 fixtures/week" — what this league actually includes.
+ *
+ * v1.8.1: said once, quietly, under the selected league's settings heading in
+ * Manage leagues. It used to be the uppercase eyebrow over the name on every
+ * League card, which is set-up detail read weekly by nobody.
+ */
 function leagueSummaryLine(state) {
   const names = (state?.competitions || [state?.competition || DEFAULT_COMPETITION])
     .map((code) => competitionMeta(code).name).join(" + ");
@@ -6265,7 +6271,7 @@ function leagueSettings(state, isOwner) {
   const open = leagueSettingsOpen;
   return `<details class="league-settings" data-league-settings${open ? " open" : ""}>
     <summary class="league-settings-head">
-      <span>League settings</span>
+      <span class="league-settings-title"><span>League settings</span><span class="league-settings-config">${escapeHTML(leagueSummaryLine(state))}</span></span>
     </summary>
     <div class="league-settings-body">
       <div class="league-code"><span>League code</span><strong>${state.code}</strong></div>
@@ -6323,7 +6329,6 @@ function leagueView() {
     : state.error
       ? `<div class="empty"><strong>${escapeHTML(state.error)}</strong></div>`
       : `<section class="league-card">
-          <span class="eyebrow">${escapeHTML(leagueSummaryLine(state))}</span>
           <h2>${escapeHTML(state.name)}</h2>
           ${supportsRounds ? `${roundToggle()}<div class="picker-island" data-picker-island></div>` : ""}
           <div class="slate-slot">${hostSlateControl(state)}</div>

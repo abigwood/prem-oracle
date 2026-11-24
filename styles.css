@@ -688,6 +688,9 @@ main {
 .stat span { color: var(--muted); font-size: .67rem; font-weight: 800; text-transform: uppercase; }
 
 .league-card h2, .rules-card h2 { margin: 4px 0 8px; font-family: Georgia, serif; }
+/* v1.8.1: the configuration eyebrow above the name is gone; the name moves up
+   into its space rather than keeping the gap the eyebrow sat in. */
+.league-card > h2:first-child { margin-top: 0; }
 .league-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 11px; margin: 13px 0; }
 .action-card, .league-form, .restore-card, .reveal-card {
   padding: 15px;
@@ -1947,6 +1950,17 @@ body.picker-open { overflow: hidden; }
   cursor: pointer;
 }
 .league-settings-head::-webkit-details-marker { display: none; }
+/* v1.8.1: the league's configuration, once, under its settings heading —
+   quiet, sentence case, and free to wrap on a 320pt phone. */
+.league-settings-title { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.league-settings-config {
+  color: var(--muted);
+  font-size: .74rem;
+  font-weight: 600;
+  letter-spacing: 0;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
 .league-settings-head::after {
   content: "⌄";
   color: var(--purple);

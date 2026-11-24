@@ -215,7 +215,9 @@ test("N11 · a surface with nothing to share renders no control at all", () => {
 
 test("N12 · the Season control sits under the standings and above the mates' section", () => {
   const stages = sourceOf("seasonStages");
-  const order = ["banner", "cabinet", "standings", "share", "reveals"]
+  // v1.8.1: the "Season 2026/27" banner stage is gone; the cabinet leads.
+  assert.ok(!stages.includes('"banner"'), "the season banner stage survives");
+  const order = ["cabinet", "standings", "share", "reveals"]
     .map((name) => stages.indexOf(`"${name}"`));
   assert.deepEqual(order, [...order].sort((a, b) => a - b), "the stages are out of order");
   assert.ok(order.every((at) => at > 0), "a stage is missing");

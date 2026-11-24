@@ -291,7 +291,7 @@ test("L1 · Edit line-up and its deadline stay next to Weekly", () => {
   assert.ok(card.indexOf("roundToggle()") < card.indexOf("slate-slot"));
   assert.ok(card.indexOf("slate-slot") < card.indexOf("${inner}"));
   assert.match(sourceOf("hostSlateControl"), /Edit line-up/);
-  assert.match(sourceOf("hostSlateControl"), /lockLine\(slate\)/);
+  assert.match(sourceOf("hostSlateControl"), /lockLine\(slate, \{ period: state\.currentPeriod \}\)/);
 });
 
 test("L1 · the collapse state is remembered", () => {

@@ -170,7 +170,6 @@ function cards({ native = false } = {}) {
     ${lift("function seasonCardPages(state)")}
     ${lift("function drawSeasonPage(model, m, page)")}
     ${lift("function drawSeasonTableCard(state)")}
-    ${lift("function seasonProgressLine(state)")}
     ${lift("function podiumCounts(row)")}
     ${lift("function winnerNames(round)")}
     ${lift("function leagueCompetitionNames(state)")}

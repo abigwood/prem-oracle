@@ -1016,7 +1016,8 @@ class CustomMixTests(unittest.TestCase):
         self.assertIn("const pickerReady = (bounds, count) => count >= bounds.min && count <= bounds.max;", self.app)
         self.assertIn("const ready = pickerReady(bounds, count);", self.app)
         self.assertIn("take more or fewer this week if you like", self.app)
-        self.assertIn("~${rule.count} random fixtures/week", self.app)
+        # v1.8.1: the noun agrees with the count ("~1 random fixture/week").
+        self.assertIn("~${rule.count} random ${noun(rule.count)}/week", self.app)
         self.assertIn("data-picker-surprise", self.app)
         self.assertIn("Surprise me", self.app)
         self.assertIn("Use all ${list.length} this week", self.app)
@@ -1661,8 +1662,9 @@ class WeekPickerTests(unittest.TestCase):
         # it has to be right — each one is inserted as it is built.
         stages = self.app[self.app.index("function seasonStages(state, isOwner)"):]
         stages = stages[:stages.index("\n}")]
-        for earlier, later in (("seasonBanner", "trophyCabinet"),
-                               ("trophyCabinet", "seasonTableHtml"),
+        # v1.8.1: the "Season 2026/27" banner is gone; the cabinet leads.
+        self.assertNotIn("seasonBanner", stages)
+        for earlier, later in (("trophyCabinet", "seasonTableHtml"),
                                ("seasonTableHtml", "leagueRevealsHtml")):
             self.assertLess(stages.index(earlier), stages.index(later), f"{earlier} must precede {later}")
 
@@ -1681,7 +1683,9 @@ class WeekPickerTests(unittest.TestCase):
             "${escapeHTML(periodLabelLong(pickerPeriod))}",
             "periodLabel(round?.period ?? period)",
             "periodLabel(round.period)",
-            "${periodLabel(period)} in progress",
+            # v1.8.1: the season banner's "in progress" line is gone; its
+            # week number now rides on the League card's lock line.
+            "return periodLabel(period);",
         ):
             self.assertIn(surface, self.app, surface)
         # No surface builds a window name from windowLabel by hand any more.
@@ -1838,14 +1842,17 @@ class AmendBeforeKickoffTests(unittest.TestCase):
 
     def test_the_lock_moment_is_a_concrete_time(self):
         fn = self.app[self.app.index("function lockTimeLabel(slate)"):]
-        fn = fn[:fn.index("function lockLine(slate)")]
+        fn = fn[:fn.index("function lockLine(slate, { period = null } = {})")]
         self.assertIn("slate?.lockAt", fn)
         self.assertIn('timeZone: "Europe/London"', fn)
         self.assertIn('weekday: "short"', fn)
-        line = self.app[self.app.index("function lockLine(slate)"):]
+        line = self.app[self.app.index("function lockLine(slate, { period = null } = {})"):]
         line = line[:line.index("function slateNotice(period)")]
         self.assertIn("Locks ${escapeHTML(when)}", line)
         self.assertIn("Line-up locked — the first fixture has kicked off.", line)
+        # v1.8.1: the League card's line names its week and says "at".
+        self.assertIn("if (period != null) return cardLockLine(slate, period);", line)
+        self.assertIn('${week ? `${escapeHTML(week)} · locks` : "Locks"} ${escapeHTML(when)}', line)
         self.assertIn(".lock-line", self.css)
 
     def test_the_picker_knows_it_is_amending(self):

@@ -2295,11 +2295,43 @@ function lockTimeLabel(slate) {
  * What the league is told about the deadline. Before the first kickoff the
  * line-up can still be amended, so both host and members see when that stops.
  */
-function lockLine(slate) {
+function lockLine(slate, { period = null } = {}) {
   if (!slate) return "";
+  // v1.8.1: the League card passes its period, and the line then carries the
+  // week it is about ("Week 13 · locks Sat 28 Nov at 15:00") — the number the
+  // retired "Season 2026/27 · next up" card used to hold. Other callers are
+  // unchanged.
+  if (period != null) return cardLockLine(slate, period);
   if (slate.locked) return `<p class="lock-line is-locked">Line-up locked — the first fixture has kicked off.</p>`;
   const when = lockTimeLabel(slate);
   return when ? `<p class="lock-line">Locks ${escapeHTML(when)}</p>` : "";
+}
+
+/**
+ * The week a League-card lock line is about, or "" when it cannot be named
+ * honestly: no number yet for a windowed week, or a slate that belongs to a
+ * different period from the league's current one. Never a guess.
+ */
+function lockWeekPrefix(slate, period) {
+  const own = slate?.period ?? slate?.matchweek;
+  if (own != null && String(own) !== String(period)) return "";
+  // The one week-naming path, minus its date-range fallback: a window with no
+  // week number yet is not a week this line can name.
+  if (isWindowKey(period) && weekNumberFor(period) == null) return "";
+  return periodLabel(period);
+}
+
+function cardLockLine(slate, period) {
+  const week = lockWeekPrefix(slate, period);
+  const at = slate.lockAt ? Date.parse(slate.lockAt) : NaN;
+  // A lock moment already behind us is not an upcoming lock, whatever the
+  // flag on a slate fetched before it passed says.
+  if (slate.locked || (Number.isFinite(at) && at <= Date.now())) {
+    return `<p class="lock-line is-locked">${week ? `${escapeHTML(week)} · line-up locked` : "Line-up locked"} — the first fixture has kicked off.</p>`;
+  }
+  const when = lockTimeLabel(slate).replace(/, (\d{2}:\d{2})$/, " at $1");
+  if (!when) return "";
+  return `<p class="lock-line">${week ? `${escapeHTML(week)} · locks` : "Locks"} ${escapeHTML(when)}</p>`;
 }
 
 function slateNotice(period) {
@@ -3438,7 +3470,6 @@ function resultsNode() {
 /** The Season panel, in bounded stages. Each is small enough to paint between. */
 function seasonStages(state, isOwner) {
   return [
-    ["banner", () => seasonBanner(state)],
     ["cabinet", () => trophyCabinet(state)],
     ["standings", () => seasonTableHtml(state, isOwner, true)],
     // Immediately under the table it exports, and above the mates' sections —
@@ -3893,32 +3924,6 @@ function fixtureHasResult(match) {
   const result = match?.result;
   if (Array.isArray(result)) return result.length === 2 && result.every((value) => value != null);
   return result?.p1 != null && result?.p2 != null;
-}
-
-/**
- * Where the season has got to, in one line. The banner says it and so does the
- * share card, from here — a card that placed the table one week away from where
- * the panel behind it does would be a card nobody could trust.
- */
-function seasonProgressLine(state) {
-  // A mixed league has no matchweek numbering and no season length, so it is
-  // told where it is in its own terms rather than being given "of null".
-  if (state.mixed || seasonRounds() == null) {
-    const period = state.currentPeriod;
-    return period == null
-      ? "season complete"
-      : state.currentMatchdayHasResults ? `${periodLabel(period)} in progress` : `next up: ${periodLabel(period)}`;
-  }
-  const played = state.currentMatchday == null ? seasonRounds() : Math.max(0, state.currentMatchday - 1);
-  const currentMatchdayHasResults = state.currentMatchdayHasResults ||
-    fixtures.some((fixture) => fixture.matchday === state.currentMatchday && fixtureHasResult(fixture));
-  return currentMatchdayHasResults && state.currentMatchday != null
-    ? `Matchweek ${state.currentMatchday} in progress`
-    : played === 0 ? `starts Matchweek ${state.currentMatchday || 1}` : `after Matchweek ${played} of ${seasonRounds()}`;
-}
-
-function seasonBanner(state) {
-  return `<div class="round-banner"><strong>Season 2026/27</strong><span>${escapeHTML(seasonProgressLine(state))}</span></div>`;
 }
 
 // Slate line under a matchweek banner, so a curated week is always legible as
@@ -6196,16 +6201,19 @@ function leagueSummaryLine(state) {
   const names = (state?.competitions || [state?.competition || DEFAULT_COMPETITION])
     .map((code) => competitionMeta(code).name).join(" + ");
   const rule = state?.weeklyRule;
+  // "1 fixture/week", "6 fixtures/week": the count and its noun agree.
+  const noun = (count) => (Number(count) === 1 ? "fixture" : "fixtures");
+  const perWeek = (count) => `${count} ${noun(count)}/week`;
   if (rule?.method === "allEligible") return `${names} · every fixture`;
   if (rule?.method === "allCompetition") return `${names} · every ${competitionMeta(rule.competitionScope).short} fixture`;
   // "~" because the count is a rule of thumb: individual weeks can differ.
-  if (rule?.method === "random") return `${names} · ~${rule.count} random fixtures/week`;
+  if (rule?.method === "random") return `${names} · ~${rule.count} random ${noun(rule.count)}/week`;
   // Plain text: the caller escapes this line, so markup here would show as tags.
-  if (rule?.method === "manual") return `${names} · ${rule.count} fixtures/week`;
+  if (rule?.method === "manual") return `${names} · ${perWeek(rule.count)}`;
   // A worker that predates the rule still answers with the old fields.
   if (state?.fixtureMode !== "limited") return `${names} · every fixture`;
   const limit = state?.fixtureLimit;
-  return limit == null ? `${names} · host picks each week` : `${names} · ~${limit} fixtures/week`;
+  return limit == null ? `${names} · host picks each week` : `${names} · ~${perWeek(limit)}`;
 }
 
 /**
@@ -6250,7 +6258,7 @@ function hostSlateControl(state) {
       : "";
   }
   return `<div class="slate-notice slate-notice-published">
-    ${lockLine(slate)}
+    ${lockLine(slate, { period: state.currentPeriod })}
     ${isOwner && !slate.locked
       ? `<button class="secondary wide" type="button" data-open-picker="${escapeHTML(state.currentPeriod)}" data-amend="1">Edit line-up</button>`
       : ""}

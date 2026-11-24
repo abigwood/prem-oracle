@@ -275,7 +275,6 @@ function island({ buildMs = 0 } = {}) {
     const periodLabel = (p) => "Matchweek " + p;
     const isMixedActive = () => true;   // Adam's shape: PL + ELC
     const traceTap = (name, detail) => events.push({ trace: name, ...detail });
-    const seasonBanner = () => "<sbanner>";
     const trophyCabinet = () => "<cabinet>";
     const seasonTableHtml = () => { const t = Date.now(); while (Date.now() - t < buildMs) {} return "<stable>"; };
     const weekSeasonPicker = () => "<weeks>";
@@ -436,7 +435,8 @@ test("an uncached panel shows the acknowledgement, then the content", async () =
   const pending = app.showResultsPanel({ status: "Loading season…" });
   assert.match(app.html(), /Loading season…/, "acknowledged first");
   await pending;
-  assert.match(app.html(), /sbanner/, "then the real panel");
+  // v1.8.1: the "Season 2026/27" banner stage is gone; the cabinet leads.
+  assert.match(app.html(), /<cabinet>/, "then the real panel");
   assert.doesNotMatch(app.html(), /is-pulsing/);
 });
 
@@ -887,8 +887,9 @@ test("Season is built in bounded stages, yielding between every one", async () =
   // build to duplicate navigation the Weekly League dropdown already owns.
   // v1.7 rider item 3: the share control is its own stage, immediately below
   // the table it exports and above the mates' section.
-  assert.deepEqual(chunks, ["banner", "cabinet", "standings", "share", "reveals"]);
-  assert.equal(app.panelNode().children.length, 5);
+  // v1.8.1: no "Season 2026/27" banner stage; the cabinet leads.
+  assert.deepEqual(chunks, ["cabinet", "standings", "share", "reveals"]);
+  assert.equal(app.panelNode().children.length, 4);
   const fn = lift("async function fillPanelProgressively(panel, capture)");
   assert.match(fn, /await nextPaint\(\);/, "and it yields between them");
 });

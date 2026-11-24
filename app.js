@@ -3314,7 +3314,8 @@ function shareFromPrompt(code) {
   return shareNow(leagueInvite(code)).then((outcome) => {
     if (outcome !== "shared") return outcome;
     markSharePromptDone(who, code);
-    removeSharePrompt(code);
+    // The Share button had focus; hand it on exactly as dismissal does.
+    removeSharePrompt(code, { refocus: true });
     return outcome;
   });
 }

@@ -398,3 +398,36 @@ test("the focus order is message, Share, Dismiss; dismissal hands focus on", asy
   w.tap("[data-share-prompt-dismiss]");
   assert.ok(w.document.activeElement.matches("[data-expand-pick]"), "focus was dropped to the body");
 });
+
+// --- focus after a share (v1.8.1 freeze review) --------------------------------
+
+test("a successful share hands focus on, exactly as dismissal does", async () => {
+  for (const native of [false, true]) {
+    const w = world({ native, picks: { a1: { p1: 1, p2: 0 }, a2: { p1: 1, p2: 0 } } });
+    await w.save("a3");
+    const share = w.document.querySelector("[data-share-prompt-share]");
+    share.focus();
+    assert.equal(w.document.activeElement, share);
+    w.tap("[data-share-prompt-share]");
+    assert.equal(await w.box.lastShare, "shared");
+    assert.equal(w.prompts().length, 0);
+    assert.notEqual(w.document.activeElement, w.document.body, `native=${native}: focus was dropped to the body`);
+    assert.ok(w.document.activeElement.matches("[data-expand-pick]"), `native=${native}: focus went somewhere unexpected`);
+  }
+  // Both routes use the one refocus path.
+  assert.match(sourceOf("shareFromPrompt"), /removeSharePrompt\(code, \{ refocus: true \}\)/);
+  assert.match(sourceOf("dismissSharePrompt"), /removeSharePrompt\(code, \{ refocus: true \}\)/);
+});
+
+test("a cancelled or failed share leaves the prompt, and focus, where they were", async () => {
+  for (const share of ["cancel", "fail"]) {
+    const w = world({ share, picks: { a1: { p1: 1, p2: 0 }, a2: { p1: 1, p2: 0 } } });
+    await w.save("a3");
+    const button = w.document.querySelector("[data-share-prompt-share]");
+    button.focus();
+    w.tap("[data-share-prompt-share]");
+    assert.notEqual(await w.box.lastShare, "shared");
+    assert.equal(w.prompts().length, 1, `${share}: the prompt was removed`);
+    assert.equal(w.document.activeElement, button, `${share}: focus moved`);
+  }
+});

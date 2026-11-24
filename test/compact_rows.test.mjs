@@ -420,3 +420,42 @@ test("the v between the badges is neutral, not a club colour", () => {
   assert.doesNotMatch(v, /team-/);
   assert.ok(!APP.includes("pick-row-v\" style"), "the v takes an inline colour");
 });
+
+// --- 7 · review fix: narrow phones and the longest state word ----------------
+// Measured in Chrome at real 320/375 viewports (v1.8.1 review): "POSTPONED" at
+// the caption's tracking was 77.8px in a 73.6px column, and at 320 the 107px
+// badge group sat in a 95px middle column, so the away crest met the word.
+
+const rem = (v) => parseFloat(v) * (v.endsWith("rem") ? 16 : 1);
+const decl = (block, prop) => (block.match(new RegExp(`(?:^|[;{\\s])${prop}: ([^;]+);`)) || [])[1];
+
+test("state words are tightened so 'Postponed' fits the fixed score column", () => {
+  // The dedicated rule, not the one it shares with the FT caption.
+  const word = [...CSS.matchAll(/\n\.pick-row-word \{([^}]*)\}/g)].map((m) => m[1]).find((b) => /white-space/.test(b));
+  assert.ok(word, "no dedicated .pick-row-word rule");
+  assert.equal(decl(word, "white-space"), "nowrap");
+  assert.ok(rem(decl(word, "font-size")) <= rem(".64rem"), "the word is back at caption size");
+  assert.ok(parseFloat(decl(word, "letter-spacing")) <= 0.02, "the word is back at caption tracking");
+});
+
+test("at a 320pt viewport the badge group fits its column, without moving the outer columns", () => {
+  const narrow = CSS.slice(CSS.indexOf("@media (max-width: 359px)"));
+  const block = narrow.slice(0, narrow.indexOf("\n}\n"));
+  // Same specificity as the base rules, so it only wins if it comes after them.
+  for (const sel of [".pick-row-head {", ".pick-row-match {", ".pick-row-saved {"]) {
+    assert.ok(CSS.indexOf(`\n${sel}`) < CSS.indexOf("@media (max-width: 359px)"), `${sel} base rule overrides the narrow rule`);
+  }
+  const head = block.match(/\.pick-row-head \{([^}]*)\}/)[1];
+  assert.doesNotMatch(head, /grid-template-columns/, "the fixed outer columns changed on narrow phones");
+  const gap = rem(decl(head, "gap"));
+  const pad = rem(decl(head, "padding-left")) + rem(decl(head, "padding-right"));
+  const matchGap = rem(decl(block.match(/\.pick-row-match \{([^}]*)\}/)[1], "gap"));
+  // Saved stays aligned to the mark column's edge.
+  assert.equal(rem(decl(block.match(/\.pick-row-saved \{([^}]*)\}/)[1], "right")), rem(decl(head, "padding-right")));
+  const wide = CSS.match(/\.pick-row-head \{([^}]*)\}/)[1];
+  const outer = 2 * rem(decl(wide, "grid-template-columns").split(" ")[0]);
+  const content = 320 - 32;                       // main is calc(100% - 32px)
+  const middle = content - 2 /* row border */ - pad - outer - 2 * gap;
+  const badges = 2 * 40 + 2 * matchGap + 8;       // two crests, two gaps, the "v" (measured 7.4px)
+  assert.ok(middle >= badges, `middle column ${middle.toFixed(1)}px < badge group ${badges}px`);
+});

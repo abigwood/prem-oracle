@@ -2176,6 +2176,9 @@ body.picker-open { overflow: hidden; }
   color: var(--muted);
 }
 .pick-row-caption { margin-top: 2px; }
+/* "POSTPONED" at the caption's tracking is ~78px against a 73.6px column, so
+   the state words run tighter and smaller and can never leave the column. */
+.pick-row-word { font-size: .64rem; letter-spacing: .02em; white-space: nowrap; }
 .pick-row-body:empty { display: none; }
 .pick-row-body { padding: 0 12px 12px; }
 
@@ -2193,6 +2196,14 @@ body.picker-open { overflow: hidden; }
   text-transform: uppercase;
   letter-spacing: .04em;
   pointer-events: none;
+}
+/* A 320pt phone leaves the middle column ~95px for ~107px of badges, so the
+   crests spilled into the gutters and met "Postponed". Narrower padding and
+   gaps here (after the base rules, so it wins the cascade); the outer columns stay fixed, so rows still align. */
+@media (max-width: 359px) {
+  .pick-row-head { gap: 6px; padding-right: 10px; padding-left: 10px; }
+  .pick-row-match { gap: 8px; }
+  .pick-row-saved { right: 10px; }
 }
 /* The week's own share control sits under the list it exports. */
 .pick-share { display: flex; justify-content: flex-end; margin-top: 12px; }

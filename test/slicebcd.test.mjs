@@ -43,7 +43,7 @@ const VIEW_NAMES = [
   "matchweekRowState", "MATCHWEEK_ROW_LINE",
   "shortKickoff", "closedStatus", "matchOpen", "finalScore",
   "VOID_STATUSES", "isVoidFixture", "isPostponed", "clientLockMs",
-  "picksView", "pickActionSummary", "pickCounts", "launchBranch", "pickRow", "pickRowBody", "pickRowLabel", "pickJustSaved", "pickListState",
+  "picksView", "pickActionSummary", "pickCounts", "launchBranch", "pickRow", "pickRowKickoff", "pickRowMark", "pickRowBody", "pickRowLabel", "pickJustSaved", "pickListState",
   "pickShareRow", "pickDeadlineLine", "expandPick", "pickEditable",
   "resultCard", "resultState", "resultPickLine", "resultBadge", "isSettledCard",
   "scorePickLocal", "RESULT_FIRST_STATES",
@@ -134,29 +134,47 @@ test("D2 · every card state resolves, and says exactly one honest line", () => 
   for (const [id, state] of Object.entries(expected)) {
     assert.ok(html.includes(`data-row-state="${state}"`), `${id} lost its state marker`);
   }
-  // Postponed and void say no points; neither invents a result.
-  assert.match(html, /Void — no points/);
-  assert.match(html, /Postponed — no points/);
+  // Postponed and void say so on the row and no points in its name; neither
+  // invents a result. (v1.8.1: the compact row carries a word, the expanded
+  // result card keeps the full sentence.)
+  assert.match(html, /data-row-mark="void"[^>]*><span class="pick-row-word">Void</);
+  assert.match(html, /data-row-mark="void"[^>]*><span class="pick-row-word">Postponed</);
+  assert.match(html, /aria-label="[^"]*void, no points/);
+  assert.match(html, /aria-label="[^"]*postponed, no points/);
+  s.evalIn(`expandedPickId = ${JSON.stringify(VOID.id)};`);
+  assert.match(s.picksView(), /Void — no points/);
+  s.evalIn(`expandedPickId = ${JSON.stringify(POSTPONED.id)};`);
+  assert.match(s.picksView(), /Postponed — no points/);
 });
 
 test("D2 · no provisional points anywhere, on either surface", () => {
   const s = box({ picks: Object.fromEntries(ALL.map((f) => [f.id, { p1: 1, p2: 1 }])) });
   for (const [label, html] of [["Matchweek", s.picksView()], ["My Picks", s.picksView()]]) {
-    // An in-progress fixture states pending, and never a score of our own.
-    assert.match(html, /points pending settlement|Awaiting final score/, `${label} says nothing about pending`);
+    // An in-progress fixture states pending, and never a score of our own —
+    // not even the viewer's own prediction in the score column.
+    assert.match(html, /data-row-mark="pending"[^>]*><span class="pick-row-word">Pending</, `${label} says nothing about pending`);
+    assert.match(html, /aria-label="[^"]*result pending"/);
     assert.ok(!/provisional/i.test(html), `${label} mentions provisional`);
   }
+  // Opened, the result card says it plainly.
+  s.evalIn(`expandedPickId = ${JSON.stringify(IN_PLAY.id)};`);
+  assert.match(s.picksView(), /Awaiting final score/);
   // The source rule: the in-progress line is a constant, not a computation.
   assert.match(constOf("MATCHWEEK_ROW_LINE"), /"in-progress": "In progress · points pending settlement"/);
 });
 
 test("D2 · a settled row leads with the final score", () => {
   const s = box({ ids: [SETTLED.id], picks: { [SETTLED.id]: { p1: 2, p2: 1 } } });
-  // One surface now: the settled row IS the result card — score first, then
-  // the prediction and its points, with the mates behind the disclosure.
+  // v1.8.1: the compact row leads with the FINAL score, marked as a result;
+  // the result card (score, prediction, points) and then the mates are what
+  // its disclosure opens.
+  const closed = s.picksView();
+  assert.match(closed, /class="pick-row pick-row-result/);
+  assert.match(closed, /data-row-mark="result"[^>]*><span class="pick-row-score pick-row-final">2-1</);
+  assert.ok(!closed.includes("result-card"), "the closed row drew the whole result card");
+  s.evalIn(`expandedPickId = ${JSON.stringify(SETTLED.id)};`);
   const mine = s.picksView();
-  assert.match(mine, /class="pick-row pick-row-result/);
-  assert.match(mine, /data-expand-pick="[^"]+"[\s\S]*?Mates&#39; picks/);
+  assert.ok(mine.indexOf("result-card") < mine.indexOf("MATES"), "the mates lead the result");
   const scoreAt = mine.indexOf("result-score");
   const pickAt = mine.indexOf("result-pick");
   assert.ok(scoreAt > -1 && pickAt > scoreAt, "the prediction is not beneath the score");

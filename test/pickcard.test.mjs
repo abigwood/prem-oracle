@@ -26,7 +26,7 @@ const OPEN = fx("f-open");
 const LOCKED = fx("f-locked", { hours: 3, lockAt: new Date(now - HOUR).toISOString(), h: "Hull City", a: "Man Utd" });
 const SETTLED = fx("f-settled", { hours: -26, result: [2, 1], h: "Brighton", a: "Aston Villa" });
 
-const NAMES = ["picksView", "pickActionSummary", "pickCounts", "launchBranch", "pickRow", "pickRowBody", "pickRowLabel", "pickJustSaved", "pickListState",
+const NAMES = ["picksView", "pickActionSummary", "pickCounts", "launchBranch", "pickRow", "pickRowKickoff", "pickRowMark", "pickRowBody", "pickRowLabel", "pickJustSaved", "pickListState",
   "pickDeadlineLine", "pickEditable", "expandPick", "matchCard", "matchIntelStrip",
   "resultText", "matchOpen", "isSettledCard", "resultState", "RESULT_FIRST_STATES",
   "matchweekLeagueState", "matchweekSlate", "matchweekSlots", "matchweekContext", "matchweekEmpty",
@@ -223,7 +223,11 @@ test("C7 · a settled fixture opens the mates section, not an editor", () => {
 
 test("C7 · the editable branch is the only one that mounts a card", () => {
   const body = sourceOf("pickRowBody");
-  assert.match(body, /return editable \? matchCard\(match, \{ social: false \}\) : fixtureRevealSection\(match\);/);
+  assert.match(body, /if \(editable\) return matchCard\(match, \{ social: false \}\);/);
+  // Past the lock nothing mounts a card with controls: result-first fixtures
+  // get the read-only result card, everything else the mates section.
+  assert.match(body, /if \(isSettledCard\(match\)\) return `\$\{resultCard\(match, null, \{ social: false \}\)\}\$\{fixtureRevealSection\(match\)\}`;/);
+  assert.match(body, /return fixtureRevealSection\(match\);/);
   // pickEditable is the one gate, shared with the row's own state.
   assert.match(sourceOf("pickRow"), /const editable = pickEditable\(match\);/);
   assert.match(sourceOf("expandPick"), /pickRowBody\(fixture, pickEditable\(fixture\)\)/);
@@ -268,7 +272,7 @@ test("C10 · the disclosure, the controls and the save action are all named", ()
   const head = app.row(OPEN.id).querySelector("[data-expand-pick]");
   assert.equal(head.getAttribute("aria-expanded"), "false");
   assert.equal(head.getAttribute("aria-controls"), `pk-${OPEN.id}`);
-  assert.match(head.getAttribute("aria-label"), /Arsenal against Coventry City, your prediction 2-1, editable until kick-off/);
+  assert.match(head.getAttribute("aria-label"), /^Arsenal against Coventry City, \w{3} \d{1,2} \w{3} \d{2}:\d{2}, your prediction 2-1, editable until kick-off$/);
   assert.equal(app.body(OPEN.id).id, `pk-${OPEN.id}`, "the body is not what aria-controls names");
 
   app.box.expandPick(OPEN.id);
@@ -278,7 +282,9 @@ test("C10 · the disclosure, the controls and the save action are all named", ()
   assert.match(body, /Save prediction/, "the save action is unnamed");
   // The row control is a real target.
   const headCss = CSS.slice(CSS.indexOf(".pick-row-head {"), CSS.indexOf("}", CSS.indexOf(".pick-row-head {")));
-  assert.match(headCss, /min-height: 44px/);
+  // v1.8.1: the compact row is taller than the 44px minimum, never shorter.
+  const minHeight = Number((headCss.match(/min-height: (\d+)px/) || [])[1]);
+  assert.ok(minHeight >= 44, `the row target is ${minHeight}px`);
 });
 
 test("C10 · the card is announced as one region per fixture", () => {

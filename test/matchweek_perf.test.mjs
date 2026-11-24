@@ -19,7 +19,7 @@ const NAMES = [
   "matchweekUnavailable", "picksView", "pickActionSummary", "pickCounts", "launchBranch",
   "noteMatchweekCountMismatch", "matchweekMismatchLines",
   // The REAL row builder, so the measurement is of work that ships.
-  "pickRow", "pickRowBody", "pickRowLabel", "pickJustSaved", "pickListState", "pickDeadlineLine", "pickEditable", "isSettledCard",
+  "pickRow", "pickRowKickoff", "pickRowMark", "pickRowBody", "pickRowLabel", "pickJustSaved", "pickListState", "pickDeadlineLine", "pickEditable", "isSettledCard",
   "RESULT_FIRST_STATES", "resultState", "shortKickoff",
   // ...and the row-state contract Slice B put behind it.
   "matchweekRowState", "MATCHWEEK_ROW_LINE",

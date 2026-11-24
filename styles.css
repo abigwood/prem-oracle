@@ -1008,6 +1008,8 @@ dialog label { display: block; margin-bottom: 6px; color: var(--muted); font-siz
 #recoveryDialog .primary { margin-top: 8px; }
 .profile-recovery { margin: 8px 0 4px; }
 .profile-recovery .recovery-code { font-size: 1rem; }
+.profile-recovery-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 12px; }
+#profileRecoveryView { margin-bottom: 12px; }
 @media (min-width: 700px) {
   main { padding-top: 26px; }
   .hero { padding: 30px; }
@@ -2130,13 +2132,17 @@ body.picker-open { overflow: hidden; }
 }
 .pick-row.is-needed { border-color: var(--purple); }
 .pick-row-head {
+  /* v1.8.1 compact row: kick-off | badges | score. The outer columns are fixed
+     so the badges sit on the row's centre line whatever the state, and a
+     transient "Saved" can appear without moving anything. */
+  position: relative;
   display: grid;
-  grid-template-columns: auto 1fr auto;
+  grid-template-columns: 4.6rem 1fr 4.6rem;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   width: 100%;
-  min-height: 44px;
-  padding: 10px 12px 4px;
+  min-height: 66px;
+  padding: 8px 14px;
   border: 0;
   background: none;
   color: inherit;
@@ -2144,47 +2150,50 @@ body.picker-open { overflow: hidden; }
   text-align: left;
   cursor: pointer;
 }
-.pick-row-when { font-size: .74rem; font-weight: 800; color: var(--muted); }
-.pick-row-teams { min-width: 0; font-size: .88rem; font-weight: 900; overflow-wrap: anywhere; }
-.pick-row-score { font-size: 1rem; font-weight: 900; color: var(--purple); }
-.pick-row-score.pick-row-needed { color: var(--muted); }
+.pick-row-head:focus-visible { outline: 2px solid var(--purple); outline-offset: -2px; }
+.pick-row-when { display: flex; flex-direction: column; gap: 2px; line-height: 1.2; white-space: nowrap; }
+.pick-row-date { font-size: .74rem; font-weight: 600; color: var(--muted); }
+.pick-row-time { font-size: .8rem; font-weight: 800; color: var(--ink); font-variant-numeric: tabular-nums; }
+.pick-row-match { display: flex; align-items: center; justify-content: center; gap: 10px; min-width: 0; }
+.pick-row-v { color: var(--muted); font-size: .74rem; font-weight: 600; }
+/* Size only. Colours, fill, ring and shadow are the live .team-crest's own. */
+.pick-row-match .team-crest { width: 40px; height: 40px; font-size: .72rem; }
+.pick-row-mark { display: flex; flex-direction: column; align-items: flex-end; justify-content: center; line-height: 1.1; }
+.pick-row-score {
+  font-size: 1.35rem;
+  font-weight: 900;
+  color: var(--purple);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: .01em;
+}
+.pick-row-score.pick-row-needed { color: var(--muted); font-weight: 700; }
+.pick-row-caption,
+.pick-row-word {
+  font-size: .68rem;
+  font-weight: 900;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.pick-row-caption { margin-top: 2px; }
 .pick-row-body:empty { display: none; }
 .pick-row-body { padding: 0 12px 12px; }
-.pick-row-result { border: 0; background: none; }
 
 /* --- v1.7 consolidation: one row, one disclosure --------------------------
    The repeated per-card status line is gone; the week says its state once, in
    the header. What each row still carries is what differs about it. */
+/* Pinned under the score column, out of flow, so nothing shifts while it shows. */
 .pick-row-saved {
-  grid-column: 3;
-  justify-self: end;
-  font-size: .68rem;
+  position: absolute;
+  right: 14px;
+  bottom: 4px;
+  font-size: .62rem;
   font-weight: 900;
   color: var(--green);
   text-transform: uppercase;
   letter-spacing: .04em;
+  pointer-events: none;
 }
-/* The mates disclosure under a settled result. */
-.pick-row-disclose {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  width: 100%;
-  min-height: 44px;
-  padding: 0 12px;
-  border: 0;
-  border-top: 1px solid var(--line);
-  background: none;
-  color: var(--muted);
-  font: inherit;
-  font-size: .78rem;
-  font-weight: 800;
-  text-align: left;
-  cursor: pointer;
-}
-.pick-row-disclose:focus-visible { outline: 2px solid var(--purple); outline-offset: -2px; }
-.pick-row-chev { color: var(--muted); font-size: .7rem; }
 /* The week's own share control sits under the list it exports. */
 .pick-share { display: flex; justify-content: flex-end; margin-top: 12px; }
 

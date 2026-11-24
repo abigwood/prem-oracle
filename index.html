@@ -58,10 +58,19 @@
         <p class="notif-hint">Kick-off reminders, per competition.</p>
         <div id="notificationPrefsList"></div>
       </div>
-      <div id="profileRecovery" class="profile-recovery" hidden>
+      <div id="profileRecovery" class="profile-recovery">
         <span class="eyebrow">Account recovery</span>
         <p class="field-hint">These three words restore your account on another device. Keep them private.</p>
-        <p class="recovery-code" id="profileRecoveryCode"></p>
+        <button class="secondary wide" type="button" id="profileRecoveryView" data-profile-recovery-view>View recovery code</button>
+        <p class="field-hint" id="profileRecoveryMissing" role="status" hidden>No recovery code is saved on this device. One is issued when you join or create a league.</p>
+        <div id="profileRecoveryRevealed" hidden>
+          <p class="recovery-code" id="profileRecoveryCode"></p>
+          <p class="recovery-copied" id="profileRecoveryCopied" role="status" hidden></p>
+          <div class="profile-recovery-actions">
+            <button class="secondary" type="button" data-profile-recovery-copy>Copy code</button>
+            <button class="secondary" type="button" id="profileRecoveryHide" data-profile-recovery-hide>Hide code</button>
+          </div>
+        </div>
       </div>
       <button class="primary wide" value="save">Save name</button>
       <button class="link-quiet" type="button" value="cancel" data-copy-diagnostics>Copy diagnostics</button>

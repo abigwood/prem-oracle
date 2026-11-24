@@ -131,7 +131,8 @@ test("R1 · all three named surfaces route through the one result-first path", (
   // unreached v1.6.6 layout.
   // Adam's ruling folded Matchweek into My Picks, so there is ONE row builder
   // and one result-first path through it.
-  assert.match(sourceOf("pickRow"), /resultCard\(match, null, \{ social: false \}\)/);
+  // v1.8.1: the compact row opens that same result card from its disclosure.
+  assert.match(sourceOf("pickRowBody"), /resultCard\(match, null, \{ social: false \}\)/);
   assert.ok(!APP.includes("function fixtureRow("), "the second row builder survives");
   assert.ok(!APP.includes("function expandFixture("), "the second expander survives");
   assert.match(sourceOf("matchCard"), /if \(resultFirst && isSettledCard\(match\)\) return resultCard\(match, reveal, \{ social \}\);/);

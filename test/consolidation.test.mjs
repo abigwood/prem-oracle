@@ -351,7 +351,7 @@ function journeyBox(picks = {}) {
   const { document, CSS: cssApi } = dom.window;
   const requests = { api: 0 };
   const box = load(["picksView", "pickActionSummary", "pickCounts", "launchBranch",
-    "pickRow", "pickRowBody", "pickRowLabel", "pickJustSaved",
+    "pickRow", "pickRowKickoff", "pickRowMark", "pickRowBody", "pickRowLabel", "pickJustSaved",
     "pickListState", "pickDeadlineLine", "pickEditable", "expandPick",
     "matchweekLeagueState", "matchweekSlate", "matchweekSlots", "matchweekContext",
     "matchweekEmpty", "matchweekUnavailable", "matchweekLeagueName", "matchweekRowState",
@@ -429,11 +429,14 @@ test("J6 · a settled row leads with the score, with the mates behind the disclo
   const row = app.row(SETTLED.id);
   assert.equal(row.dataset.rowState, "settled");
   const html = row.innerHTML;
-  assert.ok(html.indexOf("result-score") < html.indexOf("result-pick"), "the pick leads the score");
-  assert.ok(html.indexOf("result-score") < html.indexOf("data-expand-pick"), "the mates lead the score");
+  // v1.8.1: closed, the row is the compact line with the final score in it.
+  assert.equal(row.querySelector("[data-row-mark]").dataset.rowMark, "result");
   assert.ok(!html.includes("MATES"), "a closed settled row drew the mates section");
+  assert.ok(!html.includes("result-card"), "a closed settled row drew the whole card");
   app.box.expandPick(SETTLED.id);
-  assert.ok(row.querySelector(".pick-row-body").innerHTML.includes("MATES"));
+  const body = row.querySelector(".pick-row-body").innerHTML;
+  assert.ok(body.indexOf("result-score") < body.indexOf("result-pick"), "the pick leads the score");
+  assert.ok(body.indexOf("result-card") < body.indexOf("MATES"), "the mates lead the result");
   assert.equal(app.requests.api, 0);
 });
 

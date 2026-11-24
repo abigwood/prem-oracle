@@ -948,7 +948,11 @@ class CustomMixTests(unittest.TestCase):
         self.assertEqual(self.app.count("function matchCard("), 1)
         body = self.app[self.app.index("function pickRowBody(match, editable)"):]
         body = body[:body.index("\n}")]
-        self.assertIn("return editable ? matchCard(match, { social: false }) : fixtureRevealSection(match);", body)
+        self.assertIn("if (editable) return matchCard(match, { social: false });", body)
+        # v1.8.1: past the lock, a result-first fixture opens the read-only
+        # result card above the mates; anything else opens the mates alone.
+        self.assertIn("if (isSettledCard(match)) return `${resultCard(match, null, { social: false })}${fixtureRevealSection(match)}`;", body)
+        self.assertIn("return fixtureRevealSection(match);", body)
         # social:false is the privacy boundary, not a presentation difference:
         # an editable fixture has not locked, so nobody else's pick is on it.
         card = self.app[self.app.index("function matchCard(match, { resultFirst = false, reveal = null, social = true } = {})"):]
@@ -2845,11 +2849,21 @@ class MatesPicksTests(unittest.TestCase):
         self.assertNotIn('data-round-tab="mates"', self.app)
 
     def test_the_feature_is_named_on_the_card_that_raises_it(self):
-        # The whole-slate matrix is gone; the disclosure on each fixture card
-        # is the single comparison path, and it says what it opens.
+        # The whole-slate matrix is gone; the disclosure on each fixture row
+        # is the single comparison path. v1.8.1 made the whole compact row that
+        # disclosure, so the separate "Mates' picks" button under a settled
+        # result is gone and the section names itself once it opens.
         row = self.app[self.app.index("function pickRow(slot, { expanded })"):]
         row = row[:row.index("\n}\n")]
-        self.assertIn("Mates&#39; picks", row)
+        self.assertNotIn("pick-row-disclose", row)
+        self.assertIn('data-expand-pick="${escapeHTML(id)}"', row)
+        body = self.app[self.app.index("function pickRowBody(match, editable)"):]
+        body = body[:body.index("\n}")]
+        self.assertIn("fixtureRevealSection(match)", body)
+        section = self.app[self.app.index("function fixtureRevealSection(match)"):]
+        section = section[:section.index("\n}")]
+        self.assertIn("Mates' picks reveal at kick-off", section)
+        self.assertIn("MATES_STATE_LINE[card.state]", section)
         for gone in ("matesMatrix", "matesHeader", "matesFixtureCard", "matesAwaitingSlate"):
             self.assertNotIn(gone, self.app, gone)
 
@@ -3071,9 +3085,20 @@ class RecoveryOnboardingTests(unittest.TestCase):
                             self.html.index("</dialog>", self.html.index('<dialog id="profileDialog">'))]
         self.assertIn('id="profileRecovery"', profile)
         self.assertIn('id="profileRecoveryCode"', profile)
-        # ...and the avatar handler fills it as text, only when a code exists.
-        self.assertIn('const rec = localStorage.getItem(STORAGE.recovery);', self.app)
-        self.assertIn('codeEl.textContent = rec;', self.app)
+        # v1.8.1: ...behind an explicit "View recovery code" tap. Opening the
+        # avatar no longer reads the credential at all; the reveal does, as text.
+        self.assertIn('data-profile-recovery-view>View recovery code</button>', profile)
+        self.assertIn('data-profile-recovery-copy>Copy code</button>', profile)
+        self.assertIn('data-profile-recovery-hide>Hide code</button>', profile)
+        opener = self.app[self.app.index('document.getElementById("profileButton").addEventListener("click"'):]
+        opener = opener[:opener.index("\n});")]
+        self.assertNotIn("STORAGE.recovery", opener)
+        self.assertIn("resetProfileRecovery();", opener)
+        reveal = self._fn("revealProfileRecovery")
+        self.assertIn('const rec = localStorage.getItem(STORAGE.recovery);', reveal)
+        self.assertIn('codeEl.textContent = rec;', reveal)
+        self.assertNotIn("innerHTML", reveal)
+        self.assertNotIn("clipboard", reveal)
 
     def test_credential_is_never_on_a_league_screen(self):
         league = self._fn("leagueView")

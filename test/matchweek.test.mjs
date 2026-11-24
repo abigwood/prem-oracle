@@ -17,7 +17,7 @@ const HTML = readFileSync(new URL("../index.html", import.meta.url), "utf8");
 const NAMES = [
   "matchweekLeagueState", "matchweekLeagueName", "matchweekSlate",
   "matchweekSlots", "matchweekContext", "matchweekEmpty",
-  "matchweekUnavailable", "picksView", "pickActionSummary", "pickCounts", "launchBranch", "pickRow", "pickRowLabel", "pickJustSaved",
+  "matchweekUnavailable", "picksView", "pickActionSummary", "pickCounts", "launchBranch", "pickRow", "pickRowKickoff", "pickRowMark", "pickRowLabel", "pickJustSaved",
   "noteMatchweekCountMismatch", "matchweekMismatchLines",
 ];
 

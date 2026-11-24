@@ -161,7 +161,7 @@ const OPEN_B = fx("f-b", { h: "Spurs", a: "Everton" });
 const LOCKED = fx("f-locked", { hours: -2, h: "Leeds", a: "Wolves" });
 
 function picksBox({ ids = ["f-a", "f-b"], picks = {}, code = "AAA", codes = ["AAA"] } = {}) {
-  return load(["picksView", "pickActionSummary", "pickCounts", "pickRow", "pickRowBody",
+  return load(["picksView", "pickActionSummary", "pickCounts", "pickRow", "pickRowKickoff", "pickRowMark", "pickRowBody",
     "pickRowLabel", "pickListState", "pickDeadlineLine", "pickEditable", "launchBranch",
     "matchweekLeagueState", "matchweekSlate", "matchweekSlots", "matchweekContext",
     "matchweekEmpty", "matchweekUnavailable", "matchweekLeagueName", "matchweekRowState",

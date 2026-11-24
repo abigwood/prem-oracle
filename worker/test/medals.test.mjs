@@ -89,9 +89,9 @@ const STATE = {
 
 test("the table has four columns and no trophy column", () => {
   const html = ui.seasonTableHtml(STATE, false);
-  const headers = [...html.matchAll(/<th>([^<]*)<\/th>/g)].map(([, h]) => h);
+  const headers = [...html.matchAll(/<th(?: class="[^"]*")?>([^<]*)<\/th>/g)].map(([, h]) => h);
   assert.deepEqual(headers, ["Player", "", "Pts", "Exact"], "the movement column's header is deliberately blank");
-  assert.equal((html.match(/<th>/g) || []).length, 4, "Player, movement, Pts, Exact — the fifth is gone");
+  assert.equal((html.match(/<th[ >]/g) || []).length, 4, "Player, movement, Pts, Exact — the fifth is gone");
   assert.ok(!html.includes("wins-col"), "the column that pushed Exact off a 402px screen");
 });
 

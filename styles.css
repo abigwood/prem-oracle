@@ -709,6 +709,10 @@ main {
 .table { width: 100%; border-collapse: collapse; font-size: .82rem; }
 .table th, .table td { padding: 10px 5px; border-bottom: 1px solid var(--line); text-align: right; }
 .table th:first-child, .table td:first-child { text-align: left; }
+/* v1.8.1: Pts is the figure that matters; Exact is supporting detail. Muted,
+   regular weight — 4.7:1 on the league card. Screens only: the share cards
+   draw their own table. */
+.table .col-exact { color: var(--muted); font-weight: 400; }
 .league-table th:nth-child(2), .league-table td:nth-child(2) { width: 46px; text-align: center; }
 .wins-col { width: 42px; text-align: center; }
 th.wins-col { font-size: .92rem; }

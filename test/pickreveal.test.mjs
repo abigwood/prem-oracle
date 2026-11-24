@@ -134,7 +134,7 @@ test("A · the weekly row puts the arrow AFTER the name, in the season table's s
     assert.match(cell, /^<td class="player-cell"><span class="player-name">\d+\. [^<]+<\/span><span class="movement /,
       `the arrow is not immediately after the name: ${cell}`);
   }
-  assert.equal((html.match(/<th>/g) || []).length, 3, "a column was added to the weekly table");
+  assert.equal((html.match(/<th[ >]/g) || []).length, 3, "a column was added to the weekly table");
   assert.equal((html.match(/<td/g) || []).length, 6, "each row must stay three cells");
   // And never before the rank, which is what made the gutter.
   assert.ok(!/<td[^>]*><span class="movement/.test(html),

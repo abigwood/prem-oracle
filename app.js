@@ -4117,7 +4117,7 @@ function roundTableHtml(round) {
   const slateIds = slateIdsOf(round);
   const ranks = weeklyRanks(round.table);
   const movement = weeklyMovement(round.table, round.reveal, slateIds);
-  return `<table class="table round-standings"><thead><tr><th>Player</th><th>Pts</th><th>Exact</th></tr></thead>
+  return `<table class="table round-standings"><thead><tr><th>Player</th><th>Pts</th><th class="col-exact">Exact</th></tr></thead>
     <tbody>${(round.table || []).map((row, index) => {
       const place = awards.get(row.uid);
       const medal = place ? ` <span class="crown" aria-label="Matchweek ${place}">${PLACE_EMOJI[place]}</span>` : "";
@@ -4125,7 +4125,7 @@ function roundTableHtml(round) {
       // The Season table's shape: the arrow FOLLOWS the name, in the slot at
       // the end of the player cell. Leading it made a left gutter that pushed
       // every name out of line and read as the row's most important fact.
-      return `<tr><td class="player-cell"><span class="player-name">${ranks.get(row.uid) ?? index + 1}. ${escapeHTML(row.nick)}${medal}</span>${move}</td><td>${row.pts}</td><td>${row.exact}</td></tr>`;
+      return `<tr><td class="player-cell"><span class="player-name">${ranks.get(row.uid) ?? index + 1}. ${escapeHTML(row.nick)}${medal}</span>${move}</td><td>${row.pts}</td><td class="col-exact">${row.exact}</td></tr>`;
     }).join("")}</tbody></table>`;
 }
 
@@ -4145,9 +4145,9 @@ function podiumCounts(row) {
 function seasonTableHtml(state, isOwner) {
   // v1.8.1: one line per member. The medal tally that sat under each name now
   // lives once, for the whole league, in the trophy cabinet above the table.
-  return `<table class="table league-table"><thead><tr><th>Player</th><th></th><th>Pts</th><th>Exact</th>${isOwner ? "<th></th>" : ""}</tr></thead>
+  return `<table class="table league-table"><thead><tr><th>Player</th><th></th><th>Pts</th><th class="col-exact">Exact</th>${isOwner ? "<th></th>" : ""}</tr></thead>
     <tbody>${(state.table || []).map((row, index) =>
-      `<tr><td class="player-cell"><span class="player-name">${row.rank || index + 1}. ${escapeHTML(row.nick)}</span></td><td>${movementBadge(row)}</td><td>${row.pts}</td><td>${row.exact}</td>${isOwner ? `<td class="kick-cell">${row.uid && row.uid !== state.owner ? `<button class="kick-btn" type="button" data-kick-league="${state.code}" data-kick-uid="${escapeHTML(row.uid)}" aria-label="Remove ${escapeHTML(row.nick)}">×</button>` : ""}</td>` : ""}</tr>`
+      `<tr><td class="player-cell"><span class="player-name">${row.rank || index + 1}. ${escapeHTML(row.nick)}</span></td><td>${movementBadge(row)}</td><td>${row.pts}</td><td class="col-exact">${row.exact}</td>${isOwner ? `<td class="kick-cell">${row.uid && row.uid !== state.owner ? `<button class="kick-btn" type="button" data-kick-league="${state.code}" data-kick-uid="${escapeHTML(row.uid)}" aria-label="Remove ${escapeHTML(row.nick)}">×</button>` : ""}</td>` : ""}</tr>`
     ).join("")}</tbody></table>`;
 }
 

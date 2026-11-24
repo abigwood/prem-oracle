@@ -1465,7 +1465,7 @@ test("cols · the on-screen tables are untouched by an export-only change", () =
   // The screen keeps its own three-column shape and its own badge markup.
   const screen = sourceOf("seasonTableHtml");
   assert.ok(!screen.includes("MOVE"), "the screen grew a MOVE column");
-  assert.match(screen, /<th>Player<\/th><th><\/th><th>Pts<\/th><th>Exact<\/th>/);
+  assert.match(screen, /<th>Player<\/th><th><\/th><th>Pts<\/th><th class="col-exact">Exact<\/th>/);
   assert.match(screen, /\$\{movementBadge\(row\)\}/, "the screen's badge changed");
   // v1.8.1: the screen's rows carry no medal line at all now; the honours
   // board in the trophy cabinet is where they are read.

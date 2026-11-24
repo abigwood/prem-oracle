@@ -1,9 +1,11 @@
-// v1.8.1 — the trophy cabinet, collapsed by default.
+// v1.8.1 — the trophy cabinet as the league's honours board.
 //
-// One row: "Trophy cabinet" and the share cards' own zero-suppressed tally,
-// a native <details> like League settings, closed on every visit. Expanded,
-// it is the cabinet exactly as it was. These run the REAL trophyCabinet with
-// the REAL tally parts, in a DOM.
+// Collapsed: one row, "🏆 Trophy cabinet" and the league's combined, zero-
+// suppressed tally (the share cards' own formatter). Expanded: every member's
+// gold/silver/bronze/podiums, the viewer pinned first and the rest by podiums,
+// zeros as dashes. A native <details>, closed on every visit. The Season
+// table's rows no longer carry a tally of their own. These run the REAL
+// functions against a DOM.
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -12,149 +14,204 @@ import { load, sourceOf, APP } from "./harness.mjs";
 
 const CSS = readFileSync(new URL("../styles.css", import.meta.url), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
 
-function cabinetDom(cabinet) {
-  const box = load(["trophyCabinet", "cabinetFold", "cabinetPanel", "cardHonoursParts", "CARD_HONOURS_SEP",
-    "PLACE_EMOJI", "cabinetWeeksHtml", "collapseCabinets"], {
+const member = (uid, nick, gold = 0, silver = 0, bronze = 0, extra = {}) =>
+  ({ uid, nick, pts: 10, exact: 1, rank: 1, wins: gold, podiums: { gold, silver, bronze }, ...extra });
+
+// Several honour distributions, including an old-worker row with only `wins`.
+const LEAGUES = {
+  spread: [member("u1", "Adam", 1, 2, 0), member("u2", "Tom", 6, 4, 2), member("u3", "Sol", 0, 3, 3), member("u4", "Kit", 6, 0, 0)],
+  oneWinner: [member("u2", "Tom", 1), member("u1", "Adam"), member("u3", "Sol")],
+  legacy: [{ uid: "u1", nick: "Adam", pts: 3, exact: 0, wins: 2 }, { uid: "u2", nick: "Tom", pts: 1, exact: 0, wins: 1 }],
+  none: [member("u1", "Adam"), member("u2", "Tom")],
+};
+
+function cabinet(table, { me = "u1", weeks = null } = {}) {
+  const box = load(["trophyCabinet", "honoursBoardRows", "honoursBoardHtml", "HONOUR_PLACES", "podiumCounts",
+    "cardHonoursParts", "CARD_HONOURS_SEP", "PLACE_EMOJI", "cabinetWeeksHtml", "collapseCabinets"], {
+    uid: () => me,
     seasonSection: (name, title) => `<section class="season-fold" data-season-fold="${name}"><button type="button" aria-expanded="false">${title}</button></section>`,
     cabinetWeek: (w) => `<li>${w.period}</li>`,
   });
-  const html = box.trophyCabinet({ cabinet });
+  const html = box.trophyCabinet({ code: "AAA", table, cabinet: weeks ? { nick: "Adam", weeks } : undefined });
   const dom = new JSDOM(`<!doctype html><body><main>${html}</main></body>`);
   const { document } = dom.window;
   const fold = document.querySelector("[data-cabinet-fold]");
-  return { box, html, document, window: dom.window, fold,
+  const bodyRows = () => [...document.querySelectorAll(".honours-board tbody tr")].map((tr) => ({
+    nick: tr.querySelector("th").childNodes[0].textContent,
+    you: tr.classList.contains("is-you"),
+    cells: [...tr.querySelectorAll("td")].map((td) => td.querySelector('[aria-hidden="true"]')?.textContent ?? td.textContent),
+    spoken: [...tr.querySelectorAll("td")].map((td) => td.querySelector(".sr-only")?.textContent ?? td.textContent),
+  }));
+  return { box, html, document, window: dom.window, fold, bodyRows,
     summary: fold?.querySelector("summary"),
     spoken: () => fold.querySelector(".sr-only")?.textContent,
     tally: () => fold.querySelector(".cabinet-fold-tally")?.textContent };
 }
 
-const FULL = { nick: "Adam Bigwood-Featherstonehaugh", gold: 6, silver: 4, bronze: 2, podiums: 12, weeks: [{ period: "1" }] };
+// --- the collapsed row ----------------------------------------------------------
 
-test("collapsed by default: a native disclosure with no open state and nothing persisted", () => {
-  const c = cabinetDom(FULL);
+test("collapsed by default: a native disclosure, no open state, nothing persisted", () => {
+  const c = cabinet(LEAGUES.spread);
   assert.equal(c.fold.tagName, "DETAILS");
-  assert.equal(c.fold.hasAttribute("open"), false);
   assert.equal(c.fold.open, false);
-  assert.ok(c.summary === c.fold.firstElementChild, "the summary is not the disclosure's control");
-  assert.doesNotMatch(sourceOf("trophyCabinet") + sourceOf("cabinetFold"), /localStorage|STORAGE|cabinetOpen/);
+  assert.equal(c.fold.hasAttribute("open"), false);
+  assert.ok(c.summary === c.fold.firstElementChild);
+  assert.doesNotMatch(sourceOf("trophyCabinet"), /localStorage|STORAGE/);
 });
 
-test("the row: fixed 'Trophy cabinet' label and the exact tally, no nickname", () => {
-  const c = cabinetDom(FULL);
-  assert.equal(c.fold.querySelector(".cabinet-fold-label").textContent, "Trophy cabinet");
-  assert.equal(c.tally(), "🏆6 · 🥈4 · 🥉2 · 12 podiums");
-  const visible = [...c.summary.querySelectorAll('[aria-hidden="true"]')].map((e) => e.textContent).join(" ");
-  assert.ok(!visible.includes("Adam"), "the nickname is in the collapsed row");
+test("the row: '🏆 Trophy cabinet' and the league's combined zero-suppressed tally", () => {
+  const c = cabinet(LEAGUES.spread);
+  assert.equal(c.fold.querySelector(".cabinet-fold-label").textContent, "🏆 Trophy cabinet");
+  assert.equal(c.tally(), "🏆13 · 🥈9 · 🥉5");
+  assert.equal(cabinet(LEAGUES.oneWinner).tally(), "🏆1", "zero silver and bronze are suppressed");
+  assert.equal(cabinet(LEAGUES.legacy).tally(), "🏆3", "old wins-only rows count as gold");
 });
 
-test("the tally is the share cards' formatter, not a second one", () => {
+test("the tally is the share cards' formatter over podiumCounts — no second system", () => {
   const src = sourceOf("trophyCabinet");
-  assert.match(src, /cardHonoursParts\(counts\)/);
+  assert.match(src, /cardHonoursParts\(league\)/);
   assert.match(src, /\.join\(CARD_HONOURS_SEP\)/);
-  // Same parts, same separator as the export draws.
-  const c = cabinetDom(FULL);
-  const parts = c.box.cardHonoursParts({ gold: 6, silver: 4, bronze: 2 }).map(([e, n]) => `${e}${n}`);
-  assert.ok(c.tally().startsWith(parts.join(c.box.CARD_HONOURS_SEP)));
-  // And the export functions are untouched by this change.
+  assert.match(sourceOf("honoursBoardRows"), /podiumCounts\(row\)/);
   for (const fn of ["drawCardHonours", "cardHonoursWidth"]) assert.match(sourceOf(fn), /cardHonoursParts\(counts\)/);
 });
 
-test("zero categories are suppressed, in the row and in what VoiceOver hears", () => {
-  const c = cabinetDom({ nick: "Adam", gold: 0, silver: 3, bronze: 0, podiums: 3, weeks: [] });
-  assert.equal(c.tally(), "🥈3 · 3 podiums");
-  assert.equal(c.spoken(), "Adam's trophy cabinet: 3 silver, 3 podiums");
-  const g = cabinetDom({ nick: "Adam", gold: 2, silver: 0, bronze: 1, podiums: 3, weeks: [] });
-  assert.equal(g.tally(), "🏆2 · 🥉1 · 3 podiums");
+test("the collapsed tally equals the sum of the expanded board, for every distribution", () => {
+  for (const [name, table] of Object.entries(LEAGUES)) {
+    if (name === "none") continue;
+    const c = cabinet(table);
+    const rows = c.bodyRows();
+    const sum = [0, 1, 2, 3].map((col) => rows.reduce((t, r) => t + (r.cells[col] === "–" ? 0 : Number(r.cells[col])), 0));
+    const fromTally = Object.fromEntries([...c.tally().matchAll(/(🏆|🥈|🥉)(\d+)/gu)].map((m) => [m[1], Number(m[2])]));
+    assert.equal(fromTally["🏆"] ?? 0, sum[0], `${name}: gold`);
+    assert.equal(fromTally["🥈"] ?? 0, sum[1], `${name}: silver`);
+    assert.equal(fromTally["🥉"] ?? 0, sum[2], `${name}: bronze`);
+    assert.equal(sum[3], sum[0] + sum[1] + sum[2], `${name}: podiums are the medals' sum`);
+    // And it is the very data the Season rows used to render, per member.
+    for (const row of table) {
+      const shown = rows.find((r) => r.nick === row.nick).cells.slice(0, 3).map((v) => (v === "–" ? 0 : Number(v)));
+      const p = c.box.podiumCounts(row);
+      assert.deepEqual(shown, [p.gold, p.silver, p.bronze], `${name}: ${row.nick}`);
+    }
+  }
+});
+
+test("VoiceOver: the row is read in words with the state from the native control; emoji hidden", () => {
+  const c = cabinet(LEAGUES.spread);
+  assert.equal(c.spoken(), "Trophy cabinet: 13 gold, 9 silver, 5 bronze, 27 podiums");
+  for (const el of c.summary.querySelectorAll(".cabinet-fold-label, .cabinet-fold-tally")) assert.equal(el.getAttribute("aria-hidden"), "true");
+  assert.equal(c.summary.getAttribute("aria-label"), null);
+  assert.equal(c.summary.getAttribute("aria-expanded"), null, "the native details state must not be overridden");
+  // The board is in the <details> body the browser hides while closed.
+  assert.ok(!c.summary.contains(c.document.querySelector(".honours-board")));
 });
 
 test("singular and plural: '1 podium', '2 podiums'", () => {
-  assert.equal(cabinetDom({ nick: "A", gold: 1, silver: 0, bronze: 0, podiums: 1 }).tally(), "🏆1 · 1 podium");
-  assert.equal(cabinetDom({ nick: "A", gold: 1, silver: 0, bronze: 0, podiums: 1 }).spoken(), "A's trophy cabinet: 1 gold, 1 podium");
-  assert.equal(cabinetDom({ nick: "A", gold: 1, silver: 1, bronze: 0, podiums: 2 }).tally(), "🏆1 · 🥈1 · 2 podiums");
+  assert.equal(cabinet(LEAGUES.oneWinner).spoken(), "Trophy cabinet: 1 gold, 1 podium");
+  assert.equal(cabinet([member("u1", "A", 1, 1)]).spoken(), "Trophy cabinet: 1 gold, 1 silver, 2 podiums");
 });
 
-test("the tally matches the expanded shelf exactly", () => {
-  for (const cab of [FULL, { nick: "B", gold: 0, silver: 1, bronze: 5, podiums: 6, weeks: [] }]) {
-    const c = cabinetDom(cab);
-    const shelf = [...c.fold.querySelectorAll(".cabinet-shelf .cab-slot:not(.cab-total) b")].map((b) => Number(b.textContent.replace("× ", "")));
-    const total = Number(c.fold.querySelector(".cab-total b").textContent);
-    const want = { "🏆": shelf[0], "🥈": shelf[1], "🥉": shelf[2] };
-    const fromTally = Object.fromEntries([...c.tally().matchAll(/(🏆|🥈|🥉)(\d+)/gu)].map((m) => [m[1], Number(m[2])]));
-    for (const [emoji, count] of Object.entries(want)) assert.equal(fromTally[emoji] ?? 0, count, `${emoji} differs`);
-    assert.equal(Number(c.tally().match(/(\d+) podiums?$/)[1]), total);
-  }
+// --- the expanded board ------------------------------------------------------------
+
+test("the viewer is pinned first; everyone else by podiums, then gold, silver, bronze", () => {
+  const c = cabinet(LEAGUES.spread, { me: "u1" });
+  assert.deepEqual(c.bodyRows().map((r) => r.nick), ["Adam", "Tom", "Kit", "Sol"]);
+  // Tom 12 podiums; Kit 6 and Sol 6 tie on podiums — Kit's 6 golds win it.
+  assert.equal(c.bodyRows()[0].you, true);
+  assert.equal(c.document.querySelector("tr.is-you th .sr-only").textContent, " (you)");
+  // Another viewer gets themselves pinned instead, and Adam takes his place.
+  const sol = cabinet(LEAGUES.spread, { me: "u3" });
+  assert.deepEqual(sol.bodyRows().map((r) => r.nick), ["Sol", "Tom", "Kit", "Adam"]);
+  // A viewer not in the table pins nobody.
+  assert.deepEqual(cabinet(LEAGUES.spread, { me: "x" }).bodyRows().map((r) => r.nick), ["Tom", "Kit", "Sol", "Adam"]);
 });
 
-test("expanded content is the cabinet as it was: name, three medals, podium total, week by week", () => {
-  const c = cabinetDom(FULL);
-  const panel = c.fold.querySelector("section.cabinet");
-  assert.ok(panel && panel.parentElement === c.fold, "the cabinet is not inside the disclosure");
-  assert.equal(panel.querySelector("h3").textContent, "Adam Bigwood-Featherstonehaugh's trophy cabinet");
-  assert.deepEqual([...panel.querySelectorAll(".cab-slot")].map((s) => s.textContent.replace(/\s+/g, " ").trim()),
-    ["🏆× 6", "🥈× 4", "🥉× 2", "12podiums"]);
-  assert.ok(panel.querySelector('[data-season-fold="weeks"]'), "week by week was lost");
+test("zeros are dashes on screen and '0' to VoiceOver", () => {
+  const c = cabinet(LEAGUES.spread);
+  const adam = c.bodyRows().find((r) => r.nick === "Adam");
+  assert.deepEqual(adam.cells, ["1", "2", "–", "3"]);
+  assert.deepEqual(adam.spoken, ["1", "2", "0", "3"]);
+  assert.ok(c.document.querySelectorAll(".honours-board td.is-zero").length >= 3);
 });
 
-test("expand and collapse: tapping the row toggles the native disclosure", () => {
-  const c = cabinetDom(FULL);
-  c.summary.dispatchEvent(new c.window.MouseEvent("click", { bubbles: true }));
-  // jsdom applies <summary> activation; fall back to the property it toggles.
-  if (!c.fold.open) c.fold.open = true;
-  assert.equal(c.fold.open, true);
-  c.fold.open = false;
-  assert.equal(c.fold.hasAttribute("open"), false);
+test("the board's columns are named for VoiceOver, not just drawn as emoji", () => {
+  const c = cabinet(LEAGUES.spread);
+  const heads = [...c.document.querySelectorAll(".honours-board thead th")].map((th) => th.querySelector(".sr-only")?.textContent ?? th.textContent);
+  assert.deepEqual(heads, ["Player", "Gold", "Silver", "Bronze", "Podiums"]);
+  assert.ok([...c.document.querySelectorAll(".honours-board tbody th")].every((th) => th.getAttribute("scope") === "row"));
 });
 
-test("collapsed again whenever a retained panel comes back (league or tab switch)", () => {
-  const c = cabinetDom(FULL);
+test("no podiums anywhere in the league: a plain line, never an empty board", () => {
+  const c = cabinet(LEAGUES.none);
+  assert.equal(c.fold.tagName, "P");
+  assert.equal(c.fold.querySelector('[aria-hidden="true"]').textContent, "🏆 Trophy cabinet · No podiums yet");
+  assert.equal(c.fold.querySelector(".sr-only").textContent, "Trophy cabinet: no podiums yet");
+  assert.equal(c.document.querySelector("details, .honours-board"), null);
+  // A league with no table yet draws nothing at all.
+  assert.equal(cabinet([]).html, "");
+});
+
+test("the viewer's own week-by-week history stays inside the cabinet, under the board", () => {
+  const c = cabinet(LEAGUES.spread, { weeks: [{ period: "1" }] });
+  const board = c.document.querySelector(".honours-board");
+  const weeks = c.document.querySelector('[data-season-fold="weeks"]');
+  assert.ok(weeks && board.compareDocumentPosition(weeks) & c.window.Node.DOCUMENT_POSITION_FOLLOWING);
+  assert.equal(cabinet(LEAGUES.spread).document.querySelector('[data-season-fold="weeks"]'), null);
+});
+
+test("names are escaped", () => {
+  const c = cabinet([member("u2", "<b>hax</b>", 1)]);
+  assert.ok(!c.html.includes("<b>hax</b>"));
+});
+
+// --- collapse and switching ------------------------------------------------------------
+
+test("expand and collapse via the native control; retained panels come back collapsed", () => {
+  const c = cabinet(LEAGUES.spread);
   c.fold.open = true;
+  assert.equal(c.fold.open, true);
   c.box.collapseCabinets(c.document.querySelector("main"));
   assert.equal(c.fold.open, false);
-  // Both retained-panel paths collapse BEFORE reattaching.
-  for (const fn of ["showResultsPanel", "mountResults"]) {
-    const src = APP.slice(APP.indexOf(fn === "mountResults" ? "function mountResults()" : "async function showResultsPanel("));
+  for (const fn of ["async function showResultsPanel(", "function mountResults()"]) {
+    const src = APP.slice(APP.indexOf(fn));
     const body = src.slice(0, src.indexOf("\n}"));
-    assert.ok(body.indexOf("collapseCabinets(retained);") > -1 && body.indexOf("collapseCabinets(retained);") < body.indexOf("node.replaceChildren(retained);"), fn);
+    assert.ok(body.indexOf("collapseCabinets(retained);") > -1
+      && body.indexOf("collapseCabinets(retained);") < body.indexOf("node.replaceChildren(retained);"), fn);
   }
-  // A freshly built panel is closed by construction.
-  assert.equal(cabinetDom(FULL).fold.open, false);
 });
 
-test("no honours and no history: a plain line, never an empty card behind a chevron", () => {
-  const c = cabinetDom({ nick: "Adam", gold: 0, silver: 0, bronze: 0, podiums: 0, weeks: [] });
-  assert.equal(c.fold.tagName, "P");
-  assert.equal(c.fold.querySelector('[aria-hidden="true"]').textContent, "Trophy cabinet · No podiums yet");
-  assert.equal(c.fold.querySelector(".sr-only").textContent, "Adam's trophy cabinet: no podiums yet");
-  assert.equal(c.document.querySelector("details, summary, .cabinet-shelf"), null);
+test("switching league repopulates from THAT league's table, collapsed", () => {
+  const a = cabinet(LEAGUES.spread);
+  const b = cabinet(LEAGUES.oneWinner);
+  assert.equal(a.tally(), "🏆13 · 🥈9 · 🥉5");
+  assert.equal(b.tally(), "🏆1");
+  assert.deepEqual(b.bodyRows().map((r) => r.nick), ["Adam", "Tom", "Sol"]);
+  assert.equal(b.fold.open, false);
 });
 
-test("no honours but a week-by-week history: still expandable, honestly labelled", () => {
-  const c = cabinetDom({ nick: "Adam", gold: 0, silver: 0, bronze: 0, podiums: 0, weeks: [{ period: "1" }] });
-  assert.equal(c.fold.tagName, "DETAILS");
-  assert.equal(c.tally(), "No podiums yet");
-  assert.equal(c.spoken(), "Adam's trophy cabinet: no podiums yet");
-  assert.ok(c.fold.querySelector('[data-season-fold="weeks"]'));
+// --- the Season table: one line per member -----------------------------------------------
+
+test("Season rows carry no medal tally, for every distribution and both member roles", () => {
+  const box = load(["seasonTableHtml", "movementBadge", "seasonMovement", "movementMark"], {});
+  for (const [name, table] of Object.entries(LEAGUES)) {
+    for (const isOwner of [false, true]) {
+      const html = box.seasonTableHtml({ code: "AAA", owner: "u1", table }, isOwner);
+      const doc = new JSDOM(`<body>${html}</body>`).window.document;
+      assert.doesNotMatch(html, /🏆|🥈|🥉|class="medals?/, `${name}/${isOwner}`);
+      for (const cell of doc.querySelectorAll(".player-cell")) {
+        assert.equal(cell.children.length, 1, `${name}: a second line in the player cell`);
+        assert.ok(cell.firstElementChild.matches(".player-name"));
+      }
+      assert.equal(doc.querySelectorAll(".kick-btn").length, isOwner ? table.length - 1 : 0, `${name}: kick control`);
+    }
+  }
 });
 
-test("VoiceOver: full name and tally in words, emoji hidden, state from the native control", () => {
-  const c = cabinetDom(FULL);
-  assert.equal(c.spoken(), "Adam Bigwood-Featherstonehaugh's trophy cabinet: 6 gold, 4 silver, 2 bronze, 12 podiums");
-  for (const el of c.summary.querySelectorAll(".cabinet-fold-label, .cabinet-fold-tally")) assert.equal(el.getAttribute("aria-hidden"), "true");
-  // No aria-label/aria-expanded overriding the native <details> semantics.
-  assert.equal(c.summary.getAttribute("aria-label"), null);
-  assert.equal(c.summary.getAttribute("aria-expanded"), null);
-  // While collapsed, everything else lives in the <details> body the browser hides.
-  for (const el of c.fold.querySelectorAll("section.cabinet")) assert.ok(!c.summary.contains(el));
-  const nick = load(["trophyCabinet", "cabinetFold", "cabinetPanel", "cardHonoursParts", "CARD_HONOURS_SEP", "PLACE_EMOJI", "cabinetWeeksHtml"],
-    { seasonSection: () => "", cabinetWeek: () => "" }).trophyCabinet({ cabinet: { nick: "<b>x</b>", gold: 1, podiums: 1 } });
-  assert.ok(!nick.includes("<b>x</b>"), "the nickname reached the DOM as markup");
-});
+// --- presentation ------------------------------------------------------------------
 
-test("the row is a real 44px target with a keyboard focus ring and reduced-motion chevron", () => {
+test("the row is a 44px target; the board stays compact and wraps names", () => {
   const head = CSS.match(/\n\.cabinet-fold-head \{([^}]*)\}/)[1];
   assert.match(head, /min-height: 44px/);
-  assert.match(head, /cursor: pointer/);
-  assert.match(CSS, /\.cabinet-fold-head:focus-visible \{ outline: 2px solid var\(--purple\)/);
+  assert.match(CSS, /\.honours-board tbody th \{[^}]*overflow-wrap: anywhere/);
+  assert.match(CSS, /\.honours-board \.is-zero \{ color: var\(--muted\)/);
   assert.match(CSS, /@media \(prefers-reduced-motion: reduce\) \{\s*\.cabinet-fold-head::after \{ transition: none; \}/);
-  assert.match(CSS, /\.cabinet-fold\[open\] > \.cabinet-fold-head::after \{ transform: rotate\(180deg\); \}/);
 });

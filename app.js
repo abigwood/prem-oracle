@@ -5977,61 +5977,71 @@ function cabinetWeeksHtml(state) {
 }
 
 /**
- * v1.8.1: the cabinet arrives collapsed, as one row — "Trophy cabinet" and the
- * same zero-suppressed tally the share cards draw (cardHonoursParts joined by
- * CARD_HONOURS_SEP: one formatter, not two), then the podium total, which is
- * the expanded shelf's own number. The label is fixed: a nickname in the row
- * would wrap at 320pt. VoiceOver hears the full name and the tally in words;
- * the emoji are hidden from it. Collapsed on every visit, never persisted.
+ * v1.8.1: the trophy cabinet is the LEAGUE's honours board, collapsed into one
+ * row: "🏆 Trophy cabinet" and the league's combined, zero-suppressed tally —
+ * the share cards' own formatter (cardHonoursParts joined by CARD_HONOURS_SEP),
+ * fed by podiumCounts, the same per-member data the Season rows used to show.
+ * Nothing is calculated that was not already rendered; it is only gathered.
+ *
+ * Expanded: every member's gold/silver/bronze/podiums, the viewer pinned first
+ * and everyone else by podiums. A native <details>, closed on every visit and
+ * never persisted; the row is a 44px target; VoiceOver hears the tally in words
+ * and the closed body is the browser's to hide.
  */
-function trophyCabinet(state) {
-  const cabinet = state?.cabinet;
-  if (!cabinet) return "";
-  const counts = { gold: cabinet.gold || 0, silver: cabinet.silver || 0, bronze: cabinet.bronze || 0 };
-  const podiums = cabinet.podiums || 0;
-  const owner = cabinet.nick ? `${cabinet.nick}'s trophy cabinet` : "Your trophy cabinet";
-  const parts = cardHonoursParts(counts);
-  if (!parts.length && !podiums) {
-    // Nothing on the shelf. Expandable only if there is week-by-week history to
-    // show; otherwise a plain line, never an empty card behind a chevron.
-    if (!cabinet.weeks?.length) {
-      return `<p class="cabinet-fold cabinet-none" data-cabinet-fold><span class="sr-only">${escapeHTML(owner)}: no podiums yet</span><span aria-hidden="true">Trophy cabinet · No podiums yet</span></p>`;
-    }
-    return cabinetFold(`${owner}: no podiums yet`, "No podiums yet", cabinetPanel(state));
-  }
-  const word = (n) => `${n} podium${n === 1 ? "" : "s"}`;
-  const tally = [...parts.map(([emoji, count]) => `${emoji}${count}`), word(podiums)].join(CARD_HONOURS_SEP);
-  const name = { [PLACE_EMOJI.gold]: "gold", [PLACE_EMOJI.silver]: "silver", [PLACE_EMOJI.bronze]: "bronze" };
-  const spoken = [...parts.map(([emoji, count]) => `${count} ${name[emoji]}`), word(podiums)].join(", ");
-  return cabinetFold(`${owner}: ${spoken}`, tally, cabinetPanel(state));
+const HONOUR_PLACES = ["gold", "silver", "bronze"];
+
+/** Every member's medals, with the viewer first and the rest by podiums. */
+function honoursBoardRows(state) {
+  const me = uid();
+  const rows = (state?.table || []).map((row, order) => {
+    const counts = podiumCounts(row);
+    return { uid: row.uid, nick: row.nick, ...counts, podiums: counts.gold + counts.silver + counts.bronze, order };
+  });
+  const rank = (a, b) => b.podiums - a.podiums || b.gold - a.gold || b.silver - a.silver
+    || b.bronze - a.bronze || a.order - b.order;
+  return [...rows.filter((row) => row.uid === me), ...rows.filter((row) => row.uid !== me).sort(rank)];
 }
 
-/** League settings' own disclosure: native <details>, closed by default. */
-function cabinetFold(spoken, tally, body) {
+function trophyCabinet(state) {
+  const rows = honoursBoardRows(state);
+  if (!rows.length) return "";
+  const league = HONOUR_PLACES.reduce((sum, place) =>
+    ({ ...sum, [place]: rows.reduce((total, row) => total + row[place], 0) }), {});
+  const parts = cardHonoursParts(league);
+  if (!parts.length) {
+    // The whole league has none: a plain line, never an empty board behind a chevron.
+    return `<p class="cabinet-fold cabinet-none" data-cabinet-fold><span class="sr-only">Trophy cabinet: no podiums yet</span><span aria-hidden="true">🏆 Trophy cabinet · No podiums yet</span></p>`;
+  }
+  const podiums = league.gold + league.silver + league.bronze;
+  const word = (n) => `${n} podium${n === 1 ? "" : "s"}`;
+  const tally = parts.map(([emoji, count]) => `${emoji}${count}`).join(CARD_HONOURS_SEP);
+  const name = { [PLACE_EMOJI.gold]: "gold", [PLACE_EMOJI.silver]: "silver", [PLACE_EMOJI.bronze]: "bronze" };
+  const spoken = `Trophy cabinet: ${[...parts.map(([emoji, count]) => `${count} ${name[emoji]}`), word(podiums)].join(", ")}`;
   return `<details class="cabinet-fold" data-cabinet-fold>
     <summary class="cabinet-fold-head">
       <span class="sr-only">${escapeHTML(spoken)}</span>
-      <span class="cabinet-fold-label" aria-hidden="true">Trophy cabinet</span>
+      <span class="cabinet-fold-label" aria-hidden="true">🏆 Trophy cabinet</span>
       <span class="cabinet-fold-tally" aria-hidden="true">${escapeHTML(tally)}</span>
     </summary>
-    ${body}
+    <div class="cabinet-board">
+      ${honoursBoardHtml(rows)}
+      ${state.cabinet?.weeks?.length ? seasonSection("weeks", "Week by week", () => cabinetWeeksHtml(state)) : ""}
+    </div>
   </details>`;
 }
 
-/** The cabinet as it always was, now behind the disclosure. */
-function cabinetPanel(state) {
-  const cabinet = state.cabinet;
-  const shelf = ["gold", "silver", "bronze"].map((place) =>
-    `<div class="cab-slot"><span class="cab-emoji">${PLACE_EMOJI[place]}</span><b>× ${cabinet[place] || 0}</b></div>`
-  ).join("");
-  return `<section class="cabinet">
-    <h3>${escapeHTML(cabinet.nick || "Your")}'s trophy cabinet</h3>
-    <div class="cabinet-shelf">
-      ${shelf}
-      <div class="cab-slot cab-total"><b>${cabinet.podiums || 0}</b><span>podiums</span></div>
-    </div>
-    ${seasonSection("weeks", "Week by week", () => cabinetWeeksHtml(state))}
-  </section>`;
+/** The compact board. A zero reads as a dash on screen and as "0" aloud. */
+function honoursBoardHtml(rows) {
+  const me = uid();
+  const cell = (count) => (count
+    ? `<td>${count}</td>`
+    : `<td class="is-zero"><span aria-hidden="true">\u2013</span><span class="sr-only">0</span></td>`);
+  const head = (place, label) => `<th scope="col"><span aria-hidden="true">${PLACE_EMOJI[place]}</span><span class="sr-only">${label}</span></th>`;
+  return `<table class="table honours-board">
+    <thead><tr><th scope="col">Player</th>${head("gold", "Gold")}${head("silver", "Silver")}${head("bronze", "Bronze")}<th scope="col">Podiums</th></tr></thead>
+    <tbody>${rows.map((row) => `<tr${row.uid === me ? ' class="is-you"' : ""}><th scope="row">${escapeHTML(row.nick)}${
+      row.uid === me ? '<span class="sr-only"> (you)</span>' : ""}</th>${cell(row.gold)}${cell(row.silver)}${cell(row.bronze)}${cell(row.podiums)}</tr>`).join("")}</tbody>
+  </table>`;
 }
 
 // --- Create a league wizard -------------------------------------------------

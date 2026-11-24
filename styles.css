@@ -1218,24 +1218,6 @@ dialog label { display: block; margin-bottom: 6px; color: var(--muted); font-siz
 .podium-step-silver .podium-block { height: 34px; background: #C9CDD4; }
 .podium-step-bronze .podium-block { height: 24px; background: #D9A276; }
 
-.cabinet { margin-top: 20px; }
-.cabinet h3 { margin: 0 0 10px; font-family: Georgia, serif; font-size: 1rem; }
-.cabinet h4 { margin: 18px 0 9px; color: var(--muted); font-size: .68rem; font-weight: 900; letter-spacing: .1em; text-transform: uppercase; }
-.cabinet-shelf {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 8px;
-  padding: 14px 8px;
-  border: 1px solid var(--line);
-  border-radius: 14px;
-  background: var(--white);
-  text-align: center;
-}
-.cab-slot { display: flex; flex-direction: column; align-items: center; gap: 5px; }
-.cab-emoji { font-size: 1.5rem; line-height: 1; }
-.cab-slot b { font-size: .82rem; font-weight: 900; }
-.cab-total b { color: var(--green); font-size: 1.5rem; line-height: 1; }
-.cab-total span { color: var(--muted); font-size: .67rem; font-weight: 800; text-transform: uppercase; }
 .cabinet-weeks { margin: 0; padding: 0; list-style: none; }
 .cabinet-week {
   display: flex;
@@ -2006,8 +1988,20 @@ body.picker-open { overflow: hidden; }
 }
 .cabinet-fold-label,
 .cabinet-fold-tally { white-space: nowrap; }
+/* The league board inside the cabinet: compact, names wrap, figures align. */
+.cabinet-board { padding: 0 10px 12px; }
+.honours-board { font-size: .8rem; }
+.honours-board th, .honours-board td { padding: 8px 3px; }
+.honours-board thead th { color: var(--muted); font-size: .72rem; font-weight: 800; }
+.honours-board tbody th { font-weight: 700; text-align: left; overflow-wrap: anywhere; }
+/* Figures take only what they need, so a name gets the room at 320pt. */
+.honours-board th:not(:first-child), .honours-board td { width: 1.9rem; text-align: center; }
+.honours-board th:last-child, .honours-board td:last-child { width: 3.6rem; }
+.honours-board td { font-variant-numeric: tabular-nums; font-weight: 800; }
+.honours-board .is-zero { color: var(--muted); font-weight: 400; }
+.honours-board tr.is-you th { color: var(--purple); font-weight: 900; }
+.honours-board tbody tr:last-child > * { border-bottom: 0; }
 .cabinet-fold-tally { color: var(--ink); font-weight: 800; letter-spacing: 0; }
-.cabinet-fold > .cabinet { margin: 0; padding: 0 14px 14px; }
 .cabinet-none { padding: 13px 14px; color: var(--muted); font-size: .82rem; font-weight: 800; }
 
 /* --- D6: Mates' Picks before the host has published ---------------------- */

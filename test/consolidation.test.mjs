@@ -232,8 +232,9 @@ test("N12 · the Season control sits under the standings and above the mates' se
 function seasonBox(over = {}) {
   return load(["seasonSection", "seasonSectionOpen", "seasonSectionKey", "seasonOpenSections",
     "toggleSeasonSection", "SEASON_SECTIONS", "leagueRevealsHtml", "revealsListHtml",
-    "cabinetWeeksHtml", "trophyCabinet", "cabinetFold", "cabinetPanel", "cardHonoursParts", "CARD_HONOURS_SEP",
-    "cabinetWeek"], {
+    "cabinetWeeksHtml", "trophyCabinet", "honoursBoardRows", "honoursBoardHtml", "HONOUR_PLACES", "podiumCounts",
+    "cardHonoursParts", "CARD_HONOURS_SEP", "cabinetWeek"], {
+    uid: () => "u1",
     activeLeague: "AAA",
     leagueState: null,
     escapeHTML: (v) => String(v ?? ""),
@@ -246,7 +247,9 @@ function seasonBox(over = {}) {
 
 const REVEALS = { reveals: [{ player1: "Arsenal" }, { player1: "Everton" }] };
 const CABINET = { cabinet: { nick: "Adam", gold: 1, silver: 0, bronze: 0, podiums: 1,
-  weeks: [{ period: "1" }, { period: "2" }] } };
+  weeks: [{ period: "1" }, { period: "2" }] },
+  // v1.8.1: the cabinet is the league's honours board, read from the table.
+  table: [{ uid: "u1", nick: "Adam", wins: 1, podiums: { gold: 1, silver: 0, bronze: 0 } }] };
 
 test("N15 · both sections arrive collapsed and build nothing", () => {
   const s = seasonBox({ leagueState: { ...REVEALS, ...CABINET } });
@@ -257,9 +260,9 @@ test("N15 · both sections arrive collapsed and build nothing", () => {
   assert.match(cabinet, /data-season-fold="weeks"/);
   assert.match(cabinet, /aria-expanded="false"/);
   assert.ok(!cabinet.includes("<li>"), "the collapsed section built its weeks");
-  // The cabinet itself is untouched and visible.
-  assert.match(cabinet, /trophy cabinet/);
-  assert.match(cabinet, /cabinet-shelf/);
+  // v1.8.1: the cabinet is the league's honours board.
+  assert.match(cabinet, /Trophy cabinet/);
+  assert.match(cabinet, /honours-board/);
 });
 
 test("N15 · the two sections are independent, and keyed per league", () => {

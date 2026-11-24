@@ -303,6 +303,7 @@ function island({ buildMs = 0 } = {}) {
     ${lift("function resultsNode()")}
     ${lift("function seasonStages(state, isOwner)")}
     ${lift("async function fillPanelProgressively(panel, capture)")}
+    ${lift("function collapseCabinets(root)")}
     ${lift("async function showResultsPanel({ status } = {})")}
     ${lift("const pulsingNode = (message) => {")}
     ${lift("function weeklyCardReady()")}

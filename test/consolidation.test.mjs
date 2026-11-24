@@ -232,7 +232,8 @@ test("N12 · the Season control sits under the standings and above the mates' se
 function seasonBox(over = {}) {
   return load(["seasonSection", "seasonSectionOpen", "seasonSectionKey", "seasonOpenSections",
     "toggleSeasonSection", "SEASON_SECTIONS", "leagueRevealsHtml", "revealsListHtml",
-    "cabinetWeeksHtml", "trophyCabinet", "cabinetWeek"], {
+    "cabinetWeeksHtml", "trophyCabinet", "cabinetFold", "cabinetPanel", "cardHonoursParts", "CARD_HONOURS_SEP",
+    "cabinetWeek"], {
     activeLeague: "AAA",
     leagueState: null,
     escapeHTML: (v) => String(v ?? ""),

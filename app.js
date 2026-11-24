@@ -3463,6 +3463,15 @@ function dropRetainedPanels(code = null) {
   if (mountedKey?.startsWith(`${code}|`)) mountedKey = null;
 }
 
+/**
+ * A retained Season panel is the same DOM node it was when it left — including
+ * an opened cabinet. The cabinet is collapsed on every visit, so close it on
+ * the way back in.
+ */
+function collapseCabinets(root) {
+  for (const fold of root?.querySelectorAll?.("details[data-cabinet-fold][open]") || []) fold.open = false;
+}
+
 function resultsNode() {
   return document.querySelector("[data-league-results]");
 }
@@ -3557,6 +3566,7 @@ async function showResultsPanel({ status } = {}) {
   if (retained) {
     // The SAME element goes back in. No parsing, no relayout of content the
     // browser has already measured.
+    collapseCabinets(retained);
     node.replaceChildren(retained);
     mountedKey = key;
     mountedContext = { code, tab, period };
@@ -3633,6 +3643,7 @@ function mountResults() {
   if (mountedKey === key && node.firstElementChild) return;   // already right
   const retained = retainedPanels.get(key);
   if (retained) {
+    collapseCabinets(retained);
     node.replaceChildren(retained);
     mountedKey = key;
     syncShareLabel();
@@ -5978,9 +5989,51 @@ function cabinetWeeksHtml(state) {
     : `<p class="muted">Your first matchweek award lands here once a round is settled.</p>`;
 }
 
+/**
+ * v1.8.1: the cabinet arrives collapsed, as one row — "Trophy cabinet" and the
+ * same zero-suppressed tally the share cards draw (cardHonoursParts joined by
+ * CARD_HONOURS_SEP: one formatter, not two), then the podium total, which is
+ * the expanded shelf's own number. The label is fixed: a nickname in the row
+ * would wrap at 320pt. VoiceOver hears the full name and the tally in words;
+ * the emoji are hidden from it. Collapsed on every visit, never persisted.
+ */
 function trophyCabinet(state) {
   const cabinet = state?.cabinet;
   if (!cabinet) return "";
+  const counts = { gold: cabinet.gold || 0, silver: cabinet.silver || 0, bronze: cabinet.bronze || 0 };
+  const podiums = cabinet.podiums || 0;
+  const owner = cabinet.nick ? `${cabinet.nick}'s trophy cabinet` : "Your trophy cabinet";
+  const parts = cardHonoursParts(counts);
+  if (!parts.length && !podiums) {
+    // Nothing on the shelf. Expandable only if there is week-by-week history to
+    // show; otherwise a plain line, never an empty card behind a chevron.
+    if (!cabinet.weeks?.length) {
+      return `<p class="cabinet-fold cabinet-none" data-cabinet-fold><span class="sr-only">${escapeHTML(owner)}: no podiums yet</span><span aria-hidden="true">Trophy cabinet · No podiums yet</span></p>`;
+    }
+    return cabinetFold(`${owner}: no podiums yet`, "No podiums yet", cabinetPanel(state));
+  }
+  const word = (n) => `${n} podium${n === 1 ? "" : "s"}`;
+  const tally = [...parts.map(([emoji, count]) => `${emoji}${count}`), word(podiums)].join(CARD_HONOURS_SEP);
+  const name = { [PLACE_EMOJI.gold]: "gold", [PLACE_EMOJI.silver]: "silver", [PLACE_EMOJI.bronze]: "bronze" };
+  const spoken = [...parts.map(([emoji, count]) => `${count} ${name[emoji]}`), word(podiums)].join(", ");
+  return cabinetFold(`${owner}: ${spoken}`, tally, cabinetPanel(state));
+}
+
+/** League settings' own disclosure: native <details>, closed by default. */
+function cabinetFold(spoken, tally, body) {
+  return `<details class="cabinet-fold" data-cabinet-fold>
+    <summary class="cabinet-fold-head">
+      <span class="sr-only">${escapeHTML(spoken)}</span>
+      <span class="cabinet-fold-label" aria-hidden="true">Trophy cabinet</span>
+      <span class="cabinet-fold-tally" aria-hidden="true">${escapeHTML(tally)}</span>
+    </summary>
+    ${body}
+  </details>`;
+}
+
+/** The cabinet as it always was, now behind the disclosure. */
+function cabinetPanel(state) {
+  const cabinet = state.cabinet;
   const shelf = ["gold", "silver", "bronze"].map((place) =>
     `<div class="cab-slot"><span class="cab-emoji">${PLACE_EMOJI[place]}</span><b>× ${cabinet[place] || 0}</b></div>`
   ).join("");

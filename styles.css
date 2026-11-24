@@ -1971,6 +1971,54 @@ body.picker-open { overflow: hidden; }
 .league-settings[open] > .league-settings-head::after { transform: rotate(180deg); }
 .league-settings-body { padding: 0 14px 14px; }
 .league-settings-body .league-code { margin-top: 0; }
+/* v1.8.1: the trophy cabinet, collapsed into League settings' disclosure. The
+   label and the tally share a line when they fit and wrap as a pair when they
+   do not; the chevron keeps its place. At least 44px tall.
+   Same box, type and chevron as .league-settings, mirrored rather than
+   shared so League settings' own rules stay exactly as they are. */
+.cabinet-fold {
+  margin: 14px 0 4px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--white);
+}
+.cabinet-fold-head {
+  position: relative;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 10px;
+  min-height: 44px;
+  padding: 13px 36px 13px 14px;
+  color: var(--purple);
+  font-size: .82rem;
+  font-weight: 900;
+  letter-spacing: .02em;
+  list-style: none;
+  cursor: pointer;
+}
+.cabinet-fold-head::-webkit-details-marker { display: none; }
+.cabinet-fold-head::after {
+  content: "⌄";
+  position: absolute;
+  top: 50%;
+  right: 14px;
+  margin-top: -.55rem;
+  color: var(--purple);
+  font-size: 1.1rem;
+  line-height: 1;
+  transition: transform .16s ease;
+}
+.cabinet-fold[open] > .cabinet-fold-head::after { transform: rotate(180deg); }
+.cabinet-fold-head:focus-visible { outline: 2px solid var(--purple); outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) {
+  .cabinet-fold-head::after { transition: none; }
+}
+.cabinet-fold-label,
+.cabinet-fold-tally { white-space: nowrap; }
+.cabinet-fold-tally { color: var(--ink); font-weight: 800; letter-spacing: 0; }
+.cabinet-fold > .cabinet { margin: 0; padding: 0 14px 14px; }
+.cabinet-none { padding: 13px 14px; color: var(--muted); font-size: .82rem; font-weight: 800; }
 
 /* --- D6: Mates' Picks before the host has published ---------------------- */
 .mates-awaiting p { margin: 6px 0 12px; }

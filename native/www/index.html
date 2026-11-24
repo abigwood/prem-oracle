@@ -13,7 +13,7 @@
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" href="icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
-  <link rel="stylesheet" href="styles.css?v=20260924a">
+  <link rel="stylesheet" href="styles.css?v=20261124a">
 </head>
 <body>
   <header class="app-header">
@@ -58,10 +58,19 @@
         <p class="notif-hint">Kick-off reminders, per competition.</p>
         <div id="notificationPrefsList"></div>
       </div>
-      <div id="profileRecovery" class="profile-recovery" hidden>
+      <div id="profileRecovery" class="profile-recovery">
         <span class="eyebrow">Account recovery</span>
         <p class="field-hint">These three words restore your account on another device. Keep them private.</p>
-        <p class="recovery-code" id="profileRecoveryCode"></p>
+        <button class="secondary wide" type="button" id="profileRecoveryView" data-profile-recovery-view>View recovery code</button>
+        <p class="field-hint" id="profileRecoveryMissing" role="status" hidden>No recovery code is saved on this device. One is issued when you join or create a league.</p>
+        <div id="profileRecoveryRevealed" hidden>
+          <p class="recovery-code" id="profileRecoveryCode"></p>
+          <p class="recovery-copied" id="profileRecoveryCopied" role="status" hidden></p>
+          <div class="profile-recovery-actions">
+            <button class="secondary" type="button" data-profile-recovery-copy>Copy code</button>
+            <button class="secondary" type="button" id="profileRecoveryHide" data-profile-recovery-hide>Hide code</button>
+          </div>
+        </div>
       </div>
       <button class="primary wide" value="save">Save name</button>
       <button class="link-quiet" type="button" value="cancel" data-copy-diagnostics>Copy diagnostics</button>
@@ -141,6 +150,6 @@
   <script src="vendor/capacitor/share.js" defer></script>
   <script src="vendor/capacitor/filesystem.js" defer></script>
   <script src="vendor/capacitor/in-app-review.js" defer></script>
-  <script src="app.js?v=20260924a" defer></script>
+  <script src="app.js?v=20261124a" defer></script>
 </body>
 </html>

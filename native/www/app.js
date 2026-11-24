@@ -1,6 +1,6 @@
 const SEASON_START = new Date("2026-08-21T20:00:00+01:00");
 const SEASON_START_DATE = "2026-08-21";
-const APP_BUILD = "20260924a";
+const APP_BUILD = "20261124a";
 const API = window.PREM_API || null;
 // Canonical public home of the web app. Inside the Capacitor shell the page is
 // served from premoracle://localhost, so location.origin can never be used to
@@ -405,12 +405,21 @@ async function loadFixtures(refresh = false) {
 async function hydrateIdentity() {
   if (!API) return;
   try {
-    const me = await api(`/me?uid=${encodeURIComponent(uid())}`);
+    const asked = uid();
+    const me = await api(`/me?uid=${encodeURIComponent(asked)}`);
+    // A restore can complete while this is in flight (the first paint does not
+    // wait for it). The answer then describes an identity this device has left:
+    // writing it would put the old account's recovery code — and its leagues —
+    // under the new one. Discard it; the restore has already set both.
+    if (uid() !== asked) return;
     if (me.nickname && !playerName) {
       playerName = me.nickname;
       localStorage.setItem(STORAGE.name, playerName);
     }
-    if (me.recovery) localStorage.setItem(STORAGE.recovery, me.recovery);
+    if (me.recovery && me.recovery !== localStorage.getItem(STORAGE.recovery)) {
+      localStorage.setItem(STORAGE.recovery, me.recovery);
+      resetProfileRecovery();
+    }
     if (Array.isArray(me.leagues)) {
       leagueCodes = [...new Set(me.leagues.filter(Boolean))];
       localStorage.setItem(STORAGE.leagues, JSON.stringify(leagueCodes));
@@ -2908,35 +2917,66 @@ function pickRow(slot, { expanded }) {
   const editable = pickEditable(match);
   const body = expanded ? pickRowBody(match, editable) : "";
   const bodyId = `pk-${escapeHTML(id)}`;
+  const when = pickRowKickoff(match.startAt);
+  // Settled, void and in-progress rows keep the result-first class: their
+  // disclosure opens the result card (score, prediction, points) above the
+  // mates, where the old layout drew that card permanently.
+  const result = isSettledCard(match, pick);
+  const classes = ["pick-row", result ? "pick-row-result" : "", expanded ? "is-open" : "",
+    !result && !pick ? "is-needed" : ""].filter(Boolean).join(" ");
 
-  // Settled, void or in progress: the score leads, the viewer's own pick and
-  // its settled points sit under it, and the mates are behind the disclosure.
-  if (isSettledCard(match, pick)) {
-    return `<div class="pick-row pick-row-result${expanded ? " is-open" : ""}" data-pick-row="${escapeHTML(id)}" data-row-state="${state}">
-      ${resultCard(match, null, { social: false })}
-      <button type="button" class="pick-row-disclose" data-expand-pick="${escapeHTML(id)}"
-        aria-expanded="${expanded ? "true" : "false"}" aria-controls="${bodyId}">
-        <span>Mates&#39; picks</span>
-        <span class="pick-row-chev" aria-hidden="true">${expanded ? "\u25b4" : "\u25be"}</span>
-      </button>
-      <div class="pick-row-body" id="${bodyId}">${body}</div>
-    </div>`;
-  }
-
-  const mark = pick
-    ? `<span class="pick-row-score">${pick.p1}-${pick.p2}</span>`
-    : `<span class="pick-row-score pick-row-needed">\u2014</span>`;
-  return `<div class="pick-row${expanded ? " is-open" : ""}${pick ? "" : " is-needed"}" data-pick-row="${escapeHTML(id)}" data-row-state="${state}">
+  // The badges are the live ones, unmodified: teamBadge() reads TEAM_MARKERS
+  // and TEAM_CODES and nothing else, and the row only sizes them down. The
+  // row's spoken name carries the full team names the codes stand for.
+  return `<div class="${classes}" data-pick-row="${escapeHTML(id)}" data-row-state="${state}">
     <button type="button" class="pick-row-head" data-expand-pick="${escapeHTML(id)}"
       aria-expanded="${expanded ? "true" : "false"}" aria-controls="${bodyId}"
       aria-label="${escapeHTML(pickRowLabel(match, pick, editable))}">
-      <span class="pick-row-when">${escapeHTML(match.startAt ? shortKickoff(match.startAt) : "")}</span>
-      <span class="pick-row-teams">${escapeHTML(match.player1)} v ${escapeHTML(match.player2)}</span>
-      ${mark}
-      ${pickJustSaved(pick) ? `<span class="pick-row-saved" data-pick-saved>Saved</span>` : ""}
+      <span class="pick-row-when" aria-hidden="true"><span class="pick-row-date">${escapeHTML(when.date)}</span><span class="pick-row-time">${escapeHTML(when.time)}</span></span>
+      <span class="pick-row-match" aria-hidden="true">${teamBadge(match.player1)}<span class="pick-row-v">v</span>${teamBadge(match.player2)}</span>
+      ${pickRowMark(match, pick, state)}
+      ${pickJustSaved(pick) ? `<span class="pick-row-saved" data-pick-saved aria-hidden="true">Saved</span>` : ""}
     </button>
     <div class="pick-row-body" id="${bodyId}">${body}</div>
   </div>`;
+}
+
+/** "Sat 28 Nov" over "15:00", in the league's own clock. */
+function pickRowKickoff(startAt) {
+  const date = new Date(startAt || "");
+  if (Number.isNaN(date.getTime())) return { date: "", time: "" };
+  const part = (options) => date.toLocaleString("en-GB", { ...options, timeZone: "Europe/London" });
+  return {
+    date: part({ weekday: "short", day: "numeric", month: "short" }).replace(",", ""),
+    time: part({ hour: "2-digit", minute: "2-digit" }),
+  };
+}
+
+/**
+ * The right-hand column: one fixed-width cell whose meaning depends on state,
+ * and which never lets a prediction pass for a result.
+ *
+ *   open / locked   the viewer's own prediction, or a muted dash
+ *   in-progress     "Pending" — never the prediction, never a provisional score
+ *   settled         the final score, captioned FT
+ *   void            "Void" (or "Postponed", which is what the rest of the app
+ *                   calls a postponed fixture)
+ *
+ * `data-row-mark` names which of those it is, so the distinction is a fact of
+ * the markup and not only of styling.
+ */
+function pickRowMark(match, pick, state) {
+  const cell = (kind, inner) => `<span class="pick-row-mark" data-row-mark="${kind}" aria-hidden="true">${inner}</span>`;
+  if (state === "settled") {
+    const actual = finalScore(match);
+    return cell("result", `<span class="pick-row-score pick-row-final">${actual[0]}-${actual[1]}</span><span class="pick-row-caption">FT</span>`);
+  }
+  if (state === "void") return cell("void", `<span class="pick-row-word">Void</span>`);
+  if (state === "postponed") return cell("void", `<span class="pick-row-word">Postponed</span>`);
+  if (state === "in-progress") return cell("pending", `<span class="pick-row-word">Pending</span>`);
+  return pick
+    ? cell("prediction", `<span class="pick-row-score">${pick.p1}-${pick.p2}</span>`)
+    : cell("none", `<span class="pick-row-score pick-row-needed">\u2014</span>`);
 }
 
 /**
@@ -2955,14 +2995,32 @@ function pickRow(slot, { expanded }) {
  * clock itself.
  */
 function pickRowBody(match, editable) {
-  return editable ? matchCard(match, { social: false }) : fixtureRevealSection(match);
+  if (editable) return matchCard(match, { social: false });
+  // A result-first fixture opens the result card it used to lead with — score,
+  // prediction, points — and then the mates, exactly as before.
+  if (isSettledCard(match)) return `${resultCard(match, null, { social: false })}${fixtureRevealSection(match)}`;
+  return fixtureRevealSection(match);
 }
 
-/** The row's spoken name, since the visible line no longer repeats its state. */
+/**
+ * The row's spoken name. The visible row is codes and a number; this is the
+ * whole of it in words — both full team names, the kick-off, and which kind of
+ * number that is, so a prediction is never announced as a result.
+ */
 function pickRowLabel(match, pick, editable) {
   const teams = `${match.player1} against ${match.player2}`;
   const mine = pick ? `your prediction ${pick.p1}-${pick.p2}` : "no prediction yet";
-  return `${teams}, ${mine}, ${editable ? "editable until kick-off" : "locked"}`;
+  const kickoff = match.startAt ? shortKickoff(match.startAt) : "";
+  const state = matchweekRowState(match);
+  let tail;
+  if (state === "settled") {
+    const actual = finalScore(match);
+    tail = `final score ${actual[0]}-${actual[1]}, ${mine}`;
+  } else if (state === "void") tail = `void, no points, ${mine}`;
+  else if (state === "postponed") tail = `postponed, no points, ${mine}`;
+  else if (state === "in-progress") tail = `${mine}, result pending`;
+  else tail = `${mine}, ${editable ? "editable until kick-off" : "locked"}`;
+  return [teams, kickoff, tail].filter(Boolean).join(", ");
 }
 
 // A confirmation is worth showing for a moment after an edit and not a second
@@ -3012,14 +3070,10 @@ function expandPick(id) {
       body.innerHTML = fixture ? pickRowBody(fixture, pickEditable(fixture)) : "";
       row.classList.add("is-open");
       head.setAttribute("aria-expanded", "true");
-      const chev = row.querySelector(".pick-row-chev");
-      if (chev) chev.textContent = "\u25b4";
     } else if (body.innerHTML) {
       body.innerHTML = "";
       row.classList.remove("is-open");
       head.setAttribute("aria-expanded", "false");
-      const chev = row.querySelector(".pick-row-chev");
-      if (chev) chev.textContent = "\u25be";
     }
   }
   expandedPickId = wanted;
@@ -7362,6 +7416,8 @@ document.addEventListener("submit", async (event) => {
       const response = await api("/restore", { code: new FormData(event.target).get("recovery") });
       localStorage.setItem(STORAGE.uid, response.uid);
       localStorage.setItem(STORAGE.recovery, response.recovery);
+      // A new identity: nothing of the old one's credential may stay rendered.
+      resetProfileRecovery();
       playerName = response.nickname || playerName;
       if (playerName) localStorage.setItem(STORAGE.name, playerName);
       leagueCodes = response.leagues || [];
@@ -7683,9 +7739,10 @@ function openRecoveryOnboarding(code, onContinue) {
 
 // Only ever from the explicit Copy tap. Confirms on success; on failure it says
 // so honestly and leaves the code on screen to copy by hand.
-async function copyRecovery() {
-  const code = document.getElementById("recoveryCode").textContent;
-  const copied = document.getElementById("recoveryCopied");
+// Profile's recovery view reuses it verbatim, pointed at its own two elements.
+async function copyRecovery(codeId = "recoveryCode", copiedId = "recoveryCopied") {
+  const code = document.getElementById(codeId).textContent;
+  const copied = document.getElementById(copiedId);
   if (!code) return;
   try {
     if (!navigator.clipboard || !navigator.clipboard.writeText) throw new Error("clipboard unavailable");
@@ -7694,6 +7751,9 @@ async function copyRecovery() {
   } catch {
     copied.textContent = "Couldn't copy automatically — select the code above and save it by hand.";
   }
+  // Closed (or hidden) while the clipboard was answering: the code has been
+  // cleared, and a confirmation must not be written back into the empty view.
+  if (document.getElementById(codeId).textContent !== code) { copied.textContent = ""; return; }
   copied.hidden = false;
 }
 
@@ -7708,7 +7768,21 @@ function continueRecovery() {
 document.getElementById("recoveryDialog").addEventListener("click", (event) => {
   if (event.target.closest("[data-recovery-copy]")) copyRecovery();
 });
+/**
+ * Takes the dialog's copy of the code back out of the DOM once it has closed.
+ * Every route — Continue, Escape, a programmatic close() — ends in the one
+ * "close" event, so this runs for all of them. Only the rendered copy goes:
+ * the stored credential Profile reveals is untouched.
+ */
+function clearRecoveryOnboarding() {
+  document.getElementById("recoveryCode").textContent = "";
+  const copied = document.getElementById("recoveryCopied");
+  copied.textContent = "";
+  copied.hidden = true;
+}
+
 document.getElementById("recoveryDialog").addEventListener("close", () => {
+  clearRecoveryOnboarding();
   continueRecovery();
   restoreViewport();
 });
@@ -7726,14 +7800,65 @@ document.getElementById("notifyDialog").addEventListener("click", (event) => {
 document.getElementById("profileButton").addEventListener("click", () => {
   document.getElementById("playerName").value = playerName;
   renderNotificationPrefs();
-  // Later recovery access lives here, behind the avatar — the only place the
-  // player's own code is shown.
-  const rec = localStorage.getItem(STORAGE.recovery);
-  const panel = document.getElementById("profileRecovery");
-  const codeEl = document.getElementById("profileRecoveryCode");
-  if (rec) { codeEl.textContent = rec; panel.hidden = false; }
-  else { codeEl.textContent = ""; panel.hidden = true; }
+  // Later recovery access lives here, behind the avatar — and it opens with
+  // the code NOT on screen. It is shown only on an explicit tap.
+  resetProfileRecovery();
   document.getElementById("profileDialog").showModal();
+});
+
+/**
+ * v1.8.1 Profile recovery view.
+ *
+ * Profile used to print the credential the moment it opened, so anybody who
+ * glanced at an open Profile — or a screen share — saw it. Now the panel holds
+ * a "View recovery code" button and nothing else. The code goes into the DOM
+ * only on that tap, as text, read from storage at that moment so it is the
+ * CURRENT identity's; it is copied only on an explicit "Copy code"; and it is
+ * taken out of the DOM again on "Hide code", whenever Profile closes, and
+ * whenever the identity changes or a restore completes. Once a player has
+ * deliberately revealed it, what they do with their own screen is theirs —
+ * this hides it from the next glance, not from a screenshot.
+ */
+function resetProfileRecovery() {
+  document.getElementById("profileRecoveryCode").textContent = "";
+  document.getElementById("profileRecoveryRevealed").hidden = true;
+  const copied = document.getElementById("profileRecoveryCopied");
+  copied.textContent = "";
+  copied.hidden = true;
+  document.getElementById("profileRecoveryMissing").hidden = true;
+  document.getElementById("profileRecoveryView").hidden = false;
+}
+
+function revealProfileRecovery() {
+  const rec = localStorage.getItem(STORAGE.recovery);
+  const codeEl = document.getElementById("profileRecoveryCode");
+  resetProfileRecovery();
+  if (!rec) {
+    // Honest, and nothing secret in it.
+    document.getElementById("profileRecoveryMissing").hidden = false;
+    return;
+  }
+  codeEl.textContent = rec;
+  document.getElementById("profileRecoveryRevealed").hidden = false;
+  document.getElementById("profileRecoveryView").hidden = true;
+  document.getElementById("profileRecoveryHide").focus?.();
+}
+
+function hideProfileRecovery() {
+  resetProfileRecovery();
+  document.getElementById("profileRecoveryView").focus?.();
+}
+
+document.getElementById("profileDialog").addEventListener("click", (event) => {
+  if (event.target.closest("[data-profile-recovery-view]")) revealProfileRecovery();
+  else if (event.target.closest("[data-profile-recovery-copy]")) copyRecovery("profileRecoveryCode", "profileRecoveryCopied");
+  else if (event.target.closest("[data-profile-recovery-hide]")) hideProfileRecovery();
+});
+document.getElementById("profileDialog").addEventListener("close", resetProfileRecovery);
+// Another tab restoring a different identity changes it under this one.
+window.addEventListener("storage", (event) => {
+  // key is null when another tab cleared storage outright.
+  if (event.key === null || event.key === STORAGE.uid || event.key === STORAGE.recovery) resetProfileRecovery();
 });
 
 document.getElementById("profileForm").addEventListener("submit", (event) => {

@@ -405,7 +405,13 @@ async function loadFixtures(refresh = false) {
 async function hydrateIdentity() {
   if (!API) return;
   try {
-    const me = await api(`/me?uid=${encodeURIComponent(uid())}`);
+    const asked = uid();
+    const me = await api(`/me?uid=${encodeURIComponent(asked)}`);
+    // A restore can complete while this is in flight (the first paint does not
+    // wait for it). The answer then describes an identity this device has left:
+    // writing it would put the old account's recovery code — and its leagues —
+    // under the new one. Discard it; the restore has already set both.
+    if (uid() !== asked) return;
     if (me.nickname && !playerName) {
       playerName = me.nickname;
       localStorage.setItem(STORAGE.name, playerName);
@@ -7834,7 +7840,8 @@ document.getElementById("profileDialog").addEventListener("click", (event) => {
 document.getElementById("profileDialog").addEventListener("close", resetProfileRecovery);
 // Another tab restoring a different identity changes it under this one.
 window.addEventListener("storage", (event) => {
-  if (event.key === STORAGE.uid || event.key === STORAGE.recovery) resetProfileRecovery();
+  // key is null when another tab cleared storage outright.
+  if (event.key === null || event.key === STORAGE.uid || event.key === STORAGE.recovery) resetProfileRecovery();
 });
 
 document.getElementById("profileForm").addEventListener("submit", (event) => {

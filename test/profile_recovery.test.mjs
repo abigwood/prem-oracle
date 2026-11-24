@@ -205,7 +205,7 @@ test("a completed restore and a cross-tab identity change both reset the view", 
   const block = restore.slice(0, restore.indexOf('setFlash("Identity and leagues restored.")'));
   assert.ok(block.indexOf("localStorage.setItem(STORAGE.recovery, response.recovery);") < block.indexOf("resetProfileRecovery();"),
     "a restore does not clear the old identity's rendered code");
-  assert.match(APP, /window\.addEventListener\("storage", \(event\) => \{\n\s+if \(event\.key === STORAGE\.uid \|\| event\.key === STORAGE\.recovery\) resetProfileRecovery\(\);/);
+  assert.match(APP, /window\.addEventListener\("storage", \(event\) => \{[\s\S]{0,80}?\n\s+if \(event\.key === null \|\| event\.key === STORAGE\.uid \|\| event\.key === STORAGE\.recovery\) resetProfileRecovery\(\);/);
   // And the real wiring the box above mirrors.
   assert.match(APP, /document\.getElementById\("profileDialog"\)\.addEventListener\("close", resetProfileRecovery\);/);
   assert.match(APP, /if \(event\.target\.closest\("\[data-profile-recovery-view\]"\)\) revealProfileRecovery\(\);/);
@@ -258,4 +258,70 @@ test("post-join / post-create onboarding is unchanged and independent", async ()
   assert.equal(p.code(), "");
   assert.ok(p.document.getElementById("profileRecoveryCopied").hidden);
   assert.match(APP, /if \(event\.target\.closest\("\[data-recovery-copy\]"\)\) copyRecovery\(\);/);
+});
+
+// --- review fix: a /me answer for an identity this device has left ----------
+
+test("REGRESSION: a /me response that lands after a restore cannot plant the old identity's code", async () => {
+  // Reproduced against 4450593: uid u-B, stored recovery code-A, leagues ["AAA"].
+  const store = new Map([["uid", "u-A"], ["rec", CODE_A], ["l", '["AAA"]']]);
+  const resets = [];
+  let answer;
+  const b = load(["hydrateIdentity"], {
+    API: "https://api.example",
+    uid: () => store.get("uid"),
+    playerName: "",
+    api: () => new Promise((resolve) => { answer = resolve; }),
+    STORAGE: { recovery: "rec", name: "n", leagues: "l" },
+    localStorage: { getItem: (k) => store.get(k) ?? null, setItem: (k, v) => store.set(k, v) },
+    resetProfileRecovery: () => resets.push(store.get("rec")),
+    activeLeague: "", leagueCodes: [], pruneStoredLeagueNames: () => {}, setActiveLeague: () => {},
+    applyLaunchBranch: () => {}, loadKnownLeagueNames: async () => {}, syncUserPicks: async () => {},
+  });
+  const pending = b.hydrateIdentity();
+  // The restore handler completes while /me for u-A is still in flight.
+  store.set("uid", "u-B"); store.set("rec", CODE_B); store.set("l", '["BBB"]');
+  answer({ uid: "u-A", nickname: "Old", recovery: CODE_A, leagues: ["AAA"] });
+  await pending;
+  assert.equal(store.get("rec"), CODE_B, "the previous identity's recovery code was written under the new one");
+  assert.equal(store.get("l"), '["BBB"]', "the previous identity's leagues were written under the new one");
+  assert.equal(store.get("n"), undefined, "the previous identity's name was adopted");
+  assert.deepEqual(resets, [], "a stale answer touched the Profile view");
+  // A revealed code is therefore the restored identity's.
+  const p = profileBox({ stored: store.get("rec") });
+  p.open();
+  p.tap(VIEW);
+  assert.equal(p.code(), CODE_B);
+});
+
+test("an in-flight /me for the SAME identity still applies", async () => {
+  const store = new Map([["uid", "u-A"], ["rec", CODE_A]]);
+  const resets = [];
+  const b = load(["hydrateIdentity"], {
+    API: "https://api.example", uid: () => store.get("uid"), playerName: "Adam",
+    api: async () => ({ recovery: CODE_B, leagues: ["AAA"] }),
+    STORAGE: { recovery: "rec", name: "n", leagues: "l" },
+    localStorage: { getItem: (k) => store.get(k) ?? null, setItem: (k, v) => store.set(k, v) },
+    resetProfileRecovery: () => resets.push(store.get("rec")),
+    activeLeague: "", leagueCodes: [], pruneStoredLeagueNames: () => {}, setActiveLeague: () => {},
+    applyLaunchBranch: () => {}, loadKnownLeagueNames: async () => {}, syncUserPicks: async () => {},
+  });
+  await b.hydrateIdentity();
+  assert.equal(store.get("rec"), CODE_B);
+  assert.equal(store.get("l"), '["AAA"]');
+  assert.deepEqual(resets, [CODE_B]);
+});
+
+test("another tab clearing storage outright (key null) clears a revealed code", () => {
+  const p = profileBox();
+  p.open();
+  p.tap(VIEW);
+  assert.equal(p.code(), CODE_A);
+  // Mirror of the real listener, whose source is pinned above.
+  const onStorage = (event) => {
+    if (event.key === null || event.key === "prem_oracle_uid" || event.key === "prem_oracle_recovery") p.box.resetProfileRecovery();
+  };
+  onStorage({ key: null });
+  assert.equal(p.code(), "");
+  assert.ok(!p.text().includes(CODE_A));
 });

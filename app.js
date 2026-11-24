@@ -3184,7 +3184,109 @@ function picksView() {
     <div class="pick-list" data-pick-list>${
       slots.map((slot) => pickRow(slot, { expanded: expandedPickId === String(slot.id) })).join("")
     }</div>
+    ${sharePromptHtml(state, slots)}
     ${pickShareRow(state)}`;
+}
+
+/* --- v1.8.1: share after the week's last prediction ------------------------
+ *
+ * One moment, and only one: the successful save that takes the ACTIVE league
+ * from "something still to predict" to "every required prediction saved". A
+ * screen that is merely already complete never raises it; nor does an edit to
+ * a week that was already complete. It is raised in memory by that save, so a
+ * relaunch onto a finished week does not bring it back either.
+ *
+ * Once the player shares (the sheet reports completion) or dismisses it, it is
+ * done for that uid + league, on this device. A cancelled sheet or a fallback
+ * hand-off is not a share and changes nothing. No counters, no analytics, no
+ * worker write: the share itself is the existing league invite.
+ */
+const SHARE_PROMPT_DONE = "prem_oracle_share_prompt_done";
+let sharePrompt = null;   // { uid, code, announce } — set only by a completing save
+
+const sharePromptKey = (who, code) => `${SHARE_PROMPT_DONE}:${who}:${code}`;
+
+function sharePromptDone(who, code) {
+  try { return localStorage.getItem(sharePromptKey(who, code)) === "1"; } catch { return false; }
+}
+
+function markSharePromptDone(who, code) {
+  try { localStorage.setItem(sharePromptKey(who, code), "1"); } catch { /* storage refused: forgets on relaunch */ }
+  if (sharePrompt?.uid === who && sharePrompt.code === code) sharePrompt = null;
+}
+
+/**
+ * Whether these slots are ALL predicted. An unresolvable slot is an unknown,
+ * not a pass: "every prediction saved" is a claim the screen has to be able to
+ * stand behind.
+ */
+function slotsComplete(slots) {
+  const { required, made } = pickCounts(slots);
+  return required > 0 && made === required && slots.every((slot) => slot.fixture);
+}
+
+/** The active league's completion right now, or null when it has no slate. */
+function activeLeagueCompletion() {
+  const state = matchweekLeagueState();
+  const plan = state && matchweekSlate(state);
+  if (!plan) return null;
+  return { code: state.code, complete: slotsComplete(matchweekSlots(plan)) };
+}
+
+/** Called by a save that has SUCCEEDED, with the completion from before it. */
+function noteSaveCompletion(before, who) {
+  if (!before || before.complete) return;
+  const after = activeLeagueCompletion();
+  // The same league, the same player, and only on the transition.
+  if (!after || after.code !== before.code || !after.complete || uid() !== who) return;
+  if (sharePromptDone(who, after.code)) return;
+  sharePrompt = { uid: who, code: after.code, announce: true };
+}
+
+function sharePromptHtml(state, slots) {
+  const who = uid();
+  if (!sharePrompt || sharePrompt.uid !== who || sharePrompt.code !== state.code) return "";
+  if (sharePromptDone(who, state.code) || !slotsComplete(slots)) return "";
+  // Announced on the paint that first shows it, not on every repaint after.
+  const announce = sharePrompt.announce ? ' role="status"' : "";
+  sharePrompt.announce = false;
+  const count = pickCounts(slots).required;
+  return `<section class="share-prompt" data-share-prompt="${escapeHTML(state.code)}" aria-labelledby="share-prompt-title">
+    <div class="share-prompt-text"${announce}>
+      <p class="share-prompt-title" id="share-prompt-title">All ${count} prediction${count === 1 ? "" : "s"} saved <span aria-hidden="true">\u2713</span></p>
+      <p class="share-prompt-sub">Share ${escapeHTML(state.name || state.code)} with mates</p>
+    </div>
+    <button class="share-prompt-go" type="button" data-share-prompt-share="${escapeHTML(state.code)}">Share</button>
+    <button class="share-prompt-dismiss" type="button" data-share-prompt-dismiss="${escapeHTML(state.code)}" aria-label="Dismiss">\u00d7</button>
+  </section>`;
+}
+
+/**
+ * Inside the tap: shareNow is reached with nothing awaited, exactly as Invite
+ * mates does, and only a completed sheet retires the prompt.
+ */
+function shareFromPrompt(code) {
+  const who = uid();
+  return shareNow(leagueInvite(code)).then((outcome) => {
+    if (outcome !== "shared") return outcome;
+    markSharePromptDone(who, code);
+    removeSharePrompt(code);
+    return outcome;
+  });
+}
+
+function dismissSharePrompt(code) {
+  markSharePromptDone(uid(), code);
+  removeSharePrompt(code, { refocus: true });
+}
+
+/** Out of the DOM in place: a repaint would lose the player's scroll position. */
+function removeSharePrompt(code, { refocus = false } = {}) {
+  const node = document.querySelector(`[data-share-prompt="${cssEscape(code)}"]`);
+  if (!node) return;
+  const hadFocus = node.contains(document.activeElement);
+  node.remove();
+  if (refocus && hadFocus) document.querySelector(".pick-share button, [data-pick-list] [data-expand-pick]")?.focus();
 }
 
 /** The week's own share control, on the screen the week now lives on. */
@@ -4325,11 +4427,15 @@ function shareNow({ title, text, url }) {
   let opening = null;
   if (plugin) opening = plugin.share({ title, text, url, dialogTitle: title });
   else if (navigator.share) opening = navigator.share(url ? { title, text, url } : { title, text });
-  if (!opening) { location.href = whatsappUrlFor(text); return; }
-  opening.catch((error) => {
+  // The outcome, for a caller that needs to know (the share-after-save prompt):
+  // "shared" only when the sheet itself says it completed. A hand-off to the
+  // WhatsApp page is not known to have shared anything, so it is not "shared".
+  if (!opening) { location.href = whatsappUrlFor(text); return Promise.resolve("handed-off"); }
+  return opening.then(() => "shared", (error) => {
     // Dismissing the sheet is an answer, not a failure.
-    if (error?.name === "AbortError" || /cancel/i.test(error?.message || "")) return;
+    if (error?.name === "AbortError" || /cancel/i.test(error?.message || "")) return "cancelled";
     location.href = whatsappUrlFor(text);
+    return "handed-off";
   });
 }
 
@@ -7105,6 +7211,16 @@ document.addEventListener("click", async (event) => {
     shareNow(leagueInvite(share.dataset.shareLeague));
     return;
   }
+  const promptShare = event.target.closest("[data-share-prompt-share]");
+  if (promptShare) {
+    shareFromPrompt(promptShare.dataset.sharePromptShare);
+    return;
+  }
+  const promptDismiss = event.target.closest("[data-share-prompt-dismiss]");
+  if (promptDismiss) {
+    dismissSharePrompt(promptDismiss.dataset.sharePromptDismiss);
+    return;
+  }
   // My Picks opens one editable row at a time, as a DOM edit rather than a
   // re-render, so working down the list never loses your place.
   const pickRowHead = event.target.closest("[data-expand-pick]");
@@ -7358,6 +7474,10 @@ if (document.documentElement.classList.contains("is-native")) {
 
 async function savePick(matchId, p1, p2) {
   if (!validScore(p1) || !validScore(p2)) return;
+  // Measured before the optimistic write, so the prompt can tell a completing
+  // save from an edit to a week that was already complete.
+  const before = activeLeagueCompletion();
+  const who = uid();
   picks[matchId] = { p1, p2, savedAt: Date.now() };
   busyMatch = matchId;
   render({ anchorMatchId: matchId });
@@ -7365,6 +7485,7 @@ async function savePick(matchId, p1, p2) {
     if (API) await api("/pick", { uid: uid(), nickname: playerName, matchId, p1, p2 });
     localStorage.setItem(STORAGE.picks, JSON.stringify(picks));
     setFlash("Pick saved.");
+    noteSaveCompletion(before, who);
     // v1.8 §4: a saved prediction is demonstrated intent — offer reminders once,
     // after the save settles. No-op on web / when already shown / non-prompt.
     scheduleReminderOffer();

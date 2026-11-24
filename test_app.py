@@ -2210,7 +2210,9 @@ class LeagueSwitchAndShareTests(unittest.TestCase):
         self.assertNotIn("async", fn)
         self.assertIn("opening = plugin.share({ title, text, url, dialogTitle: title });", fn)
         # The waiting happens after, on the promise the tap already started.
-        self.assertIn("opening.catch((error) => {", fn)
+        # v1.8.1: the waiting now also reports the outcome, for the
+        # share-after-save prompt; a cancel is still an answer, not a failure.
+        self.assertIn('return opening.then(() => "shared", (error) => {', fn)
         self.assertIn('if (error?.name === "AbortError"', fn)
 
     def test_the_invite_text_is_prepared_not_fetched(self):

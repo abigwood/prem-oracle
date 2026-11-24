@@ -2208,6 +2208,70 @@ body.picker-open { overflow: hidden; }
 /* The week's own share control sits under the list it exports. */
 .pick-share { display: flex; justify-content: flex-end; margin-top: 12px; }
 
+/* --- v1.8.1: share after the week's last prediction ------------------------
+   One slim green strip under the list: message | Share | dismiss. It sits
+   below the rows, so it never moves a fixture under the player's finger, and
+   it has no entrance animation, so reduced-motion has nothing to stop.
+   Contrast on #eaf7f1: title 8.9:1, sub 14.9:1, dismiss 8.9:1; white on the
+   button 5.0:1. */
+.share-prompt {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 8px 6px 8px 14px;
+  border: 1px solid rgba(10, 127, 88, .28);
+  border-radius: 12px;
+  background: #eaf7f1;
+}
+.share-prompt-text { min-width: 0; }
+.share-prompt-title,
+.share-prompt-sub { margin: 0; line-height: 1.3; overflow-wrap: anywhere; }
+.share-prompt-title { color: var(--green-2); font-size: .84rem; font-weight: 900; }
+.share-prompt-sub {
+  color: var(--ink);
+  font-size: .78rem;
+  font-weight: 600;
+  /* A 40-character league name would otherwise stack the strip to five or six
+     lines on a 320pt phone. Two lines, then an ellipsis — visually only: the
+     whole name stays in the DOM, so VoiceOver still reads all of it. */
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+}
+.share-prompt-go {
+  min-height: 44px;
+  padding: 0 16px;
+  border: 0;
+  border-radius: 10px;
+  background: var(--green);
+  color: var(--white);
+  font: inherit;
+  font-size: .84rem;
+  font-weight: 900;
+  cursor: pointer;
+}
+.share-prompt-dismiss {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: 0;
+  border-radius: 10px;
+  background: none;
+  color: var(--green-2);
+  font: inherit;
+  font-size: 1.3rem;
+  line-height: 1;
+  cursor: pointer;
+}
+.share-prompt-go:focus-visible,
+.share-prompt-dismiss:focus-visible { outline: 2px solid var(--green-2); outline-offset: 2px; }
+
 /* --- v1.7 rider items 4 and 5: the Season page's two folded sections -------
    Both arrive collapsed. Expansion is a DOM edit on the section already on
    screen, so the scroll position is exactly where the finger left it and the

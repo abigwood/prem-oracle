@@ -69,6 +69,9 @@ export function load(names, stubs = {}) {
       ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])),
     countPhrase: (count, word) => `<span class="nowrap">${count} ${word}</span>`,
     teamBadge: () => "<i class=badge></i>",
+    // v1.8.1: the share-after-save prompt has its own suite; elsewhere it is
+    // absent, which is also what it is on any screen no save has completed.
+    sharePromptHtml: () => "",
     fixtureRevealSection: () => "",
     pickRevealSection: () => "",
     isLeagueHost: () => false,

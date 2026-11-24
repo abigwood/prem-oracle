@@ -10,7 +10,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { JSDOM } from "jsdom";
-import { load } from "./harness.mjs";
+import { load, sourceOf } from "./harness.mjs";
 
 const HTML = readFileSync(new URL("../index.html", import.meta.url), "utf8");
 const RECOVERY_DIALOG = HTML.slice(HTML.indexOf('<dialog id="recoveryDialog">'),
@@ -26,13 +26,15 @@ function recoveryBox({ clipboardMode = "ok" } = {}) {
 
   const writes = [];
   let navigator;
+  let release = null;
   if (clipboardMode === "none") navigator = {};
+  else if (clipboardMode === "deferred") navigator = { clipboard: { writeText: (t) => new Promise((r) => { release = () => { writes.push(t); r(); }; }) } };
   else if (clipboardMode === "fail") navigator = { clipboard: { writeText: async () => { throw new Error("denied"); } } };
   else navigator = { clipboard: { writeText: async (t) => { writes.push(t); } } };
 
   const calls = { viewport: 0 };
   const box = load(
-    ["openRecoveryOnboarding", "copyRecovery", "continueRecovery"],
+    ["openRecoveryOnboarding", "copyRecovery", "continueRecovery", "clearRecoveryOnboarding"],
     {
       document,
       navigator,
@@ -45,8 +47,8 @@ function recoveryBox({ clipboardMode = "ok" } = {}) {
   dialog.addEventListener("click", (event) => {
     if (event.target.closest("[data-recovery-copy]")) box.copyRecovery();
   });
-  dialog.addEventListener("close", () => { box.continueRecovery(); calls.viewport++; });
-  return { box, document, dialog, writes, calls };
+  dialog.addEventListener("close", () => { box.clearRecoveryOnboarding(); box.continueRecovery(); calls.viewport++; });
+  return { box, document, dialog, writes, calls, release: () => release && release() };
 }
 
 const CODE = "amber-score-oracle";
@@ -158,4 +160,75 @@ test("creating a league surfaces the recovery code before the share step", async
   await box.advanceWizard();
   assert.deepEqual(recovered, [CODE], "creation did not surface the recovery code");
   assert.equal(wizard.step, "share", "creation did not advance to the share step");
+});
+
+// --- v1.8.1 privacy follow-up: the dialog's copy leaves with the dialog ------
+
+const inDialogDom = (document, code) => document.getElementById("recoveryDialog").outerHTML.includes(code);
+
+test("the real close wiring clears the dialog's copy before continuing", () => {
+  const app = readFileSync(new URL("../app.js", import.meta.url), "utf8");
+  assert.match(app, /document\.getElementById\("recoveryDialog"\)\.addEventListener\("close", \(\) => \{\n  clearRecoveryOnboarding\(\);\n  continueRecovery\(\);\n  restoreViewport\(\);\n\}\);/);
+  // No other way out of the dialog bypasses "close".
+  assert.ok(!/recoveryDialog"\)\.addEventListener\("cancel"/.test(app), "a cancel handler could skip the close");
+  // Only the rendered copy: never storage, never the clipboard.
+  const clear = sourceOf("clearRecoveryOnboarding");
+  assert.doesNotMatch(clear, /localStorage|STORAGE|clipboard|innerHTML/);
+});
+
+for (const [route, close] of [
+  ["Continue", (dialog, document) => document.querySelector("[data-recovery-continue]") && dialog.close("continue")],
+  ["Escape / cancel", (dialog, document) => { dialog.dispatchEvent(new document.defaultView.Event("cancel")); dialog.close(); }],
+  ["programmatic close()", (dialog) => dialog.close()],
+]) {
+  test(`${route}: the code is in the dialog while shown and gone after`, async () => {
+    const { box, document, dialog } = recoveryBox();
+    let continued = 0;
+    box.openRecoveryOnboarding(CODE, () => { continued++; });
+    assert.equal(document.getElementById("recoveryCode").textContent, CODE);
+    assert.ok(inDialogDom(document, CODE), "the code was not displayed");
+    tapCopy(document);
+    await flush();
+    assert.ok(!document.getElementById("recoveryCopied").hidden);
+    close(dialog, document);
+    assert.equal(dialog.open, false);
+    assert.ok(!inDialogDom(document, CODE), `${route} left the code in the dialog's markup`);
+    assert.equal(document.getElementById("recoveryCode").textContent, "");
+    assert.equal(document.getElementById("recoveryCopied").textContent, "");
+    assert.equal(document.getElementById("recoveryCopied").hidden, true);
+    assert.equal(continued, 1, "the journey no longer continues exactly once");
+  });
+}
+
+test("a Copy still answering when the dialog closes writes nothing back into it", async () => {
+  const { box, document, dialog, writes, release } = recoveryBox({ clipboardMode: "deferred" });
+  box.openRecoveryOnboarding(CODE, null);
+  tapCopy(document);
+  dialog.close();                                 // Continue before the clipboard answers
+  release();
+  await flush();
+  assert.deepEqual(writes, [CODE], "the explicit tap's copy was lost");
+  assert.ok(!inDialogDom(document, CODE));
+  assert.equal(document.getElementById("recoveryCopied").textContent, "");
+  assert.equal(document.getElementById("recoveryCopied").hidden, true, "a confirmation reappeared in the closed dialog");
+});
+
+test("while open, Copy and its wording are unchanged by the clearing", async () => {
+  const { box, document, release } = recoveryBox({ clipboardMode: "deferred" });
+  box.openRecoveryOnboarding(CODE, null);
+  tapCopy(document);
+  release();
+  await flush();
+  assert.equal(document.getElementById("recoveryCopied").textContent, "Copied — store it somewhere safe.");
+  assert.equal(document.getElementById("recoveryCopied").hidden, false);
+  assert.equal(document.getElementById("recoveryCode").textContent, CODE, "the code left while still displayed");
+});
+
+test("re-opening after a close shows the code again, freshly", () => {
+  const { box, document, dialog } = recoveryBox();
+  box.openRecoveryOnboarding(CODE, null);
+  dialog.close();
+  box.openRecoveryOnboarding("violet-corner-flag", null);
+  assert.equal(document.getElementById("recoveryCode").textContent, "violet-corner-flag");
+  assert.ok(!inDialogDom(document, CODE));
 });

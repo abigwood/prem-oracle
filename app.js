@@ -7751,6 +7751,9 @@ async function copyRecovery(codeId = "recoveryCode", copiedId = "recoveryCopied"
   } catch {
     copied.textContent = "Couldn't copy automatically — select the code above and save it by hand.";
   }
+  // Closed (or hidden) while the clipboard was answering: the code has been
+  // cleared, and a confirmation must not be written back into the empty view.
+  if (document.getElementById(codeId).textContent !== code) { copied.textContent = ""; return; }
   copied.hidden = false;
 }
 
@@ -7765,7 +7768,21 @@ function continueRecovery() {
 document.getElementById("recoveryDialog").addEventListener("click", (event) => {
   if (event.target.closest("[data-recovery-copy]")) copyRecovery();
 });
+/**
+ * Takes the dialog's copy of the code back out of the DOM once it has closed.
+ * Every route — Continue, Escape, a programmatic close() — ends in the one
+ * "close" event, so this runs for all of them. Only the rendered copy goes:
+ * the stored credential Profile reveals is untouched.
+ */
+function clearRecoveryOnboarding() {
+  document.getElementById("recoveryCode").textContent = "";
+  const copied = document.getElementById("recoveryCopied");
+  copied.textContent = "";
+  copied.hidden = true;
+}
+
 document.getElementById("recoveryDialog").addEventListener("close", () => {
+  clearRecoveryOnboarding();
   continueRecovery();
   restoreViewport();
 });

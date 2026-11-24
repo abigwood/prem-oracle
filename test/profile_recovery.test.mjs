@@ -42,7 +42,7 @@ function profileBox({ stored = CODE_A, clipboardMode = "ok" } = {}) {
     : clipboardMode === "fail" ? { clipboard: { writeText: async () => { throw new Error("denied"); } } }
       : { clipboard: { writeText: async (t) => { writes.push(t); } } };
   const box = load(["resetProfileRecovery", "revealProfileRecovery", "hideProfileRecovery", "copyRecovery",
-    "openRecoveryOnboarding"], {
+    "openRecoveryOnboarding", "clearRecoveryOnboarding", "continueRecovery"], {
     document, navigator, localStorage,
     STORAGE: { recovery: "prem_oracle_recovery", uid: "prem_oracle_uid" },
     recoveryContinue: null,
@@ -55,6 +55,7 @@ function profileBox({ stored = CODE_A, clipboardMode = "ok" } = {}) {
     else if (event.target.closest("[data-profile-recovery-hide]")) box.hideProfileRecovery();
   });
   profile.addEventListener("close", box.resetProfileRecovery);
+  document.getElementById("recoveryDialog").addEventListener("close", () => { box.clearRecoveryOnboarding(); box.continueRecovery(); });
   const open = () => { box.resetProfileRecovery(); profile.showModal(); };
   const tap = (sel) => document.querySelector(sel).dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
   const text = () => profile.textContent;
@@ -324,4 +325,18 @@ test("another tab clearing storage outright (key null) clears a revealed code", 
   onStorage({ key: null });
   assert.equal(p.code(), "");
   assert.ok(!p.text().includes(CODE_A));
+});
+
+test("closing onboarding clears ITS copy only — Profile can still reveal the stored code", () => {
+  const p = profileBox();
+  const onboarding = p.document.getElementById("recoveryDialog");
+  p.box.openRecoveryOnboarding(CODE_A, null);
+  assert.ok(onboarding.outerHTML.includes(CODE_A));
+  onboarding.close();
+  assert.ok(!p.document.body.innerHTML.includes(CODE_A), "the code is still somewhere in the DOM after onboarding");
+  assert.equal(p.storage.get("prem_oracle_recovery"), CODE_A, "the stored credential was cleared");
+  p.open();
+  assert.ok(!p.text().includes(CODE_A));
+  p.tap(VIEW);
+  assert.equal(p.code(), CODE_A, "Profile lost the player's code");
 });

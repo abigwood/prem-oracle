@@ -691,6 +691,10 @@ main {
 /* v1.8.1: the configuration eyebrow above the name is gone; the name moves up
    into its space rather than keeping the gap the eyebrow sat in. */
 .league-card > h2:first-child { margin-top: 0; }
+/* A league name with no break opportunity (40 characters, the maximum, in one
+   word) wrapped nowhere and pushed the page sideways. Break only such a word;
+   ordinary names wrap at spaces exactly as before. */
+.league-card > h2 { overflow-wrap: break-word; }
 .league-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 11px; margin: 13px 0; }
 .action-card, .league-form, .restore-card, .reveal-card {
   padding: 15px;

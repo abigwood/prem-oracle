@@ -2776,39 +2776,23 @@ class SeasonPodiumTests(unittest.TestCase):
         self.assertIn("return { gold: row?.wins || 0, silver: 0, bronze: 0 };", fn)
         self.assertIn("gold: podiums.gold || 0", fn)
 
-    def test_all_three_medals_always_show_with_zeros_muted(self):
-        fn = self.app[self.app.index("function medalLine(row)"):]
-        fn = fn[:fn.index("\n}")]
-        for emoji in ("🏆", "🥈", "🥉"):
-            self.assertIn(emoji, fn, emoji)
-        # Muted, not hidden: a row that shows only what somebody won reads as a
-        # different shape per player and cannot be scanned.
-        self.assertIn('`<span class="medal${count ? "" : " is-none"}">${emoji} ${count}</span>`', fn)
-        self.assertIn(".medal.is-none", self.css)
-
-    def test_the_accessible_label_reads_as_words(self):
-        fn = self.app[self.app.index("function medalLine(row)"):]
-        fn = fn[:fn.index("\n}")]
-        self.assertIn('aria-label="${gold} gold, ${silver} silver, ${bronze} bronze"', fn)
-        # The separators are decoration and are not read out.
-        self.assertIn('<i aria-hidden="true">·</i>', fn)
+    def test_rows_carry_no_medal_tally_any_more(self):
+        # v1.8.1: one line per member. The per-row medal line is gone; the
+        # league's honours live once, in the trophy cabinet's board.
+        self.assertNotIn("function medalLine(row)", self.app)
+        self.assertNotIn('class="medals"', self.app)
+        self.assertNotIn(".medal.is-none", self.css)
+        self.assertNotIn(".medals {", self.css)
 
     def test_the_trophy_column_is_gone_and_pts_exact_remain(self):
-        fn = self.app[self.app.index("function seasonTableHtml(state, isOwner, withWins)"):]
+        fn = self.app[self.app.index("function seasonTableHtml(state, isOwner)"):]
         fn = fn[:fn.index("\n}")]
         self.assertIn("<th>Player</th>", fn)
         self.assertIn("<th>Pts</th>", fn)
-        self.assertIn("<th>Exact</th>", fn)
-        # The fifth column is what pushed the table into a horizontal scroll.
+        self.assertIn("Exact</th>", fn)
         self.assertNotIn("wins-col", fn)
-        self.assertIn("medalLine(row)", fn)
+        self.assertNotIn("medalLine", fn)
         self.assertIn('class="player-cell"', fn)
-
-    def test_the_medals_sit_under_the_name_not_beside_it(self):
-        block = self.css[self.css.index(".medals {"):]
-        block = block[:block.index("}")]
-        self.assertIn("display: block;", block)
-        self.assertIn("white-space: nowrap;", block, "three medals must not wrap mid-row")
         # Scoped: .player-name is also a match-card class, so an unscoped rule
         # would restyle every fixture card on the Schedule.
         self.assertIn(".player-cell .player-name { display: block; }", self.css)

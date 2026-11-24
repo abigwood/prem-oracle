@@ -108,7 +108,7 @@ test("A · the weekly row puts the arrow AFTER the name, in the season table's s
   const box = load(["roundTableHtml", "slateIdsOf", "weeklyRanks", "weeklyMovement", "weeklyMovementBadge",
     "sharedRankByUid", "settlementWindows", "windowPointsByUid",
     "VOID_STATUSES", "isVoidFixture", "isPostponed",
-    "PLACE_EMOJI", "medalLine", "podiumCounts"], {
+    "PLACE_EMOJI", "podiumCounts"], {
     slateForPeriod: () => null,
     fixtureById: () => null,
   });

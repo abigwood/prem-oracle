@@ -3480,7 +3480,7 @@ function resultsNode() {
 function seasonStages(state, isOwner) {
   return [
     ["cabinet", () => trophyCabinet(state)],
-    ["standings", () => seasonTableHtml(state, isOwner, true)],
+    ["standings", () => seasonTableHtml(state, isOwner)],
     // Immediately under the table it exports, and above the mates' sections —
     // a share control at the bottom of a long page is a control nobody finds.
     ["share", () => `<div class="season-share">${shareIconButton(state, "season")}</div>`],
@@ -3517,7 +3517,7 @@ async function fillPanelProgressively(panel, capture) {
   }
   if (!leagueSupportsRounds(state)) {
     panel.insertAdjacentHTML("beforeend", state && !state.error
-      ? `${seasonTableHtml(state, isOwner, false)}${leagueRevealsHtml(state)}`
+      ? `${seasonTableHtml(state, isOwner)}${leagueRevealsHtml(state)}`
       : "");
     return true;
   }
@@ -4142,25 +4142,12 @@ function podiumCounts(row) {
   return { gold: row?.wins || 0, silver: 0, bronze: 0 };
 }
 
-/**
- * All three medals, always, with the empty ones muted rather than hidden — a
- * row that shows only what somebody has won reads as a different shape per
- * player and makes the column impossible to scan.
- */
-function medalLine(row) {
-  const { gold, silver, bronze } = podiumCounts(row);
-  const cell = (emoji, count) =>
-    `<span class="medal${count ? "" : " is-none"}">${emoji} ${count}</span>`;
-  return `<span class="medals" aria-label="${gold} gold, ${silver} silver, ${bronze} bronze">${
-    cell("🏆", gold)}<i aria-hidden="true">·</i>${cell("🥈", silver)}<i aria-hidden="true">·</i>${cell("🥉", bronze)}</span>`;
-}
-
-function seasonTableHtml(state, isOwner, withWins) {
-  // The trophy column is gone: the medals live under each name, where all
-  // three fit at 402px without a fifth column pushing Pts and Exact off.
+function seasonTableHtml(state, isOwner) {
+  // v1.8.1: one line per member. The medal tally that sat under each name now
+  // lives once, for the whole league, in the trophy cabinet above the table.
   return `<table class="table league-table"><thead><tr><th>Player</th><th></th><th>Pts</th><th>Exact</th>${isOwner ? "<th></th>" : ""}</tr></thead>
     <tbody>${(state.table || []).map((row, index) =>
-      `<tr><td class="player-cell"><span class="player-name">${row.rank || index + 1}. ${escapeHTML(row.nick)}</span>${withWins ? medalLine(row) : ""}</td><td>${movementBadge(row)}</td><td>${row.pts}</td><td>${row.exact}</td>${isOwner ? `<td class="kick-cell">${row.uid && row.uid !== state.owner ? `<button class="kick-btn" type="button" data-kick-league="${state.code}" data-kick-uid="${escapeHTML(row.uid)}" aria-label="Remove ${escapeHTML(row.nick)}">×</button>` : ""}</td>` : ""}</tr>`
+      `<tr><td class="player-cell"><span class="player-name">${row.rank || index + 1}. ${escapeHTML(row.nick)}</span></td><td>${movementBadge(row)}</td><td>${row.pts}</td><td>${row.exact}</td>${isOwner ? `<td class="kick-cell">${row.uid && row.uid !== state.owner ? `<button class="kick-btn" type="button" data-kick-league="${state.code}" data-kick-uid="${escapeHTML(row.uid)}" aria-label="Remove ${escapeHTML(row.nick)}">×</button>` : ""}</td>` : ""}</tr>`
     ).join("")}</tbody></table>`;
 }
 

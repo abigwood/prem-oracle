@@ -1848,16 +1848,6 @@ body.picker-open { overflow: hidden; }
 /* Scoped to the table cell: .player-name is also a match-card class, and an
    unscoped display:block there would restyle every fixture card. */
 .player-cell .player-name { display: block; }
-.medals {
-  display: block;
-  margin-top: 2px;
-  color: var(--muted, #6b7280);
-  font-size: .68rem;
-  font-weight: 700;
-  white-space: nowrap;
-}
-.medals i { margin: 0 4px; font-style: normal; opacity: .5; }
-.medal.is-none { opacity: .35; }
 
 /* --- v1.6.6 D3: result-first settled cards --------------------------------
    After full time the card stops being a control and becomes a record. The

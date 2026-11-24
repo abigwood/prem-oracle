@@ -38,7 +38,7 @@ function recorder() {
   return { canvas, ctx, marks, fills };
 }
 
-const NAMES = ["roundTableHtml", "seasonTableHtml", "medalLine", "weeklyMovementBadge", "movementBadge", "seasonMovement", "movementMark", "cardMovementText", "cardMovementWidth", "drawCardMovement", "slateIdsOf", "weeklyMovement", "settlementWindows", "windowPointsByUid", "seasonCardPages", "drawSeasonPage", "drawSeasonTableCard", "weeklyCardPages", "drawWeeklyPage", "drawWeeklyResultCard", "drawCardHeader", "drawCardHero", "drawCardTableHead", "drawCardCellSplit", "drawCardRowPlate", "drawWeeklyRowBand",
+const NAMES = ["roundTableHtml", "seasonTableHtml", "weeklyMovementBadge", "movementBadge", "seasonMovement", "movementMark", "cardMovementText", "cardMovementWidth", "drawCardMovement", "slateIdsOf", "weeklyMovement", "settlementWindows", "windowPointsByUid", "seasonCardPages", "drawSeasonPage", "drawSeasonTableCard", "weeklyCardPages", "drawWeeklyPage", "drawWeeklyResultCard", "drawCardHeader", "drawCardHero", "drawCardTableHead", "drawCardCellSplit", "drawCardRowPlate", "drawWeeklyRowBand",
   "drawCardRowRule", "weeklyCardGeometry", "drawCardHonours", "drawCardFooter",
   "drawFitted", "fitText", "ellipsise", "roundedRect", "cardCanvas", "cardRowMetrics", "cardFont",
   "cardDate", "sentenceCase", "seasonCardModel",
@@ -1169,7 +1169,7 @@ test("move · nothing accepted moved to make room for the markers", () => {
 /** The badge each row shows on screen, by name, or "" for no badge at all. */
 function screenBadges(box, table) {
   const html = box.seasonTableHtml({ code: "AAA", name: "Sunday Six", owner: "u1", table },
-    false, true);
+    false);
   return table.map((row) => {
     const cell = html.slice(html.indexOf(`. ${row.nick}<`));
     const badge = /<span class="movement movement-(\w+)"[^>]*aria-label="([^"]+)"[^>]*>([^<]*)<\/span>/
@@ -1202,7 +1202,7 @@ test("unavailable · 1 · no comparison yet means nothing, on screen and on the 
   // The screen draws no badge — not an empty disc holding a place.
   assert.deepEqual(screenBadges(box, table), Array(11).fill(null),
     "the screen reserved a badge for a comparison that does not exist");
-  const html = box.seasonTableHtml({ code: "AAA", name: "S", owner: "u1", table }, false, true);
+  const html = box.seasonTableHtml({ code: "AAA", name: "S", owner: "u1", table }, false);
   assert.ok(!html.includes("movement-flat"), "an unmeasured row was given a dash");
   assert.ok(!html.includes('class="movement'), "an empty badge was still rendered");
   // And the export says exactly as much.
@@ -1295,9 +1295,9 @@ test("unavailable · 5 · nothing else moved: layout, paging, floors, or words",
   }
   // The season table keeps its columns whether or not any badge is rendered.
   const empty = box.seasonTableHtml({ code: "AAA", name: "S", owner: "u1",
-    table: seasonTableUnavailable(4) }, false, true);
+    table: seasonTableUnavailable(4) }, false);
   const full = box.seasonTableHtml({ code: "AAA", name: "S", owner: "u1",
-    table: seasonTable(4) }, false, true);
+    table: seasonTable(4) }, false);
   const cells = (html) => (html.match(/<td/g) || []).length;
   assert.equal(cells(empty), cells(full), "a suppressed badge took its column with it");
   // Accessibility: every rendered badge still names itself in words.
@@ -1467,11 +1467,9 @@ test("cols · the on-screen tables are untouched by an export-only change", () =
   assert.ok(!screen.includes("MOVE"), "the screen grew a MOVE column");
   assert.match(screen, /<th>Player<\/th><th><\/th><th>Pts<\/th><th>Exact<\/th>/);
   assert.match(screen, /\$\{movementBadge\(row\)\}/, "the screen's badge changed");
-  assert.match(sourceOf("medalLine"), /class="medals"/, "the screen's medal line changed");
-  // The screen still shows a zero medal, muted — only the CARD suppresses.
-  assert.match(sourceOf("medalLine"), /is-none/, "the screen stopped showing zero medals");
+  // v1.8.1: the screen's rows carry no medal line at all now; the honours
+  // board in the trophy cabinet is where they are read.
   const box = paintBox({ leagueTab: "season" });
-  const html = box.seasonTableHtml(seasonOf(seasonTable(4)), false, true);
-  assert.ok(html.includes("🏆 0") || html.includes("🥈 0") || html.includes("🥉 0"),
-    "the screen's zero medals disappeared with the card's");
+  const html = box.seasonTableHtml(seasonOf(seasonTable(4)), false);
+  assert.ok(!/🏆|🥈|🥉|class="medals/.test(html), "a medal tally survives on the screen's rows");
 });

@@ -1833,7 +1833,9 @@ class AmendBeforeKickoffTests(unittest.TestCase):
         notice = self.app[self.app.index("function slateNotice(period)"):]
         notice = notice[:notice.index("function slateSummary(slate)")]
         # Host only, and only while it is still amendable.
-        self.assertIn("const canEdit = isLeagueHost() && !published.locked;", notice)
+        # "Still amendable" is the effective lock: the flag OR a lock moment
+        # already passed (v1.8.1 — a stale `locked: false` must not offer edits).
+        self.assertIn("const canEdit = isLeagueHost() && !slateLocked(published);", notice)
         self.assertIn(">Edit line-up</button>", notice)
         self.assertIn("data-amend=", notice)
         # Both sides see the deadline: lockLine is rendered for everyone,

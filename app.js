@@ -2295,6 +2295,19 @@ function lockTimeLabel(slate) {
  * What the league is told about the deadline. Before the first kickoff the
  * line-up can still be amended, so both host and members see when that stops.
  */
+/**
+ * Whether a published slate is locked, in effect: the server's flag, or a lock
+ * moment that has already passed — a slate fetched before its lock time keeps
+ * `locked: false` until it is refetched, and must not keep offering edits.
+ * The one answer for the lock copy and both Edit line-up controls.
+ */
+function slateLocked(slate) {
+  if (!slate) return false;
+  if (slate.locked) return true;
+  const at = slate.lockAt ? Date.parse(slate.lockAt) : NaN;
+  return Number.isFinite(at) && at <= Date.now();
+}
+
 function lockLine(slate, { period = null } = {}) {
   if (!slate) return "";
   // v1.8.1: the League card passes its period, and the line then carries the
@@ -2302,7 +2315,7 @@ function lockLine(slate, { period = null } = {}) {
   // retired "Season 2026/27 · next up" card used to hold. Other callers are
   // unchanged.
   if (period != null) return cardLockLine(slate, period);
-  if (slate.locked) return `<p class="lock-line is-locked">Line-up locked — the first fixture has kicked off.</p>`;
+  if (slateLocked(slate)) return `<p class="lock-line is-locked">Line-up locked — the first fixture has kicked off.</p>`;
   const when = lockTimeLabel(slate);
   return when ? `<p class="lock-line">Locks ${escapeHTML(when)}</p>` : "";
 }
@@ -2323,10 +2336,9 @@ function lockWeekPrefix(slate, period) {
 
 function cardLockLine(slate, period) {
   const week = lockWeekPrefix(slate, period);
-  const at = slate.lockAt ? Date.parse(slate.lockAt) : NaN;
   // A lock moment already behind us is not an upcoming lock, whatever the
   // flag on a slate fetched before it passed says.
-  if (slate.locked || (Number.isFinite(at) && at <= Date.now())) {
+  if (slateLocked(slate)) {
     return `<p class="lock-line is-locked">${week ? `${escapeHTML(week)} · line-up locked` : "Line-up locked"} — the first fixture has kicked off.</p>`;
   }
   const when = lockTimeLabel(slate).replace(/, (\d{2}:\d{2})$/, " at $1");
@@ -2339,7 +2351,7 @@ function slateNotice(period) {
   // Published and still amendable: the host can change the line-up, and both
   // sides are told when that stops.
   if (published) {
-    const canEdit = isLeagueHost() && !published.locked;
+    const canEdit = isLeagueHost() && !slateLocked(published);
     return `<div class="slate-notice slate-notice-published">
       ${lockLine(published)}
       ${canEdit ? `<button class="secondary wide" type="button" data-open-picker="${escapeHTML(period)}" data-amend="1">Edit line-up</button>` : ""}
@@ -6309,7 +6321,7 @@ function hostSlateControl(state) {
   }
   return `<div class="slate-notice slate-notice-published">
     ${lockLine(slate, { period: state.currentPeriod })}
-    ${isOwner && !slate.locked
+    ${isOwner && !slateLocked(slate)
       ? `<button class="secondary wide" type="button" data-open-picker="${escapeHTML(state.currentPeriod)}" data-amend="1">Edit line-up</button>`
       : ""}
   </div>`;

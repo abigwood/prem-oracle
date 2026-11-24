@@ -181,7 +181,7 @@ const HOUR = 3600000;
 const future = (h) => new Date(Date.now() + h * HOUR).toISOString();
 
 function card({ state: s, weekOf = (p) => (p === WINDOW ? 13 : null), owner = "u1" } = {}) {
-  return load(["hostSlateControl", "lockLine", "cardLockLine", "lockWeekPrefix", "lockTimeLabel",
+  return load(["hostSlateControl", "lockLine", "slateLocked", "cardLockLine", "lockWeekPrefix", "lockTimeLabel",
     "periodLabel", "periodLabelLong", "isWindowKey"], {
     uid: () => owner,
     weekNumberFor: weekOf,
@@ -276,7 +276,7 @@ test("the Season panel no longer builds a 'Season 2026/27' card", () => {
 
 function leagueScreen({ states, active, tab }) {
   const box = load(["leagueView", "leagueSettings", "leagueSummaryLine", "COMPETITIONS", "DEFAULT_COMPETITION",
-    "competitionMeta", "weeklyCountControl", "hostSlateControl", "lockLine", "cardLockLine", "lockWeekPrefix",
+    "competitionMeta", "weeklyCountControl", "hostSlateControl", "lockLine", "slateLocked", "cardLockLine", "lockWeekPrefix",
     "lockTimeLabel", "periodLabel", "periodLabelLong", "isWindowKey"], {
     leagueCodes: Object.keys(states), leagueState: states[active], leagueStates: states, activeLeague: active,
     leagueManageOpen: false, leagueSettingsOpen: false, countBusy: false, inviteCode: "", playerName: "Adam",

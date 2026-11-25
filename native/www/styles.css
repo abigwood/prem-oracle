@@ -834,19 +834,6 @@ th.wins-col { font-size: .92rem; }
 }
 /* The same reveal, riding under an expanded fixture card. */
 .fixture-reveal { margin-top: 12px; padding-top: 11px; border-top: 1px solid var(--line); }
-.round-banner {
-  margin: 12px 0;
-  padding: 11px 13px;
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  background: var(--cream);
-}
-.round-banner strong { display: block; color: var(--ink); font-size: .85rem; }
-.round-banner span { display: block; margin-top: 3px; color: var(--muted); font-size: .72rem; font-weight: 700; }
-.round-banner.is-success { border-color: #b9cda1; background: #ecfff5; }
-.round-banner.is-success strong { color: var(--green); }
-.round-banner.is-pending { border-color: #f3d9a4; background: #fff7e8; }
-.round-banner.is-pending strong { color: #92600a; }
 .section-head .pick-progress { margin-top: 5px; color: var(--green); font-weight: 800; }
 .movement {
   display: inline-grid;
@@ -1180,7 +1167,8 @@ dialog label { display: block; margin-bottom: 6px; color: var(--muted); font-siz
 .slate-notice-host .primary { margin-top: 12px; }
 .section-head .slate-summary { margin: 5px 0 0; color: var(--purple); font-size: .78rem; font-weight: 800; }
 .host-slate-banner { margin: 0 0 12px; }
-.round-slate { display: block; margin-top: 4px; color: var(--purple); font-size: .72rem; font-weight: 800; }
+/* A past week's one-line status, where the week card used to be. */
+.week-status { margin: 12px 0 0; color: var(--muted); font-size: .78rem; font-weight: 800; }
 
 /* The matchweek podium as a rostrum. Steps are written gold-silver-bronze so a
    screen reader hears the result in order; `order` puts them on screen in the

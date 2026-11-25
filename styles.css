@@ -2247,6 +2247,72 @@ body.picker-open { overflow: hidden; }
   .pick-row-match { gap: 8px; }
   .pick-row-saved { right: 10px; }
 }
+/* --- v1.9 §3: your pick and its points on a finished row --------------------
+   A second grid row under the score and "FT", right-aligned with them and
+   spanning the whole row, so it has the width a 320pt phone does not give the
+   score column. Contrast: exact #0B6B3A on #DFF7E9 5.9:1, result #420A42 on
+   #EFE6F3 12.8:1, miss/no pick #5A6478 on #EEF0F3 5.2:1. */
+.pick-row .pick-row-head { row-gap: 2px; }
+.pick-row-outcome {
+  grid-column: 1 / -1;
+  justify-self: end;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+  line-height: 1.2;
+}
+.pick-row-you { font-size: .7rem; font-weight: 800; color: var(--muted); font-variant-numeric: tabular-nums; }
+.pick-pill {
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: .68rem;
+  font-weight: 900;
+  font-variant-numeric: tabular-nums;
+}
+.pick-pill-exact { background: #DFF7E9; color: #0B6B3A; }
+.pick-pill-result { background: #EFE6F3; color: #420A42; }
+.pick-pill-miss,
+.pick-pill-none { background: #EEF0F3; color: #5A6478; }
+
+/* --- v1.9 §2: the shape of the week while it loads --------------------------
+   Built inside the real row's own grid, so the row that replaces a skeleton
+   lands exactly where it stood. Grey shapes only: no words to be wrong. */
+.pick-row-skeleton .pick-row-head { cursor: default; }
+.skeleton-bar,
+.skeleton-circle { display: block; background: #e6eaf0; }
+.skeleton-bar { height: .7rem; border-radius: 6px; }
+.skeleton-date { width: 3.4rem; height: .62rem; }
+.skeleton-time { width: 2.4rem; height: .8rem; }
+.skeleton-circle { flex: none; width: 40px; height: 40px; border-radius: 50%; }
+.pick-row-skeleton .pick-row-v { visibility: hidden; }
+.skeleton-score { width: 2.6rem; height: 1.3rem; }
+/* The pick line's own height: a pill is .68rem type at 1.2 plus 2px padding top and bottom. */
+.skeleton-outcome { width: 5.6rem; height: calc(.68rem * 1.2 + 4px); border-radius: 999px; }
+/* Remembered header words as grey bars: the text keeps its line breaks and is
+   never seen. clone gives every wrapped line its own rounded bar. */
+.skeleton-text {
+  color: transparent;
+  background: #e6eaf0;
+  border-radius: 6px;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+  user-select: none;
+}
+.pick-skeleton-lines { display: flex; flex-direction: column; gap: 6px; padding-top: 2px; }
+.skeleton-line { width: 13rem; max-width: 100%; }
+.skeleton-line-short { width: 8.5rem; }
+.pick-row-skeleton,
+.pick-skeleton-lines .skeleton-bar,
+.skeleton-text { animation: view-pulse 1.1s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) {
+  .pick-row-skeleton,
+  .pick-skeleton-lines .skeleton-bar,
+  .skeleton-text { animation: none; opacity: .8; }
+}
+.picks-load-failed strong { display: block; margin-bottom: 4px; font-size: .95rem; font-weight: 900; color: var(--ink); }
+.picks-load-failed .primary { margin-top: 14px; }
+
 /* The week's own share control sits under the list it exports. */
 .pick-share { display: flex; justify-content: flex-end; margin-top: 12px; }
 

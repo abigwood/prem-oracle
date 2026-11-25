@@ -572,7 +572,7 @@ test("C1 · a linked membership is selected before My Picks renders", () => {
   // v1.8 Slice A: a NON-member invite opens the one-step join sheet instead of
   // routing to the League tab.
   assert.match(body, /const joinInvite = inviteCode && !leagueCodes\.includes\(inviteCode\) \? inviteCode : null;/);
-  assert.match(body, /if \(joinInvite && API\) openJoinSheet\(joinInvite\);/);
+  assert.match(body, /if \(joinInvite && API && !sheetOpen\) openJoinSheet\(joinInvite\);/);
   assert.ok(!body.includes('currentView = "league"'), "a non-member invite still routes to the League tab");
 });
 

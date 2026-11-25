@@ -27,6 +27,7 @@ const STORAGE = {
   pickWeeks: "prem_oracle_pick_weeks",
   notifyAsk: "prem_oracle_notify_ask", // v1.8 §4: the contextual ask, shown at most once
   ratingAsked: "prem_oracle_rating_asked", // v1.8 §6: the review request, attempted at most once per identity+version
+  weekShape: "prem_oracle_week_shape", // v1.9 §2: the last My Picks drawn — finished rows and header lines — so a skeleton is its size
 };
 
 function isNativeApp() {
@@ -350,6 +351,26 @@ let fixtureRevisions = readJSON(STORAGE.fixtureRevisions, {});
 const FIXTURES_FRESH_MS = 300000;
 let fixturesLoadedAt = 0;
 
+/*
+ * v1.9 §2: where the first load stands, so a cold launch never mistakes "not
+ * here yet" for "gone".
+ *
+ * fixturesStatus  "loading" until the fixture list first answers, and again
+ *                 while a different set of competitions is fetched; "failed"
+ *                 only when neither the feed nor the bundled copy could be read.
+ * confirmedLeagues  the leagues whose state the server has answered for in
+ *                 this session. A cached state can paint rows, but only a
+ *                 confirmed one may say the host hasn't published.
+ * leagueLoadFailed  leagues whose read genuinely failed (offline, server
+ *                 error) and has not since succeeded.
+ * picksLoadTimedOut  the first load has taken longer than anybody waits.
+ */
+let fixturesStatus = "loading";
+const confirmedLeagues = new Set();
+const leagueLoadFailed = new Set();
+let picksLoadTimedOut = false;
+const PICKS_LOAD_TIMEOUT_MS = 15000;
+
 function rememberRevision(code, revision) {
   if (!revision || fixtureRevisions[code] === revision) return;
   fixtureRevisions = { ...fixtureRevisions, [code]: revision };
@@ -384,6 +405,9 @@ async function loadOneCompetition(code, refresh) {
 
 async function loadFixtures(refresh = false) {
   const competitions = activeCompetitions();
+  // A background refresh of the list already held keeps it on screen; only a
+  // different set of competitions is genuinely not here yet.
+  if (competitions.join("+") !== loadedCompetition) fixturesStatus = "loading";
   try {
     const payloads = await Promise.all(competitions.map((code) => loadOneCompetition(code, refresh)));
     fixtures = payloads.flatMap((data) => data.fixtures || []).sort((a, b) =>
@@ -395,10 +419,12 @@ async function loadFixtures(refresh = false) {
       (data.teams && typeof data.teams === "object") ? data.teams : {}));
     loadedCompetition = competitions.join("+");
     fixturesLoadedAt = Date.now();
+    fixturesStatus = "ready";
   } catch {
     fixtures = [];
     teamIntel = {};
     loadedCompetition = null;
+    fixturesStatus = "failed";
   }
 }
 
@@ -439,6 +465,9 @@ async function hydrateIdentity() {
     await syncUserPicks();
   } catch {
     // The PWA remains usable for cached fixtures and local picks while offline.
+    // If that left the active league unasked, its read has failed too: My Picks
+    // must not wait on an answer nobody is fetching.
+    if (activeLeague && !confirmedLeagues.has(activeLeague)) leagueLoadFailed.add(activeLeague);
   }
 }
 
@@ -808,6 +837,9 @@ async function loadLeagueState(generation = navGeneration, { roundStarted = fals
     // Cache it either way — the answer is true about the league it names, even
     // if the viewer has moved on. Only the paint is abandoned.
     saveLeagueName(state.code, state.name);
+    // v1.9 §2: the server has answered for this league, whoever asked.
+    confirmedLeagues.add(requested);
+    leagueLoadFailed.delete(requested);
     cacheLeagueState(state);
     if (superseded()) return;
     leagueState = state;
@@ -816,6 +848,8 @@ async function loadLeagueState(generation = navGeneration, { roundStarted = fals
     dropRetainedPanels(requested);
     if (rememberCompetition(leagueState.competitions || leagueState.competition)) await loadFixtures();
   } catch (error) {
+    // Recorded even when superseded: the read failed whoever asked for it.
+    if (!/league not found/i.test(error.message)) leagueLoadFailed.add(requested);
     if (superseded()) return;
     // A failed SEASON read must not throw away a valid cached week. The round
     // table has its own cache and its own request; blanking it here replaced
@@ -1186,6 +1220,7 @@ async function loadKnownLeagueNames() {
     // These responses are full season states — cache them rather than throw
     // away everything but the name.
     cacheLeagueState(result.value);
+    if (result.value?.code) confirmedLeagues.add(result.value.code);
   });
 }
 
@@ -1276,6 +1311,7 @@ async function prefetchLeagueStates() {
     const state = await api(`/state?code=${encodeURIComponent(code)}&uid=${encodeURIComponent(uid())}`);
     cacheLeagueState(state);
     saveLeagueName(state.code, state.name);
+    if (state?.code) confirmedLeagues.add(state.code);
   }));
 }
 
@@ -2976,7 +3012,7 @@ const pickEditable = (match) => matchweekRowState(match) === "open";
  * Matchweek.
  */
 function pickRow(slot, { expanded }) {
-  if (!slot.fixture) return matchweekUnavailable(slot.id);
+  if (!slot.fixture) return fixturesStatus === "loading" ? pickRowSkeleton() : matchweekUnavailable(slot.id);
   const match = slot.fixture;
   const id = String(match.id);
   const pick = picks[id];
@@ -3002,6 +3038,7 @@ function pickRow(slot, { expanded }) {
       <span class="pick-row-when" aria-hidden="true"><span class="pick-row-date">${escapeHTML(when.date)}</span><span class="pick-row-time">${escapeHTML(when.time)}</span></span>
       <span class="pick-row-match" aria-hidden="true">${teamBadge(match.player1)}<span class="pick-row-v">v</span>${teamBadge(match.player2)}</span>
       ${pickRowMark(match, pick, state)}
+      ${pickRowOutcome(match, pick, state)}
       ${pickJustSaved(pick) ? `<span class="pick-row-saved" data-pick-saved aria-hidden="true">Saved</span>` : ""}
     </button>
     <div class="pick-row-body" id="${bodyId}">${body}</div>
@@ -3047,6 +3084,26 @@ function pickRowMark(match, pick, state) {
 }
 
 /**
+ * v1.9 §3: under a finished row's score, the viewer's own pick and what it
+ * earned — "You 2-2" and a pill — so a settled week reads at a glance.
+ *
+ * Display only. The points are scorePickLocal's, the port the suite holds to
+ * the worker's scorePick, so the pill can never disagree with the table.
+ * Only a row with a final score gets one: open, locked, in-play (kicked off,
+ * or full time with no result yet), void and postponed rows are unchanged.
+ */
+function pickRowOutcome(match, pick, state) {
+  if (state !== "settled") return "";
+  const actual = finalScore(match);
+  if (!pick) {
+    return `<span class="pick-row-outcome" data-pick-outcome="none" aria-hidden="true"><span class="pick-pill pick-pill-none">No pick</span></span>`;
+  }
+  const { pts, exact, hit } = scorePickLocal(pick, { p1: actual[0], p2: actual[1] });
+  const [kind, text] = exact ? ["exact", `+${pts} exact`] : hit ? ["result", `+${pts}`] : ["miss", "0"];
+  return `<span class="pick-row-outcome" data-pick-outcome="${kind}" aria-hidden="true"><span class="pick-row-you">You ${pick.p1}-${pick.p2}</span><span class="pick-pill pick-pill-${kind}">${text}</span></span>`;
+}
+
+/**
  * What the disclosure holds.
  *
  * An editable fixture gets the WHOLE card — the same `matchCard` Next builds,
@@ -3081,8 +3138,11 @@ function pickRowLabel(match, pick, editable) {
   const state = matchweekRowState(match);
   let tail;
   if (state === "settled") {
+    // v1.9 §3: what the pill shows, in words — "your pick 2-2, 1 point".
     const actual = finalScore(match);
-    tail = `final score ${actual[0]}-${actual[1]}, ${mine}`;
+    const { pts, exact } = scorePickLocal(pick, { p1: actual[0], p2: actual[1] });
+    const earned = pick ? `your pick ${pick.p1}-${pick.p2}, ${pts} point${pts === 1 ? "" : "s"}${exact ? ", exact score" : ""}` : "no pick";
+    tail = `final score ${actual[0]}-${actual[1]}, ${earned}`;
   } else if (state === "void") tail = `void, no points, ${mine}`;
   else if (state === "postponed") tail = `postponed, no points, ${mine}`;
   else if (state === "in-progress") tail = `${mine}, result pending`;
@@ -3179,7 +3239,9 @@ function pickCounts(slots) {
 function pickActionSummary(slots, { published = true } = {}) {
   if (!published) return "Waiting on your host to publish this week\u2019s fixtures";
   const { required, made, outstanding } = pickCounts(slots);
-  if (!required) return "Waiting on your host to publish this week\u2019s fixtures";
+  // A published week whose fixtures this device cannot name HAS been published:
+  // its rows say what is wrong, and the host is not the one to wait on.
+  if (!required) return slots?.length ? "" : "Waiting on your host to publish this week\u2019s fixtures";
   if (outstanding) {
     return `${outstanding} prediction${outstanding === 1 ? "" : "s"} still needed`;
   }
@@ -3189,6 +3251,116 @@ function pickActionSummary(slots, { published = true } = {}) {
   // Nothing left to do, but not everything got done: the rest locked first,
   // and saying "all in" would be a claim about picks that were never made.
   return `${made} of ${required} predictions made \u00b7 the rest have locked`;
+}
+
+/* --- v1.9 §2: a calm cold launch ------------------------------------------
+ *
+ * Opening from closed used to paint "Fixture temporarily unavailable" on every
+ * row and "Waiting on your host to publish" above them for the second or two
+ * before the fixture list arrived: true of nothing, said six times. Until the
+ * first load resolves the screen is the SHAPE of the week, in the real row's
+ * own grid, so the rows that replace it land exactly where it stood.
+ */
+
+// Three rows when the week's size is not yet known: a typical slate's top half.
+const PICK_SKELETON_ROWS = 3;
+
+/**
+ * One row's shape: date block, two grey circles, score block — no words. A row
+ * that was finished last time also has its pick line's shape, because a
+ * finished row is a line taller and the skeleton must be the row it becomes.
+ */
+const pickRowSkeleton = (finished = false) =>
+  `<div class="pick-row pick-row-skeleton" data-pick-skeleton aria-hidden="true"><div class="pick-row-head">
+      <span class="pick-row-when"><span class="skeleton-bar skeleton-date"></span><span class="skeleton-bar skeleton-time"></span></span>
+      <span class="pick-row-match"><span class="skeleton-circle"></span><span class="pick-row-v">v</span><span class="skeleton-circle"></span></span>
+      <span class="pick-row-mark"><span class="skeleton-bar skeleton-score"></span></span>${
+      finished ? `<span class="pick-row-outcome"><span class="skeleton-bar skeleton-outcome"></span></span>` : ""}
+    </div></div>`;
+
+/**
+ * The shape of the My Picks last drawn: its league and week, which rows were
+ * finished, and the header's two lines. A cold launch reopens on exactly this
+ * screen, so the skeleton is drawn to it — finished rows a line taller, the
+ * header lines as grey bars that wrap where the words did — and nothing moves
+ * when the real thing arrives. One entry, written only when it changes: a
+ * paint is not a storage write. Sizes only; nothing here is ever shown as text.
+ */
+let weekShape = readJSON(STORAGE.weekShape, null);
+function rememberWeekShape(code, period, slots, summary, detail) {
+  if (!code || period == null) return;
+  // One flag per row, in slate order: was it finished (and so a line taller)?
+  const rows = slots.map((slot) => !!slot.fixture && matchweekRowState(slot.fixture) === "settled");
+  const next = { code, period: String(period), rows, summary: summary || "", detail: detail || "" };
+  if (JSON.stringify(weekShape) === JSON.stringify(next)) return;
+  weekShape = next;
+  try { localStorage.setItem(STORAGE.weekShape, JSON.stringify(next)); } catch { /* a skeleton's size, not data */ }
+}
+/** The remembered shape, if it is this league's. */
+const weekShapeFor = (code) => (weekShape && weekShape.code === code ? weekShape : null);
+
+/**
+ * The subtitle, grey. Drawn from the lines last shown when there are some — in
+ * the real paragraphs, as transparent text on grey, so the bars wrap exactly
+ * where the words will — and as two plain bars when there are none. A screen
+ * reader is told only that the week is loading.
+ */
+const pickSummarySkeleton = (shape = null) => {
+  const loading = `<span class="sr-only">Loading this week\u2026</span>`;
+  if (!shape?.summary) {
+    return `<p class="pick-summary pick-skeleton-lines" data-pick-summary>${loading}<span class="skeleton-bar skeleton-line" aria-hidden="true"></span><span class="skeleton-bar skeleton-line skeleton-line-short" aria-hidden="true"></span></p>`;
+  }
+  return `<p class="pick-summary" data-pick-summary>${loading}<span class="skeleton-text" aria-hidden="true">${escapeHTML(shape.summary)}</span></p>${
+    shape.detail ? `<p class="pick-detail" aria-hidden="true"><span class="skeleton-text">${escapeHTML(shape.detail)}</span></p>` : ""}`;
+};
+
+/** A genuine failure — offline, a server error, a load nobody would wait for. Said once. */
+const picksLoadFailedCard = () =>
+  `<div class="launch-card picks-load-failed" role="status" data-picks-load-failed>
+      <strong>Couldn\u2019t load your picks</strong>
+      <p>Check your connection, then pull down to try again. Your saved picks are safe.</p>
+      <button type="button" class="primary" data-retry-picks>Try again</button>
+    </div>`;
+
+/**
+ * Has the active league's week been answered for?
+ *
+ *   "ready"    the server has answered for this league this session (or there
+ *              is no server to ask)
+ *   "failed"   its read genuinely failed, or the first load timed out
+ *   "loading"  neither, yet
+ */
+function picksLoadPhase(state) {
+  if (!API || !activeLeague) return "ready";
+  if (state && confirmedLeagues.has(activeLeague)) return "ready";
+  if (leagueLoadFailed.has(activeLeague) || picksLoadTimedOut) return "failed";
+  return "loading";
+}
+
+/** "Try again": the failed reads, once more, behind the skeleton. */
+async function retryPicksLoad() {
+  leagueLoadFailed.clear();
+  picksLoadTimedOut = false;
+  render();
+  armPicksLoadTimeout();
+  await Promise.all([fixturesStatus === "ready" ? null : loadFixtures(), hydrateIdentity()]);
+  render();
+}
+
+/**
+ * The longest the first load is waited on before it counts as failed. A fetch
+ * has no timeout of its own, and a request that hangs on a bad network would
+ * otherwise leave the skeleton up for ever. Whatever arrives later still paints.
+ */
+let picksLoadTimer = null;
+function armPicksLoadTimeout() {
+  clearTimeout(picksLoadTimer);
+  picksLoadTimer = setTimeout(() => {
+    const state = matchweekLeagueState();
+    if (fixturesStatus !== "loading" && picksLoadPhase(state) !== "loading") return;
+    picksLoadTimedOut = true;
+    render();
+  }, PICKS_LOAD_TIMEOUT_MS);
 }
 
 /**
@@ -3211,26 +3383,42 @@ function picksView() {
         escapeHTML(inviteCode)}</strong><p>Tap to choose your name and join.</p></div></button>`
     : "";
 
+  // A null summary is a week still on its way (v1.9 §2): grey lines in the
+  // subtitle's place, never a sentence that might not be true.
   const head = (name, summary, lines) =>
     `<div class="section-head"><div>
       <span class="eyebrow">${escapeHTML(name || playerName || "Your predictions")}</span>
       <h2>My Picks</h2>
-      <p class="pick-summary" data-pick-summary>${escapeHTML(summary)}</p>
+      ${summary == null ? pickSummarySkeleton(weekShapeFor(activeLeague))
+        : summary ? `<p class="pick-summary" data-pick-summary>${escapeHTML(summary)}</p>` : ""}
       ${lines.filter(Boolean).length
         ? `<p class="pick-detail">${lines.filter(Boolean).map(escapeHTML).join(" \u00b7 ")}</p>`
         : ""}
     </div></div>`;
+  // v1.9 §2: until the first load resolves, the shape of the week and no words;
+  // on a genuine failure, one card for the screen rather than one per row.
+  // As many rows as last time, finished ones a line taller; three when unknown.
+  const waiting = (name, context) => {
+    const rows = weekShapeFor(activeLeague)?.rows || Array(PICK_SKELETON_ROWS).fill(false);
+    return `${installNotice()}${invite}${head(name, null, [])}${context}
+      <div class="pick-list" data-pick-list aria-busy="true">${rows.map((finished) => pickRowSkeleton(finished)).join("")}</div>`;
+  };
+  const failed = (name, context) => `${installNotice()}${invite}${head(name, "", [])}${context}${picksLoadFailedCard()}`;
 
   const state = matchweekLeagueState();
   if (!state) {
-    return `${installNotice()}${invite}
-      ${head(matchweekLeagueName(), "Loading this week\u2026", [])}
-      ${matchweekContext(null)}
-      ${pulsingStatus("Loading this week\u2026")}`;
+    return picksLoadPhase(null) === "failed"
+      ? failed(matchweekLeagueName(), matchweekContext(null))
+      : waiting(matchweekLeagueName(), matchweekContext(null));
   }
 
   const plan = matchweekSlate(state);
   if (!plan) {
+    // A cached "nothing published" may be out of date: the host can have
+    // published since it was stored. Only the server's answer may say so.
+    const phase = picksLoadPhase(state);
+    if (phase === "loading") return waiting(state.name, matchweekContext(state));
+    if (phase === "failed") return failed(state.name, matchweekContext(state));
     // Nothing published. Whether that is "the host hasn't chosen yet" or
     // "there is nothing to choose from yet" is the launch tree's question,
     // and it is only worth asking once there is no slate to show.
@@ -3245,8 +3433,31 @@ function picksView() {
   }
 
   const slots = matchweekSlots(plan);
+  // The fixture list is what turns ids into rows. Still on its way, the rows it
+  // owes are skeletons and the count above them is unknown, not zero; never
+  // arriving, the screen says so once.
+  const unresolved = slots.some((slot) => !slot.fixture);
+  if (unresolved && slots.every((slot) => !slot.fixture) && (fixturesStatus === "failed"
+    || (fixturesStatus === "loading" && picksLoadTimedOut))) {
+    return failed(state.name, matchweekContext(state));
+  }
+  if (unresolved && fixturesStatus === "loading") {
+    const shape = weekShapeFor(activeLeague);
+    const finished = shape && shape.period === String(state.currentPeriod) ? shape.rows : [];
+    return `${installNotice()}${invite}
+    ${head(state.name, null, [])}
+    ${matchweekContext(state)}
+    <div class="pick-list" data-pick-list aria-busy="true">${
+      slots.map((slot, i) => (slot.fixture
+        ? pickRow(slot, { expanded: expandedPickId === String(slot.id) })
+        : pickRowSkeleton(!!finished[i]))).join("")
+    }</div>`;
+  }
+  const summary = pickActionSummary(slots);
+  const lines = [pickListState(slots), pickDeadlineLine(slots)];
+  if (!unresolved) rememberWeekShape(activeLeague, state.currentPeriod, slots, summary, lines.filter(Boolean).join(" \u00b7 "));
   return `${installNotice()}${invite}
-    ${head(state.name, pickActionSummary(slots), [pickListState(slots), pickDeadlineLine(slots)])}
+    ${head(state.name, summary, lines)}
     ${matchweekContext(state)}
     <div class="pick-list" data-pick-list>${
       slots.map((slot) => pickRow(slot, { expanded: expandedPickId === String(slot.id) })).join("")
@@ -7332,6 +7543,7 @@ document.addEventListener("click", async (event) => {
   // that opens the heaviest screen in the app, is exactly when it is not.
   const joinNotice = event.target.closest("[data-open-join]");
   if (joinNotice) { openJoinSheet(joinNotice.dataset.openJoin); return; }
+  if (event.target.closest("[data-retry-picks]")) { retryPicksLoad(); return; }
   const nav = event.target.closest("[data-view]");
   if (nav) {
     // The onboarding CTA lands on the League tab with the wizard already open.
@@ -8317,28 +8529,80 @@ function leagueCodeFromUrl(url) {
   }
 }
 
-// Open the join flow for an invite code arriving after launch (native deep link).
-async function openInviteFlow(code) {
-  if (!code || leagueCodes.includes(code)) return;
-  inviteCode = code;
-  await navigateToView("league");
+/* --- v1.9 §1: one router from a link to a screen ---------------------------
+ *
+ * Every link the app is handed — an invite on a cold or warm launch, and from
+ * the reveal alerts a notification tap — is decided here, once. It only ever
+ * READS a link: identity, recovery and picks are never written from one, and a
+ * league is never joined without the viewer's own tap on the join sheet.
+ */
+
+/** What a link asks for — a league and the screen to open it on — or null. */
+function linkRoute(url) {
+  const league = leagueCodeFromUrl(url);
+  if (!league) return null;
+  let search = "";
+  try { search = new URL(url, location.href).search; } catch { return null; }
+  return { league, view: requestedView(search) || "picks" };
+}
+
+/**
+ * Take the viewer where a route points, and say which way it went.
+ *
+ *   "member"  a league they play: switched to, on its My Picks (or the view
+ *             the link named) — the same safe path a league pill takes
+ *   "invite"  a league they don't: the one-step join sheet, over whatever is
+ *             on screen. An unknown or deleted code is the sheet's to explain
+ *             ("League not found"), exactly as it is on the web.
+ */
+async function followLinkRoute(route) {
+  if (!route) return "none";
+  const { league, view } = route;
+  if (leagueCodes.includes(league)) {
+    if (activeLeague !== league) setActiveLeague(league);
+    await navigateToView(view);
+    return "member";
+  }
+  inviteCode = league;
+  const dialog = document.getElementById("joinDialog");
+  if (API && !(dialog?.open && joinSheetCode === league)) openJoinSheet(league);
+  render();
+  return "invite";
+}
+
+// The link this page last followed. A cold launch can hand the same link over
+// twice — as the launch URL and as a retained appUrlOpen — and a webview reload
+// asks for the launch URL again; neither may route twice.
+const LAST_LINK_KEY = "prem_oracle_last_link";
+const LINK_REPEAT_MS = 3000;
+let lastLink = { url: "", at: 0 };
+
+function followIncomingLink(url, { launch = false } = {}) {
+  const route = linkRoute(url);
+  if (!route) return Promise.resolve("none");
+  let followed = "";
+  try { followed = sessionStorage.getItem(LAST_LINK_KEY) || ""; } catch { /* private mode */ }
+  if (launch && followed === url) return Promise.resolve("repeat");
+  if (url === lastLink.url && Date.now() - lastLink.at < LINK_REPEAT_MS) return Promise.resolve("repeat");
+  lastLink = { url, at: Date.now() };
+  try { sessionStorage.setItem(LAST_LINK_KEY, url); } catch { /* private mode */ }
+  return followLinkRoute(route);
 }
 
 // Native universal links (applinks:abigwood.github.io) arrive through the
 // Capacitor App plugin rather than location.search, because the webview runs at
-// capacitor://localhost. Route them into the same invite flow as the web build.
+// capacitor://localhost. SceneDelegate hands both paths to Capacitor's proxy: a
+// warm link arrives as appUrlOpen, and a cold launch — whose link reached the
+// scene before this page existed — is read back with getLaunchUrl. The web build
+// reads its own location.search at launch and does not come through here.
 async function setupNativeUniversalLinks() {
   const cap = window.Capacitor;
   const app = window.capacitorApp?.App || cap?.Plugins?.App;
   if (!cap?.isNativePlatform?.() || !app) return;
   try {
-    await app.addListener("appUrlOpen", (data) => {
-      const code = leagueCodeFromUrl(data?.url || "");
-      if (code) openInviteFlow(code);
-    });
+    await app.addListener("appUrlOpen", (data) => followIncomingLink(data?.url || ""));
     const launch = await app.getLaunchUrl?.();
-    const launchCode = leagueCodeFromUrl(launch?.url || "");
-    if (launchCode) openInviteFlow(launchCode);
+    if (launch?.url) await followIncomingLink(launch.url, { launch: true });
   } catch {
     // Deep-link routing is best-effort; the code can still be typed manually.
   }
@@ -8355,6 +8619,16 @@ hydrateCachedLeague();
 // half again as large — and until this call existed the app showed an empty
 // content area for the whole of it.
 render();
+
+// v1.9 §2: the first load gets a deadline, so a hung request ends in an honest
+// message rather than a skeleton that never resolves.
+armPicksLoadTimeout();
+
+// v1.9 §1: a link that launched the app is followed now, not after identity
+// settles — otherwise a cold launch from an invite stands on the last league
+// for the whole of /me. Its first await yields, so the script below has run
+// before any of it acts; the stored league list is what membership is read from.
+setupNativeUniversalLinks();
 
 /**
  * Restores the league, the week it was on, and that week's table TOGETHER.
@@ -8404,7 +8678,10 @@ Promise.all([loadFixtures(), hydrateIdentity()]).then(() => {
   // The switch renders; without one, the ordinary first paint does.
   if (linked) setActiveLeague(linked);
   else render();
-  if (joinInvite && API) openJoinSheet(joinInvite);
+  // v1.9 §1: a native link can have opened this sheet already, before identity
+  // settled; opening it again would clear a name the viewer is typing.
+  const sheetOpen = document.getElementById("joinDialog")?.open && joinSheetCode === joinInvite;
+  if (joinInvite && API && !sheetOpen) openJoinSheet(joinInvite);
   // A cold launch onto My Picks owes the same one revalidation an entry does.
   // Without this the screen could stand on a cache captured before kick-off
   // and never ask for the picks that have since been revealed.
@@ -8416,7 +8693,6 @@ Promise.all([loadFixtures(), hydrateIdentity()]).then(() => {
   // save it again. Sent once per name, not on every launch.
   if (playerName && localStorage.getItem(STORAGE.syncedName) !== playerName) syncProfileName();
   setupNativePushNotifications();
-  setupNativeUniversalLinks();
   // No league refresh here: hydrateIdentity() owns startup's single refresh and
   // has already run by this point. A second one would be a duplicate, not a
   // safety net.

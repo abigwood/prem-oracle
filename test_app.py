@@ -401,7 +401,10 @@ class SmartInviteLinkTests(unittest.TestCase):
         fn = fn[:fn.index("\n}")]
         self.assertIn('app.addListener("appUrlOpen"', fn)
         self.assertIn("app.getLaunchUrl?.()", fn, "a cold launch has no event, only a launch URL")
-        self.assertIn("openInviteFlow(code)", fn)
+        # v1.9 §1: both paths go through the one router, which Slice 2's
+        # alert taps reuse.
+        self.assertIn("followIncomingLink(data?.url", fn)
+        self.assertIn("followIncomingLink(launch.url, { launch: true })", fn)
         parse = self.app[self.app.index("function leagueCodeFromUrl(url)"):]
         parse = parse[:parse.index("\n}")]
         self.assertIn('searchParams.get("league")', parse)
@@ -3176,7 +3179,7 @@ class ManageLeaguesAndCreationTests(unittest.TestCase):
         self.assertNotIn("leagueManageOpen", self._fn("submitJoinSheet"))
         self.assertNotIn("leagueManageOpen", self._fn("openJoinSheet"))
         # Invite links still open the one-step sheet at launch.
-        self.assertIn("if (joinInvite && API) openJoinSheet(joinInvite)", self.app)
+        self.assertIn("if (joinInvite && API && !sheetOpen) openJoinSheet(joinInvite)", self.app)
 
 
 class ContextualNotificationAskTests(unittest.TestCase):

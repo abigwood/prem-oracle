@@ -140,11 +140,12 @@ test("R1 · all three named surfaces route through the one result-first path", (
 
 test("R1 · D3 has exactly two surfaces, and Weekly is not one of them", () => {
   // League -> Weekly had no fixture card to restyle. Adding one would have been
-  // a second fixture surface, not a treatment: Weekly stays banner + standings.
+  // a second fixture surface, not a treatment: Weekly stays status + standings.
+  // v1.8.1 (35): the week card became a one-line status and the rostrum.
   assert.ok(!APP.includes("weeklyFixtureCards"), "the invented Weekly list is back");
   const fill = sourceOf("fillPanelProgressively");
   const weekly = fill.slice(fill.indexOf('if (tab === "matchday")'));
-  assert.match(weekly, /\$\{roundBanner\(roundState\)\}\$\{roundTableHtml\(roundState\)\}/);
+  assert.match(weekly, /\$\{weekStatusLine\(roundState, state\)\}\$\{weekPodium\(roundState\)\}\$\{roundTableHtml\(roundState\)\}/);
   assert.ok(!weekly.includes("fixtureRow"), "Weekly grew a fixture list");
   assert.ok(!weekly.includes("matchCard"), "Weekly grew a fixture card");
 });
@@ -291,7 +292,7 @@ test("L1 · Edit line-up and its deadline stay next to Weekly", () => {
   assert.ok(card.indexOf("roundToggle()") < card.indexOf("slate-slot"));
   assert.ok(card.indexOf("slate-slot") < card.indexOf("${inner}"));
   assert.match(sourceOf("hostSlateControl"), /Edit line-up/);
-  assert.match(sourceOf("hostSlateControl"), /lockLine\(slate, \{ period: state\.currentPeriod \}\)/);
+  assert.match(sourceOf("hostSlateControl"), /lockLine\(slate, \{ period: state\.currentPeriod, status: state\.currentMatchdayStatus \}\)/);
 });
 
 test("L1 · the collapse state is remembered", () => {

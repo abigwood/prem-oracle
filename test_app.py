@@ -1135,10 +1135,14 @@ class TrophyTests(unittest.TestCase):
         self.assertIn("countPhrase(week.fixtures,", self.app)
         self.assertIn('countPhrase(week.pts, "pts")', self.app)
 
-    def test_winner_banner_extends_to_a_podium(self):
+    def test_settled_week_keeps_its_podium_without_the_banner(self):
+        # v1.8.1 (35): the week card is gone; a settled week keeps the rostrum.
         self.assertIn("function podiumSteps(round)", self.app)
-        self.assertIn("${escapeHTML(title)} complete — won by", self.app)
-        # The banner header and the share button are unchanged by the restyle.
+        self.assertIn('return round?.complete ? podiumSteps(round) : "";', self.app)
+        self.assertNotIn("function roundBanner(", self.app)
+        self.assertNotIn("round-banner", self.app)
+        self.assertNotIn("round-banner", self.css)
+        # The share button is unchanged.
         self.assertIn("Share Matchweek ", self.app)
 
     def test_podium_renders_as_a_rostrum_of_steps(self):
@@ -1175,8 +1179,8 @@ class TrophyTests(unittest.TestCase):
     def test_number_and_word_pairs_wrap_as_one_unit(self):
         self.assertIn(".nowrap { white-space: nowrap; }", self.css)
         self.assertIn('function countPhrase(count, word)', self.app)
-        for phrase in ('countPhrase(rounds, "Matchweeks")',
-                       '<span class="nowrap">Game ${md} of ${seasonRounds()} ·</span>'):
+        # v1.8.1 (35): the "Game N of 38 ·" placement went with the week card.
+        for phrase in ('countPhrase(rounds, "Matchweeks")',):
             self.assertIn(phrase, self.app, phrase)
         # The separator rides inside the wrapper, so a line never opens with "·".
         self.assertNotIn("of 38</span> ·", self.app)
@@ -1844,16 +1848,19 @@ class AmendBeforeKickoffTests(unittest.TestCase):
 
     def test_the_lock_moment_is_a_concrete_time(self):
         fn = self.app[self.app.index("function lockTimeLabel(slate)"):]
-        fn = fn[:fn.index("function lockLine(slate, { period = null } = {})")]
+        fn = fn[:fn.index("function lockLine(slate, { period = null, status = null } = {})")]
         self.assertIn("slate?.lockAt", fn)
         self.assertIn('timeZone: "Europe/London"', fn)
         self.assertIn('weekday: "short"', fn)
-        line = self.app[self.app.index("function lockLine(slate, { period = null } = {})"):]
+        line = self.app[self.app.index("function lockLine(slate, { period = null, status = null } = {})"):]
         line = line[:line.index("function slateNotice(period)")]
         self.assertIn("Locks ${escapeHTML(when)}", line)
         self.assertIn("Line-up locked — the first fixture has kicked off.", line)
         # v1.8.1: the League card's line names its week and says "at".
-        self.assertIn("if (period != null) return cardLockLine(slate, period);", line)
+        self.assertIn("if (period != null) return cardLockLine(slate, period, status);", line)
+        # v1.8.1 (35): built from parts, so no engine's own joiner leaks in.
+        self.assertIn("formatToParts", fn)
+        self.assertIn("${part.weekday} ${part.day} ${part.month} at ${part.hour}:${part.minute}", fn)
         self.assertIn('${week ? `${escapeHTML(week)} · locks` : "Locks"} ${escapeHTML(when)}', line)
         self.assertIn(".lock-line", self.css)
 

@@ -181,7 +181,7 @@ const HOUR = 3600000;
 const future = (h) => new Date(Date.now() + h * HOUR).toISOString();
 
 function card({ state: s, weekOf = (p) => (p === WINDOW ? 13 : null), owner = "u1" } = {}) {
-  return load(["hostSlateControl", "lockLine", "slateLocked", "cardLockLine", "lockWeekPrefix", "lockTimeLabel",
+  return load(["hostSlateControl", "lockLine", "slateLocked", "cardLockLine", "weekStatusWord", "lockWeekPrefix", "lockTimeLabel",
     "periodLabel", "periodLabelLong", "isWindowKey"], {
     uid: () => owner,
     weekNumberFor: weekOf,
@@ -253,7 +253,7 @@ test("an open week keeps the host's Edit line-up next to the merged line", () =>
 
 test("every other lockLine caller is unchanged", () => {
   const b = card();
-  assert.equal(text(b.lockLine(slateFor(WINDOW, { lockAt: "2026-11-28T15:00:00Z" }))), "Locks Sat 28 Nov, 15:00");
+  assert.equal(text(b.lockLine(slateFor(WINDOW, { lockAt: "2026-11-28T15:00:00Z" }))), "Locks Sat 28 Nov at 15:00");
   assert.equal(text(b.lockLine(slateFor(WINDOW, { locked: true }))), "Line-up locked — the first fixture has kicked off.");
   assert.match(APP, /\$\{lockLine\(published\)\}/);
   assert.equal((APP.match(/lockLine\(slate, \{ period: /g) || []).length, 1, "the week prefix reached another surface");
@@ -276,7 +276,7 @@ test("the Season panel no longer builds a 'Season 2026/27' card", () => {
 
 function leagueScreen({ states, active, tab }) {
   const box = load(["leagueView", "leagueSettings", "leagueSummaryLine", "COMPETITIONS", "DEFAULT_COMPETITION",
-    "competitionMeta", "weeklyCountControl", "hostSlateControl", "lockLine", "slateLocked", "cardLockLine", "lockWeekPrefix",
+    "competitionMeta", "weeklyCountControl", "hostSlateControl", "lockLine", "slateLocked", "cardLockLine", "weekStatusWord", "lockWeekPrefix",
     "lockTimeLabel", "periodLabel", "periodLabelLong", "isWindowKey"], {
     leagueCodes: Object.keys(states), leagueState: states[active], leagueStates: states, activeLeague: active,
     leagueManageOpen: false, leagueSettingsOpen: false, countBusy: false, inviteCode: "", playerName: "Adam",

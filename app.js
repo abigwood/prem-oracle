@@ -2281,14 +2281,22 @@ function awaitingSlate(period) {
   return String(leagueState.currentPeriod) === String(period) && !slateForPeriod(period);
 }
 
-/** "Sat 16 Aug, 12:30" — the concrete moment a line-up stops being editable. */
+/**
+ * "Sat 16 Aug at 12:30" — the concrete moment a line-up stops being editable.
+ *
+ * Assembled from the formatter's parts, never from its joined string: the
+ * en-GB joiner between date and time differs by engine (", " in Node's ICU,
+ * " at " in WebKit's), and splicing our own joiner into WebKit's printed
+ * "Sat 28 Nov at at 15:00" on the League card.
+ */
 function lockTimeLabel(slate) {
   const at = slate?.lockAt ? Date.parse(slate.lockAt) : NaN;
   if (!Number.isFinite(at)) return "";
-  return new Intl.DateTimeFormat("en-GB", {
+  const part = Object.fromEntries(new Intl.DateTimeFormat("en-GB", {
     weekday: "short", day: "numeric", month: "short",
-    hour: "2-digit", minute: "2-digit", timeZone: "Europe/London",
-  }).format(new Date(at)).replace(/(\d{2}:\d{2})$/, ", $1").replace(/,\s*,/, ",");
+    hour: "2-digit", minute: "2-digit", hourCycle: "h23", timeZone: "Europe/London",
+  }).formatToParts(new Date(at)).map(({ type, value }) => [type, value]));
+  return `${part.weekday} ${part.day} ${part.month} at ${part.hour}:${part.minute}`;
 }
 
 /**
@@ -2308,13 +2316,13 @@ function slateLocked(slate) {
   return Number.isFinite(at) && at <= Date.now();
 }
 
-function lockLine(slate, { period = null } = {}) {
+function lockLine(slate, { period = null, status = null } = {}) {
   if (!slate) return "";
   // v1.8.1: the League card passes its period, and the line then carries the
   // week it is about ("Week 13 · locks Sat 28 Nov at 15:00") — the number the
   // retired "Season 2026/27 · next up" card used to hold. Other callers are
   // unchanged.
-  if (period != null) return cardLockLine(slate, period);
+  if (period != null) return cardLockLine(slate, period, status);
   if (slateLocked(slate)) return `<p class="lock-line is-locked">Line-up locked — the first fixture has kicked off.</p>`;
   const when = lockTimeLabel(slate);
   return when ? `<p class="lock-line">Locks ${escapeHTML(when)}</p>` : "";
@@ -2334,14 +2342,29 @@ function lockWeekPrefix(slate, period) {
   return periodLabel(period);
 }
 
-function cardLockLine(slate, period) {
+/**
+ * v1.8.1 (35): the one word a week's status adds, now that the week status
+ * card is gone — "final" once every fixture is settled or void, or the
+ * worker's own "N fixtures pending" while postponements alone hold it open.
+ * Anything else (in progress, not started, no fixtures) adds nothing.
+ */
+function weekStatusWord({ complete = false, status = null } = {}) {
+  if (complete || status === "complete") return "final";
+  return /^\d+ fixtures? pending$/.test(String(status || "")) ? String(status) : "";
+}
+
+function cardLockLine(slate, period, status = null) {
   const week = lockWeekPrefix(slate, period);
   // A lock moment already behind us is not an upcoming lock, whatever the
   // flag on a slate fetched before it passed says.
   if (slateLocked(slate)) {
+    // The status the retired week card carried, folded into this line.
+    const word = weekStatusWord({ status });
+    if (word === "final") return `<p class="lock-line is-locked">${week ? `${escapeHTML(week)} · final` : "Final"}</p>`;
+    if (word) return `<p class="lock-line is-locked">${week ? `${escapeHTML(week)} · line-up locked` : "Line-up locked"} · <span class="nowrap">${escapeHTML(word)}</span></p>`;
     return `<p class="lock-line is-locked">${week ? `${escapeHTML(week)} · line-up locked` : "Line-up locked"} — the first fixture has kicked off.</p>`;
   }
-  const when = lockTimeLabel(slate).replace(/, (\d{2}:\d{2})$/, " at $1");
+  const when = lockTimeLabel(slate);
   if (!when) return "";
   return `<p class="lock-line">${week ? `${escapeHTML(week)} · locks` : "Locks"} ${escapeHTML(when)}</p>`;
 }
@@ -3514,12 +3537,12 @@ function seasonStages(state, isOwner) {
 async function fillPanelProgressively(panel, capture) {
   const { state, isOwner, tab, stale } = capture;
   if (tab === "matchday") {
-    // Small by construction: one banner and one table.
+    // Small by construction: at most a status line and a rostrum, then one table.
     const html = !roundState
       ? pulsingStatus(`Loading ${escapeHTML(weekLabelFor(capture.period))}…`)
       : roundState.error
         ? `<div class="empty"><strong>${escapeHTML(roundState.error)}</strong></div>`
-        : `${roundBanner(roundState)}${roundTableHtml(roundState)}<div class="season-share">${shareIconButton(state, "weekly")}</div>`;
+        : `${weekStatusLine(roundState, state)}${weekPodium(roundState)}${roundTableHtml(roundState)}<div class="season-share">${shareIconButton(state, "weekly")}</div>`;
     traceTap("chunk", { stage: "week", chars: html.length });
     panel.insertAdjacentHTML("beforeend", html);
     // v1.8 §6: the completed-week result has now rendered. If it is a fully
@@ -3950,14 +3973,6 @@ function fixtureHasResult(match) {
   return result?.p1 != null && result?.p2 != null;
 }
 
-// Slate line under a matchweek banner, so a curated week is always legible as
-// one — and a full card never grows a label it doesn't need.
-function roundSlateLine(round) {
-  if (round?.slate?.mode !== "custom") return "";
-  const count = round.slate.count;
-  return `<span class="round-slate">Custom Mix · ${countPhrase(count, count === 1 ? "fixture" : "fixtures")}</span>`;
-}
-
 const PLACE_NUMBER = { gold: "1", silver: "2", bronze: "3" };
 
 // One rostrum step. A shared place puts every name on the same widened step —
@@ -3989,23 +4004,23 @@ function podiumSteps(round) {
   return `<div class="podium-steps" role="group" aria-label="Matchweek podium">${steps}</div>`;
 }
 
-function roundBanner(round) {
-  const md = round.matchday;
-  // A "game N of the season" placement only means something where the league
-  // has a season length at all.
-  // A mixed league runs on windows, so it is placed by its window instead.
-  const place = md != null && seasonRounds() != null
-    ? `<span class="nowrap">Game ${md} of ${seasonRounds()} ·</span>`
-    : `<span class="nowrap">${escapeHTML(periodLabel(round.period))} ·</span>`;
-  const title = md != null ? `Matchweek ${md}` : periodLabel(round.period);
-  if (round.complete) {
-    const names = winnerNames(round);
-    return `<div class="round-banner is-success"><strong>${escapeHTML(title)} complete — won by ${names ? escapeHTML(names) : "nobody"} 🏆</strong><span>${place}all fixtures settled</span>${roundSlateLine(round)}${podiumSteps(round)}</div>`;
-  }
-  if (!round.status || round.status === "in progress") {
-    return `<div class="round-banner"><strong>${place}in progress</strong>${roundSlateLine(round)}</div>`;
-  }
-  return `<div class="round-banner is-pending"><strong>${place}${escapeHTML(round.status)}</strong>${roundSlateLine(round)}</div>`;
+/**
+ * v1.8.1 (35): the week status card is gone. The league's current week is
+ * described by the lock line above the panel (which now also says "final" or
+ * "N fixtures pending"), so this repeats nothing for it. Any other week picked
+ * from the dropdown has no lock line, so it gets one short line of its own —
+ * "Week 12 · final" — or none when there is nothing settled to say.
+ */
+function weekStatusLine(round, state) {
+  if (!round || round.period == null) return "";
+  if (state?.currentPeriod != null && String(round.period) === String(state.currentPeriod)) return "";
+  const word = weekStatusWord(round);
+  return word ? `<p class="week-status">${escapeHTML(periodLabel(round.period))} · <span class="nowrap">${escapeHTML(word)}</span></p>` : "";
+}
+
+/** The rostrum, for a settled week only — all that survives of the card. */
+function weekPodium(round) {
+  return round?.complete ? podiumSteps(round) : "";
 }
 
 // --- D7: weekly movement arrows ---------------------------------------------
@@ -6321,7 +6336,7 @@ function hostSlateControl(state) {
       : "";
   }
   return `<div class="slate-notice slate-notice-published">
-    ${lockLine(slate, { period: state.currentPeriod })}
+    ${lockLine(slate, { period: state.currentPeriod, status: state.currentMatchdayStatus })}
     ${isOwner && !slateLocked(slate)
       ? `<button class="secondary wide" type="button" data-open-picker="${escapeHTML(state.currentPeriod)}" data-amend="1">Edit line-up</button>`
       : ""}

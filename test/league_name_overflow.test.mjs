@@ -35,7 +35,7 @@ test("the League card's name heading may break an unbreakable word; nothing else
 function cardHtml(name) {
   const state = { code: "AAA", name, owner: "u2", error: null, currentPeriod: "13",
     currentSlate: { period: "13", lockAt: "2027-05-22T14:00:00Z", locked: false } };
-  const box = load(["leagueView", "hostSlateControl", "lockLine", "slateLocked", "cardLockLine", "lockWeekPrefix", "lockTimeLabel",
+  const box = load(["leagueView", "hostSlateControl", "lockLine", "slateLocked", "cardLockLine", "weekStatusWord", "lockWeekPrefix", "lockTimeLabel",
     "periodLabel", "periodLabelLong", "isWindowKey"], {
     leagueCodes: ["AAA"], leagueState: state, leagueStates: { AAA: state }, activeLeague: "AAA", leagueManageOpen: false,
     inviteCode: "", playerName: "Adam", uid: () => "u1", flash: () => "", leagueNames: {}, weekNumberFor: () => 13,

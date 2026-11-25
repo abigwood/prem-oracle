@@ -280,7 +280,8 @@ function island({ buildMs = 0 } = {}) {
     const weekSeasonPicker = () => "<weeks>";
     const leagueRevealsHtml = () => "<reveals>";
     const pulsingStatus = (m) => '<p class="view-loading is-pulsing">' + m + "</p>";
-    const roundBanner = () => "<rbanner>";
+    const weekStatusLine = () => "<wstatus>";   // v1.8.1 (35): the week card became a line
+    const weekPodium = () => "<wpodium>";
     const roundTableHtml = () => "<roundtable>";
     const scheduleRoundReview = () => {};   // v1.8 §6 rating hook — inert in this paint harness
 

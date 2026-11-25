@@ -26,7 +26,7 @@ const read = (html) => {
 // --- the League card --------------------------------------------------------------
 
 function leagueCard(slate) {
-  const box = load(["hostSlateControl", "lockLine", "slateLocked", "cardLockLine", "lockWeekPrefix", "lockTimeLabel",
+  const box = load(["hostSlateControl", "lockLine", "slateLocked", "cardLockLine", "weekStatusWord", "lockWeekPrefix", "lockTimeLabel",
     "periodLabel", "periodLabelLong", "isWindowKey"], {
     uid: () => "host", weekNumberFor: () => 13, windowLabel: () => "", weekDateRange: () => "",
   });
@@ -76,7 +76,7 @@ test("My Picks: the server flag still locks; an open week keeps the host's edit 
   assert.match(locked.text, /^Line-up locked/);
   assert.equal(locked.edit, null);
   const open = myPicksNotice(SHAPES["still open"]);
-  assert.match(open.text, /^Locks \w{3} \d{1,2} \w{3}, \d{2}:\d{2}/, "My Picks' own wording changed");
+  assert.match(open.text, /^Locks \w{3} \d{1,2} \w{3} at \d{2}:\d{2}/, "My Picks' own wording changed");
   assert.equal(open.edit?.textContent, "Edit line-up");
   // A member never gets the edit, open or not.
   assert.equal(myPicksNotice(SHAPES["still open"], { host: false }).edit, null);

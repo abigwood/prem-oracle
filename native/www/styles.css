@@ -688,6 +688,13 @@ main {
 .stat span { color: var(--muted); font-size: .67rem; font-weight: 800; text-transform: uppercase; }
 
 .league-card h2, .rules-card h2 { margin: 4px 0 8px; font-family: Georgia, serif; }
+/* v1.8.1: the configuration eyebrow above the name is gone; the name moves up
+   into its space rather than keeping the gap the eyebrow sat in. */
+.league-card > h2:first-child { margin-top: 0; }
+/* A league name with no break opportunity (40 characters, the maximum, in one
+   word) wrapped nowhere and pushed the page sideways. Break only such a word;
+   ordinary names wrap at spaces exactly as before. */
+.league-card > h2 { overflow-wrap: break-word; }
 .league-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 11px; margin: 13px 0; }
 .action-card, .league-form, .restore-card, .reveal-card {
   padding: 15px;
@@ -706,6 +713,10 @@ main {
 .table { width: 100%; border-collapse: collapse; font-size: .82rem; }
 .table th, .table td { padding: 10px 5px; border-bottom: 1px solid var(--line); text-align: right; }
 .table th:first-child, .table td:first-child { text-align: left; }
+/* v1.8.1: Pts is the figure that matters; Exact is supporting detail. Muted,
+   regular weight — 4.7:1 on the league card. Screens only: the share cards
+   draw their own table. */
+.table .col-exact { color: var(--muted); font-weight: 400; }
 .league-table th:nth-child(2), .league-table td:nth-child(2) { width: 46px; text-align: center; }
 .wins-col { width: 42px; text-align: center; }
 th.wins-col { font-size: .92rem; }
@@ -1215,24 +1226,6 @@ dialog label { display: block; margin-bottom: 6px; color: var(--muted); font-siz
 .podium-step-silver .podium-block { height: 34px; background: #C9CDD4; }
 .podium-step-bronze .podium-block { height: 24px; background: #D9A276; }
 
-.cabinet { margin-top: 20px; }
-.cabinet h3 { margin: 0 0 10px; font-family: Georgia, serif; font-size: 1rem; }
-.cabinet h4 { margin: 18px 0 9px; color: var(--muted); font-size: .68rem; font-weight: 900; letter-spacing: .1em; text-transform: uppercase; }
-.cabinet-shelf {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 8px;
-  padding: 14px 8px;
-  border: 1px solid var(--line);
-  border-radius: 14px;
-  background: var(--white);
-  text-align: center;
-}
-.cab-slot { display: flex; flex-direction: column; align-items: center; gap: 5px; }
-.cab-emoji { font-size: 1.5rem; line-height: 1; }
-.cab-slot b { font-size: .82rem; font-weight: 900; }
-.cab-total b { color: var(--green); font-size: 1.5rem; line-height: 1; }
-.cab-total span { color: var(--muted); font-size: .67rem; font-weight: 800; text-transform: uppercase; }
 .cabinet-weeks { margin: 0; padding: 0; list-style: none; }
 .cabinet-week {
   display: flex;
@@ -1845,16 +1838,6 @@ body.picker-open { overflow: hidden; }
 /* Scoped to the table cell: .player-name is also a match-card class, and an
    unscoped display:block there would restyle every fixture card. */
 .player-cell .player-name { display: block; }
-.medals {
-  display: block;
-  margin-top: 2px;
-  color: var(--muted, #6b7280);
-  font-size: .68rem;
-  font-weight: 700;
-  white-space: nowrap;
-}
-.medals i { margin: 0 4px; font-style: normal; opacity: .5; }
-.medal.is-none { opacity: .35; }
 
 /* --- v1.6.6 D3: result-first settled cards --------------------------------
    After full time the card stops being a control and becomes a record. The
@@ -1947,6 +1930,17 @@ body.picker-open { overflow: hidden; }
   cursor: pointer;
 }
 .league-settings-head::-webkit-details-marker { display: none; }
+/* v1.8.1: the league's configuration, once, under its settings heading —
+   quiet, sentence case, and free to wrap on a 320pt phone. */
+.league-settings-title { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.league-settings-config {
+  color: var(--muted);
+  font-size: .74rem;
+  font-weight: 600;
+  letter-spacing: 0;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
 .league-settings-head::after {
   content: "⌄";
   color: var(--purple);
@@ -1957,6 +1951,66 @@ body.picker-open { overflow: hidden; }
 .league-settings[open] > .league-settings-head::after { transform: rotate(180deg); }
 .league-settings-body { padding: 0 14px 14px; }
 .league-settings-body .league-code { margin-top: 0; }
+/* v1.8.1: the trophy cabinet, collapsed into League settings' disclosure. The
+   label and the tally share a line when they fit and wrap as a pair when they
+   do not; the chevron keeps its place. At least 44px tall.
+   Same box, type and chevron as .league-settings, mirrored rather than
+   shared so League settings' own rules stay exactly as they are. */
+.cabinet-fold {
+  margin: 14px 0 4px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--white);
+}
+.cabinet-fold-head {
+  position: relative;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 10px;
+  min-height: 44px;
+  padding: 13px 36px 13px 14px;
+  color: var(--purple);
+  font-size: .82rem;
+  font-weight: 900;
+  letter-spacing: .02em;
+  list-style: none;
+  cursor: pointer;
+}
+.cabinet-fold-head::-webkit-details-marker { display: none; }
+.cabinet-fold-head::after {
+  content: "⌄";
+  position: absolute;
+  top: 50%;
+  right: 14px;
+  margin-top: -.55rem;
+  color: var(--purple);
+  font-size: 1.1rem;
+  line-height: 1;
+  transition: transform .16s ease;
+}
+.cabinet-fold[open] > .cabinet-fold-head::after { transform: rotate(180deg); }
+.cabinet-fold-head:focus-visible { outline: 2px solid var(--purple); outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) {
+  .cabinet-fold-head::after { transition: none; }
+}
+.cabinet-fold-label,
+.cabinet-fold-tally { white-space: nowrap; }
+/* The league board inside the cabinet: compact, names wrap, figures align. */
+.cabinet-board { padding: 0 10px 12px; }
+.honours-board { font-size: .8rem; }
+.honours-board th, .honours-board td { padding: 8px 3px; }
+.honours-board thead th { color: var(--muted); font-size: .72rem; font-weight: 800; }
+.honours-board tbody th { font-weight: 700; text-align: left; overflow-wrap: anywhere; }
+/* Figures take only what they need, so a name gets the room at 320pt. */
+.honours-board th:not(:first-child), .honours-board td { width: 1.9rem; text-align: center; }
+.honours-board th:last-child, .honours-board td:last-child { width: 3.6rem; }
+.honours-board td { font-variant-numeric: tabular-nums; font-weight: 800; }
+.honours-board .is-zero { color: var(--muted); font-weight: 400; }
+.honours-board tr.is-you th { color: var(--purple); font-weight: 900; }
+.honours-board tbody tr:last-child > * { border-bottom: 0; }
+.cabinet-fold-tally { color: var(--ink); font-weight: 800; letter-spacing: 0; }
+.cabinet-none { padding: 13px 14px; color: var(--muted); font-size: .82rem; font-weight: 800; }
 
 /* --- D6: Mates' Picks before the host has published ---------------------- */
 .mates-awaiting p { margin: 6px 0 12px; }
@@ -2207,6 +2261,70 @@ body.picker-open { overflow: hidden; }
 }
 /* The week's own share control sits under the list it exports. */
 .pick-share { display: flex; justify-content: flex-end; margin-top: 12px; }
+
+/* --- v1.8.1: share after the week's last prediction ------------------------
+   One slim green strip under the list: message | Share | dismiss. It sits
+   below the rows, so it never moves a fixture under the player's finger, and
+   it has no entrance animation, so reduced-motion has nothing to stop.
+   Contrast on #eaf7f1: title 8.9:1, sub 14.9:1, dismiss 8.9:1; white on the
+   button 5.0:1. */
+.share-prompt {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 8px 6px 8px 14px;
+  border: 1px solid rgba(10, 127, 88, .28);
+  border-radius: 12px;
+  background: #eaf7f1;
+}
+.share-prompt-text { min-width: 0; }
+.share-prompt-title,
+.share-prompt-sub { margin: 0; line-height: 1.3; overflow-wrap: anywhere; }
+.share-prompt-title { color: var(--green-2); font-size: .84rem; font-weight: 900; }
+.share-prompt-sub {
+  color: var(--ink);
+  font-size: .78rem;
+  font-weight: 600;
+  /* A 40-character league name would otherwise stack the strip to five or six
+     lines on a 320pt phone. Two lines, then an ellipsis — visually only: the
+     whole name stays in the DOM, so VoiceOver still reads all of it. */
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+}
+.share-prompt-go {
+  min-height: 44px;
+  padding: 0 16px;
+  border: 0;
+  border-radius: 10px;
+  background: var(--green);
+  color: var(--white);
+  font: inherit;
+  font-size: .84rem;
+  font-weight: 900;
+  cursor: pointer;
+}
+.share-prompt-dismiss {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: 0;
+  border-radius: 10px;
+  background: none;
+  color: var(--green-2);
+  font: inherit;
+  font-size: 1.3rem;
+  line-height: 1;
+  cursor: pointer;
+}
+.share-prompt-go:focus-visible,
+.share-prompt-dismiss:focus-visible { outline: 2px solid var(--green-2); outline-offset: 2px; }
 
 /* --- v1.7 rider items 4 and 5: the Season page's two folded sections -------
    Both arrive collapsed. Expansion is a DOM edit on the section already on

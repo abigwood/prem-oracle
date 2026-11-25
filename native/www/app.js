@@ -1,6 +1,6 @@
 const SEASON_START = new Date("2026-08-21T20:00:00+01:00");
 const SEASON_START_DATE = "2026-08-21";
-const APP_BUILD = "20261124a";
+const APP_BUILD = "20261125a";
 const API = window.PREM_API || null;
 // Canonical public home of the web app. Inside the Capacitor shell the page is
 // served from premoracle://localhost, so location.origin can never be used to
@@ -2295,11 +2295,55 @@ function lockTimeLabel(slate) {
  * What the league is told about the deadline. Before the first kickoff the
  * line-up can still be amended, so both host and members see when that stops.
  */
-function lockLine(slate) {
+/**
+ * Whether a published slate is locked, in effect: the server's flag, or a lock
+ * moment that has already passed — a slate fetched before its lock time keeps
+ * `locked: false` until it is refetched, and must not keep offering edits.
+ * The one answer for the lock copy and both Edit line-up controls.
+ */
+function slateLocked(slate) {
+  if (!slate) return false;
+  if (slate.locked) return true;
+  const at = slate.lockAt ? Date.parse(slate.lockAt) : NaN;
+  return Number.isFinite(at) && at <= Date.now();
+}
+
+function lockLine(slate, { period = null } = {}) {
   if (!slate) return "";
-  if (slate.locked) return `<p class="lock-line is-locked">Line-up locked — the first fixture has kicked off.</p>`;
+  // v1.8.1: the League card passes its period, and the line then carries the
+  // week it is about ("Week 13 · locks Sat 28 Nov at 15:00") — the number the
+  // retired "Season 2026/27 · next up" card used to hold. Other callers are
+  // unchanged.
+  if (period != null) return cardLockLine(slate, period);
+  if (slateLocked(slate)) return `<p class="lock-line is-locked">Line-up locked — the first fixture has kicked off.</p>`;
   const when = lockTimeLabel(slate);
   return when ? `<p class="lock-line">Locks ${escapeHTML(when)}</p>` : "";
+}
+
+/**
+ * The week a League-card lock line is about, or "" when it cannot be named
+ * honestly: no number yet for a windowed week, or a slate that belongs to a
+ * different period from the league's current one. Never a guess.
+ */
+function lockWeekPrefix(slate, period) {
+  const own = slate?.period ?? slate?.matchweek;
+  if (own != null && String(own) !== String(period)) return "";
+  // The one week-naming path, minus its date-range fallback: a window with no
+  // week number yet is not a week this line can name.
+  if (isWindowKey(period) && weekNumberFor(period) == null) return "";
+  return periodLabel(period);
+}
+
+function cardLockLine(slate, period) {
+  const week = lockWeekPrefix(slate, period);
+  // A lock moment already behind us is not an upcoming lock, whatever the
+  // flag on a slate fetched before it passed says.
+  if (slateLocked(slate)) {
+    return `<p class="lock-line is-locked">${week ? `${escapeHTML(week)} · line-up locked` : "Line-up locked"} — the first fixture has kicked off.</p>`;
+  }
+  const when = lockTimeLabel(slate).replace(/, (\d{2}:\d{2})$/, " at $1");
+  if (!when) return "";
+  return `<p class="lock-line">${week ? `${escapeHTML(week)} · locks` : "Locks"} ${escapeHTML(when)}</p>`;
 }
 
 function slateNotice(period) {
@@ -2307,7 +2351,7 @@ function slateNotice(period) {
   // Published and still amendable: the host can change the line-up, and both
   // sides are told when that stops.
   if (published) {
-    const canEdit = isLeagueHost() && !published.locked;
+    const canEdit = isLeagueHost() && !slateLocked(published);
     return `<div class="slate-notice slate-notice-published">
       ${lockLine(published)}
       ${canEdit ? `<button class="secondary wide" type="button" data-open-picker="${escapeHTML(period)}" data-amend="1">Edit line-up</button>` : ""}
@@ -3184,7 +3228,110 @@ function picksView() {
     <div class="pick-list" data-pick-list>${
       slots.map((slot) => pickRow(slot, { expanded: expandedPickId === String(slot.id) })).join("")
     }</div>
+    ${sharePromptHtml(state, slots)}
     ${pickShareRow(state)}`;
+}
+
+/* --- v1.8.1: share after the week's last prediction ------------------------
+ *
+ * One moment, and only one: the successful save that takes the ACTIVE league
+ * from "something still to predict" to "every required prediction saved". A
+ * screen that is merely already complete never raises it; nor does an edit to
+ * a week that was already complete. It is raised in memory by that save, so a
+ * relaunch onto a finished week does not bring it back either.
+ *
+ * Once the player shares (the sheet reports completion) or dismisses it, it is
+ * done for that uid + league, on this device. A cancelled sheet or a fallback
+ * hand-off is not a share and changes nothing. No counters, no analytics, no
+ * worker write: the share itself is the existing league invite.
+ */
+const SHARE_PROMPT_DONE = "prem_oracle_share_prompt_done";
+let sharePrompt = null;   // { uid, code, announce } — set only by a completing save
+
+const sharePromptKey = (who, code) => `${SHARE_PROMPT_DONE}:${who}:${code}`;
+
+function sharePromptDone(who, code) {
+  try { return localStorage.getItem(sharePromptKey(who, code)) === "1"; } catch { return false; }
+}
+
+function markSharePromptDone(who, code) {
+  try { localStorage.setItem(sharePromptKey(who, code), "1"); } catch { /* storage refused: forgets on relaunch */ }
+  if (sharePrompt?.uid === who && sharePrompt.code === code) sharePrompt = null;
+}
+
+/**
+ * Whether these slots are ALL predicted. An unresolvable slot is an unknown,
+ * not a pass: "every prediction saved" is a claim the screen has to be able to
+ * stand behind.
+ */
+function slotsComplete(slots) {
+  const { required, made } = pickCounts(slots);
+  return required > 0 && made === required && slots.every((slot) => slot.fixture);
+}
+
+/** The active league's completion right now, or null when it has no slate. */
+function activeLeagueCompletion() {
+  const state = matchweekLeagueState();
+  const plan = state && matchweekSlate(state);
+  if (!plan) return null;
+  return { code: state.code, complete: slotsComplete(matchweekSlots(plan)) };
+}
+
+/** Called by a save that has SUCCEEDED, with the completion from before it. */
+function noteSaveCompletion(before, who) {
+  if (!before || before.complete) return;
+  const after = activeLeagueCompletion();
+  // The same league, the same player, and only on the transition.
+  if (!after || after.code !== before.code || !after.complete || uid() !== who) return;
+  if (sharePromptDone(who, after.code)) return;
+  sharePrompt = { uid: who, code: after.code, announce: true };
+}
+
+function sharePromptHtml(state, slots) {
+  const who = uid();
+  if (!sharePrompt || sharePrompt.uid !== who || sharePrompt.code !== state.code) return "";
+  if (sharePromptDone(who, state.code) || !slotsComplete(slots)) return "";
+  // Announced on the paint that first shows it, not on every repaint after.
+  const announce = sharePrompt.announce ? ' role="status"' : "";
+  sharePrompt.announce = false;
+  const count = pickCounts(slots).required;
+  return `<section class="share-prompt" data-share-prompt="${escapeHTML(state.code)}" aria-labelledby="share-prompt-title">
+    <div class="share-prompt-text"${announce}>
+      <p class="share-prompt-title" id="share-prompt-title">All ${count} prediction${count === 1 ? "" : "s"} saved <span aria-hidden="true">\u2713</span></p>
+      <p class="share-prompt-sub">Share ${escapeHTML(state.name || state.code)} with mates</p>
+    </div>
+    <button class="share-prompt-go" type="button" data-share-prompt-share="${escapeHTML(state.code)}">Share</button>
+    <button class="share-prompt-dismiss" type="button" data-share-prompt-dismiss="${escapeHTML(state.code)}" aria-label="Dismiss">\u00d7</button>
+  </section>`;
+}
+
+/**
+ * Inside the tap: shareNow is reached with nothing awaited, exactly as Invite
+ * mates does, and only a completed sheet retires the prompt.
+ */
+function shareFromPrompt(code) {
+  const who = uid();
+  return shareNow(leagueInvite(code)).then((outcome) => {
+    if (outcome !== "shared") return outcome;
+    markSharePromptDone(who, code);
+    // The Share button had focus; hand it on exactly as dismissal does.
+    removeSharePrompt(code, { refocus: true });
+    return outcome;
+  });
+}
+
+function dismissSharePrompt(code) {
+  markSharePromptDone(uid(), code);
+  removeSharePrompt(code, { refocus: true });
+}
+
+/** Out of the DOM in place: a repaint would lose the player's scroll position. */
+function removeSharePrompt(code, { refocus = false } = {}) {
+  const node = document.querySelector(`[data-share-prompt="${cssEscape(code)}"]`);
+  if (!node) return;
+  const hadFocus = node.contains(document.activeElement);
+  node.remove();
+  if (refocus && hadFocus) document.querySelector(".pick-share button, [data-pick-list] [data-expand-pick]")?.focus();
 }
 
 /** The week's own share control, on the screen the week now lives on. */
@@ -3329,6 +3476,15 @@ function dropRetainedPanels(code = null) {
   if (mountedKey?.startsWith(`${code}|`)) mountedKey = null;
 }
 
+/**
+ * A retained Season panel is the same DOM node it was when it left — including
+ * an opened cabinet. The cabinet is collapsed on every visit, so close it on
+ * the way back in.
+ */
+function collapseCabinets(root) {
+  for (const fold of root?.querySelectorAll?.("details[data-cabinet-fold][open]") || []) fold.open = false;
+}
+
 function resultsNode() {
   return document.querySelector("[data-league-results]");
 }
@@ -3336,9 +3492,8 @@ function resultsNode() {
 /** The Season panel, in bounded stages. Each is small enough to paint between. */
 function seasonStages(state, isOwner) {
   return [
-    ["banner", () => seasonBanner(state)],
     ["cabinet", () => trophyCabinet(state)],
-    ["standings", () => seasonTableHtml(state, isOwner, true)],
+    ["standings", () => seasonTableHtml(state, isOwner)],
     // Immediately under the table it exports, and above the mates' sections —
     // a share control at the bottom of a long page is a control nobody finds.
     ["share", () => `<div class="season-share">${shareIconButton(state, "season")}</div>`],
@@ -3375,7 +3530,7 @@ async function fillPanelProgressively(panel, capture) {
   }
   if (!leagueSupportsRounds(state)) {
     panel.insertAdjacentHTML("beforeend", state && !state.error
-      ? `${seasonTableHtml(state, isOwner, false)}${leagueRevealsHtml(state)}`
+      ? `${seasonTableHtml(state, isOwner)}${leagueRevealsHtml(state)}`
       : "");
     return true;
   }
@@ -3424,6 +3579,7 @@ async function showResultsPanel({ status } = {}) {
   if (retained) {
     // The SAME element goes back in. No parsing, no relayout of content the
     // browser has already measured.
+    collapseCabinets(retained);
     node.replaceChildren(retained);
     mountedKey = key;
     mountedContext = { code, tab, period };
@@ -3500,6 +3656,7 @@ function mountResults() {
   if (mountedKey === key && node.firstElementChild) return;   // already right
   const retained = retainedPanels.get(key);
   if (retained) {
+    collapseCabinets(retained);
     node.replaceChildren(retained);
     mountedKey = key;
     syncShareLabel();
@@ -3793,32 +3950,6 @@ function fixtureHasResult(match) {
   return result?.p1 != null && result?.p2 != null;
 }
 
-/**
- * Where the season has got to, in one line. The banner says it and so does the
- * share card, from here — a card that placed the table one week away from where
- * the panel behind it does would be a card nobody could trust.
- */
-function seasonProgressLine(state) {
-  // A mixed league has no matchweek numbering and no season length, so it is
-  // told where it is in its own terms rather than being given "of null".
-  if (state.mixed || seasonRounds() == null) {
-    const period = state.currentPeriod;
-    return period == null
-      ? "season complete"
-      : state.currentMatchdayHasResults ? `${periodLabel(period)} in progress` : `next up: ${periodLabel(period)}`;
-  }
-  const played = state.currentMatchday == null ? seasonRounds() : Math.max(0, state.currentMatchday - 1);
-  const currentMatchdayHasResults = state.currentMatchdayHasResults ||
-    fixtures.some((fixture) => fixture.matchday === state.currentMatchday && fixtureHasResult(fixture));
-  return currentMatchdayHasResults && state.currentMatchday != null
-    ? `Matchweek ${state.currentMatchday} in progress`
-    : played === 0 ? `starts Matchweek ${state.currentMatchday || 1}` : `after Matchweek ${played} of ${seasonRounds()}`;
-}
-
-function seasonBanner(state) {
-  return `<div class="round-banner"><strong>Season 2026/27</strong><span>${escapeHTML(seasonProgressLine(state))}</span></div>`;
-}
-
 // Slate line under a matchweek banner, so a curated week is always legible as
 // one — and a full card never grows a label it doesn't need.
 function roundSlateLine(round) {
@@ -3999,7 +4130,7 @@ function roundTableHtml(round) {
   const slateIds = slateIdsOf(round);
   const ranks = weeklyRanks(round.table);
   const movement = weeklyMovement(round.table, round.reveal, slateIds);
-  return `<table class="table round-standings"><thead><tr><th>Player</th><th>Pts</th><th>Exact</th></tr></thead>
+  return `<table class="table round-standings"><thead><tr><th>Player</th><th>Pts</th><th class="col-exact">Exact</th></tr></thead>
     <tbody>${(round.table || []).map((row, index) => {
       const place = awards.get(row.uid);
       const medal = place ? ` <span class="crown" aria-label="Matchweek ${place}">${PLACE_EMOJI[place]}</span>` : "";
@@ -4007,7 +4138,7 @@ function roundTableHtml(round) {
       // The Season table's shape: the arrow FOLLOWS the name, in the slot at
       // the end of the player cell. Leading it made a left gutter that pushed
       // every name out of line and read as the row's most important fact.
-      return `<tr><td class="player-cell"><span class="player-name">${ranks.get(row.uid) ?? index + 1}. ${escapeHTML(row.nick)}${medal}</span>${move}</td><td>${row.pts}</td><td>${row.exact}</td></tr>`;
+      return `<tr><td class="player-cell"><span class="player-name">${ranks.get(row.uid) ?? index + 1}. ${escapeHTML(row.nick)}${medal}</span>${move}</td><td>${row.pts}</td><td class="col-exact">${row.exact}</td></tr>`;
     }).join("")}</tbody></table>`;
 }
 
@@ -4024,25 +4155,12 @@ function podiumCounts(row) {
   return { gold: row?.wins || 0, silver: 0, bronze: 0 };
 }
 
-/**
- * All three medals, always, with the empty ones muted rather than hidden — a
- * row that shows only what somebody has won reads as a different shape per
- * player and makes the column impossible to scan.
- */
-function medalLine(row) {
-  const { gold, silver, bronze } = podiumCounts(row);
-  const cell = (emoji, count) =>
-    `<span class="medal${count ? "" : " is-none"}">${emoji} ${count}</span>`;
-  return `<span class="medals" aria-label="${gold} gold, ${silver} silver, ${bronze} bronze">${
-    cell("🏆", gold)}<i aria-hidden="true">·</i>${cell("🥈", silver)}<i aria-hidden="true">·</i>${cell("🥉", bronze)}</span>`;
-}
-
-function seasonTableHtml(state, isOwner, withWins) {
-  // The trophy column is gone: the medals live under each name, where all
-  // three fit at 402px without a fifth column pushing Pts and Exact off.
-  return `<table class="table league-table"><thead><tr><th>Player</th><th></th><th>Pts</th><th>Exact</th>${isOwner ? "<th></th>" : ""}</tr></thead>
+function seasonTableHtml(state, isOwner) {
+  // v1.8.1: one line per member. The medal tally that sat under each name now
+  // lives once, for the whole league, in the trophy cabinet above the table.
+  return `<table class="table league-table"><thead><tr><th>Player</th><th></th><th>Pts</th><th class="col-exact">Exact</th>${isOwner ? "<th></th>" : ""}</tr></thead>
     <tbody>${(state.table || []).map((row, index) =>
-      `<tr><td class="player-cell"><span class="player-name">${row.rank || index + 1}. ${escapeHTML(row.nick)}</span>${withWins ? medalLine(row) : ""}</td><td>${movementBadge(row)}</td><td>${row.pts}</td><td>${row.exact}</td>${isOwner ? `<td class="kick-cell">${row.uid && row.uid !== state.owner ? `<button class="kick-btn" type="button" data-kick-league="${state.code}" data-kick-uid="${escapeHTML(row.uid)}" aria-label="Remove ${escapeHTML(row.nick)}">×</button>` : ""}</td>` : ""}</tr>`
+      `<tr><td class="player-cell"><span class="player-name">${row.rank || index + 1}. ${escapeHTML(row.nick)}</span></td><td>${movementBadge(row)}</td><td>${row.pts}</td><td class="col-exact">${row.exact}</td>${isOwner ? `<td class="kick-cell">${row.uid && row.uid !== state.owner ? `<button class="kick-btn" type="button" data-kick-league="${state.code}" data-kick-uid="${escapeHTML(row.uid)}" aria-label="Remove ${escapeHTML(row.nick)}">×</button>` : ""}</td>` : ""}</tr>`
     ).join("")}</tbody></table>`;
 }
 
@@ -4325,11 +4443,15 @@ function shareNow({ title, text, url }) {
   let opening = null;
   if (plugin) opening = plugin.share({ title, text, url, dialogTitle: title });
   else if (navigator.share) opening = navigator.share(url ? { title, text, url } : { title, text });
-  if (!opening) { location.href = whatsappUrlFor(text); return; }
-  opening.catch((error) => {
+  // The outcome, for a caller that needs to know (the share-after-save prompt):
+  // "shared" only when the sheet itself says it completed. A hand-off to the
+  // WhatsApp page is not known to have shared anything, so it is not "shared".
+  if (!opening) { location.href = whatsappUrlFor(text); return Promise.resolve("handed-off"); }
+  return opening.then(() => "shared", (error) => {
     // Dismissing the sheet is an answer, not a failure.
-    if (error?.name === "AbortError" || /cancel/i.test(error?.message || "")) return;
+    if (error?.name === "AbortError" || /cancel/i.test(error?.message || "")) return "cancelled";
     location.href = whatsappUrlFor(text);
+    return "handed-off";
   });
 }
 
@@ -5867,20 +5989,72 @@ function cabinetWeeksHtml(state) {
     : `<p class="muted">Your first matchweek award lands here once a round is settled.</p>`;
 }
 
+/**
+ * v1.8.1: the trophy cabinet is the LEAGUE's honours board, collapsed into one
+ * row: "🏆 Trophy cabinet" and the league's combined, zero-suppressed tally —
+ * the share cards' own formatter (cardHonoursParts joined by CARD_HONOURS_SEP),
+ * fed by podiumCounts, the same per-member data the Season rows used to show.
+ * Nothing is calculated that was not already rendered; it is only gathered.
+ *
+ * Expanded: every member's gold/silver/bronze/podiums, the viewer pinned first
+ * and everyone else by podiums. A native <details>, closed on every visit and
+ * never persisted; the row is a 44px target; VoiceOver hears the tally in words
+ * and the closed body is the browser's to hide.
+ */
+const HONOUR_PLACES = ["gold", "silver", "bronze"];
+
+/** Every member's medals, with the viewer first and the rest by podiums. */
+function honoursBoardRows(state) {
+  const me = uid();
+  const rows = (state?.table || []).map((row, order) => {
+    const counts = podiumCounts(row);
+    return { uid: row.uid, nick: row.nick, ...counts, podiums: counts.gold + counts.silver + counts.bronze, order };
+  });
+  const rank = (a, b) => b.podiums - a.podiums || b.gold - a.gold || b.silver - a.silver
+    || b.bronze - a.bronze || a.order - b.order;
+  return [...rows.filter((row) => row.uid === me), ...rows.filter((row) => row.uid !== me).sort(rank)];
+}
+
 function trophyCabinet(state) {
-  const cabinet = state?.cabinet;
-  if (!cabinet) return "";
-  const shelf = ["gold", "silver", "bronze"].map((place) =>
-    `<div class="cab-slot"><span class="cab-emoji">${PLACE_EMOJI[place]}</span><b>× ${cabinet[place] || 0}</b></div>`
-  ).join("");
-  return `<section class="cabinet">
-    <h3>${escapeHTML(cabinet.nick || "Your")}'s trophy cabinet</h3>
-    <div class="cabinet-shelf">
-      ${shelf}
-      <div class="cab-slot cab-total"><b>${cabinet.podiums || 0}</b><span>podiums</span></div>
+  const rows = honoursBoardRows(state);
+  if (!rows.length) return "";
+  const league = HONOUR_PLACES.reduce((sum, place) =>
+    ({ ...sum, [place]: rows.reduce((total, row) => total + row[place], 0) }), {});
+  const parts = cardHonoursParts(league);
+  if (!parts.length) {
+    // The whole league has none: a plain line, never an empty board behind a chevron.
+    return `<p class="cabinet-fold cabinet-none" data-cabinet-fold><span class="sr-only">Trophy cabinet: no podiums yet</span><span aria-hidden="true">🏆 Trophy cabinet · No podiums yet</span></p>`;
+  }
+  const podiums = league.gold + league.silver + league.bronze;
+  const word = (n) => `${n} podium${n === 1 ? "" : "s"}`;
+  const tally = parts.map(([emoji, count]) => `${emoji}${count}`).join(CARD_HONOURS_SEP);
+  const name = { [PLACE_EMOJI.gold]: "gold", [PLACE_EMOJI.silver]: "silver", [PLACE_EMOJI.bronze]: "bronze" };
+  const spoken = `Trophy cabinet: ${[...parts.map(([emoji, count]) => `${count} ${name[emoji]}`), word(podiums)].join(", ")}`;
+  return `<details class="cabinet-fold" data-cabinet-fold>
+    <summary class="cabinet-fold-head">
+      <span class="sr-only">${escapeHTML(spoken)}</span>
+      <span class="cabinet-fold-label" aria-hidden="true">🏆 Trophy cabinet</span>
+      <span class="cabinet-fold-tally" aria-hidden="true">${escapeHTML(tally)}</span>
+    </summary>
+    <div class="cabinet-board">
+      ${honoursBoardHtml(rows)}
+      ${state.cabinet?.weeks?.length ? seasonSection("weeks", "Week by week", () => cabinetWeeksHtml(state)) : ""}
     </div>
-    ${seasonSection("weeks", "Week by week", () => cabinetWeeksHtml(state))}
-  </section>`;
+  </details>`;
+}
+
+/** The compact board. A zero reads as a dash on screen and as "0" aloud. */
+function honoursBoardHtml(rows) {
+  const me = uid();
+  const cell = (count) => (count
+    ? `<td>${count}</td>`
+    : `<td class="is-zero"><span aria-hidden="true">\u2013</span><span class="sr-only">0</span></td>`);
+  const head = (place, label) => `<th scope="col"><span aria-hidden="true">${PLACE_EMOJI[place]}</span><span class="sr-only">${label}</span></th>`;
+  return `<table class="table honours-board">
+    <thead><tr><th scope="col">Player</th>${head("gold", "Gold")}${head("silver", "Silver")}${head("bronze", "Bronze")}<th scope="col">Podiums</th></tr></thead>
+    <tbody>${rows.map((row) => `<tr${row.uid === me ? ' class="is-you"' : ""}><th scope="row">${escapeHTML(row.nick)}${
+      row.uid === me ? '<span class="sr-only"> (you)</span>' : ""}</th>${cell(row.gold)}${cell(row.silver)}${cell(row.bronze)}${cell(row.podiums)}</tr>`).join("")}</tbody>
+  </table>`;
 }
 
 // --- Create a league wizard -------------------------------------------------
@@ -6079,21 +6253,30 @@ async function advanceWizard() {
   render();
 }
 
-/** "Premier League · 6 fixtures/week" — what this league actually includes. */
+/**
+ * "Premier League · 6 fixtures/week" — what this league actually includes.
+ *
+ * v1.8.1: said once, quietly, under the selected league's settings heading in
+ * Manage leagues. It used to be the uppercase eyebrow over the name on every
+ * League card, which is set-up detail read weekly by nobody.
+ */
 function leagueSummaryLine(state) {
   const names = (state?.competitions || [state?.competition || DEFAULT_COMPETITION])
     .map((code) => competitionMeta(code).name).join(" + ");
   const rule = state?.weeklyRule;
+  // "1 fixture/week", "6 fixtures/week": the count and its noun agree.
+  const noun = (count) => (Number(count) === 1 ? "fixture" : "fixtures");
+  const perWeek = (count) => `${count} ${noun(count)}/week`;
   if (rule?.method === "allEligible") return `${names} · every fixture`;
   if (rule?.method === "allCompetition") return `${names} · every ${competitionMeta(rule.competitionScope).short} fixture`;
   // "~" because the count is a rule of thumb: individual weeks can differ.
-  if (rule?.method === "random") return `${names} · ~${rule.count} random fixtures/week`;
+  if (rule?.method === "random") return `${names} · ~${rule.count} random ${noun(rule.count)}/week`;
   // Plain text: the caller escapes this line, so markup here would show as tags.
-  if (rule?.method === "manual") return `${names} · ${rule.count} fixtures/week`;
+  if (rule?.method === "manual") return `${names} · ${perWeek(rule.count)}`;
   // A worker that predates the rule still answers with the old fields.
   if (state?.fixtureMode !== "limited") return `${names} · every fixture`;
   const limit = state?.fixtureLimit;
-  return limit == null ? `${names} · host picks each week` : `${names} · ~${limit} fixtures/week`;
+  return limit == null ? `${names} · host picks each week` : `${names} · ~${perWeek(limit)}`;
 }
 
 /**
@@ -6138,8 +6321,8 @@ function hostSlateControl(state) {
       : "";
   }
   return `<div class="slate-notice slate-notice-published">
-    ${lockLine(slate)}
-    ${isOwner && !slate.locked
+    ${lockLine(slate, { period: state.currentPeriod })}
+    ${isOwner && !slateLocked(slate)
       ? `<button class="secondary wide" type="button" data-open-picker="${escapeHTML(state.currentPeriod)}" data-amend="1">Edit line-up</button>`
       : ""}
   </div>`;
@@ -6159,7 +6342,7 @@ function leagueSettings(state, isOwner) {
   const open = leagueSettingsOpen;
   return `<details class="league-settings" data-league-settings${open ? " open" : ""}>
     <summary class="league-settings-head">
-      <span>League settings</span>
+      <span class="league-settings-title"><span>League settings</span><span class="league-settings-config">${escapeHTML(leagueSummaryLine(state))}</span></span>
     </summary>
     <div class="league-settings-body">
       <div class="league-code"><span>League code</span><strong>${state.code}</strong></div>
@@ -6217,7 +6400,6 @@ function leagueView() {
     : state.error
       ? `<div class="empty"><strong>${escapeHTML(state.error)}</strong></div>`
       : `<section class="league-card">
-          <span class="eyebrow">${escapeHTML(leagueSummaryLine(state))}</span>
           <h2>${escapeHTML(state.name)}</h2>
           ${supportsRounds ? `${roundToggle()}<div class="picker-island" data-picker-island></div>` : ""}
           <div class="slate-slot">${hostSlateControl(state)}</div>
@@ -7105,6 +7287,16 @@ document.addEventListener("click", async (event) => {
     shareNow(leagueInvite(share.dataset.shareLeague));
     return;
   }
+  const promptShare = event.target.closest("[data-share-prompt-share]");
+  if (promptShare) {
+    shareFromPrompt(promptShare.dataset.sharePromptShare);
+    return;
+  }
+  const promptDismiss = event.target.closest("[data-share-prompt-dismiss]");
+  if (promptDismiss) {
+    dismissSharePrompt(promptDismiss.dataset.sharePromptDismiss);
+    return;
+  }
   // My Picks opens one editable row at a time, as a DOM edit rather than a
   // re-render, so working down the list never loses your place.
   const pickRowHead = event.target.closest("[data-expand-pick]");
@@ -7358,6 +7550,10 @@ if (document.documentElement.classList.contains("is-native")) {
 
 async function savePick(matchId, p1, p2) {
   if (!validScore(p1) || !validScore(p2)) return;
+  // Measured before the optimistic write, so the prompt can tell a completing
+  // save from an edit to a week that was already complete.
+  const before = activeLeagueCompletion();
+  const who = uid();
   picks[matchId] = { p1, p2, savedAt: Date.now() };
   busyMatch = matchId;
   render({ anchorMatchId: matchId });
@@ -7365,6 +7561,7 @@ async function savePick(matchId, p1, p2) {
     if (API) await api("/pick", { uid: uid(), nickname: playerName, matchId, p1, p2 });
     localStorage.setItem(STORAGE.picks, JSON.stringify(picks));
     setFlash("Pick saved.");
+    noteSaveCompletion(before, who);
     // v1.8 §4: a saved prediction is demonstrated intent — offer reminders once,
     // after the save settles. No-op on web / when already shown / non-prompt.
     scheduleReminderOffer();

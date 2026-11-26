@@ -816,7 +816,8 @@ class CompetitionAppTests(unittest.TestCase):
         self.assertIn("codes.length < 2", self.app)
         # Server side honours it and re-registering a device does not un-mute.
         self.assertIn("const mutes = (record, competition) =>", self.worker)
-        self.assertIn("mute: Array.isArray(existing?.mute) ? existing.mute : []", self.worker)
+        self.assertIn("...preferenceFields(existing),", self.worker)
+        self.assertIn("const out = { mute: Array.isArray(record?.mute) ? record.mute : [] };", self.worker)
 
     def test_worker_exposes_competition_endpoints(self):
         for route in ('path === "/notification-prefs"', 'path === "/admin/migration"'):
@@ -1409,7 +1410,7 @@ class WeeklyLoopTests(unittest.TestCase):
         self.assertIn("Matchweek ${escapeHTML(period)} is open — set your fixtures", self.app)
 
     def test_every_weekly_push_is_deduped_on_league_period_and_type(self):
-        self.assertIn("async function pushOnce(env, pushType, leagueId, periodKey, uids, body)", self.worker)
+        self.assertIn("async function pushOnce(env, pushType, leagueId, periodKey, uids, body, route = null)", self.worker)
         self.assertIn("const key = `notified:${pushType}:${leagueId}:${periodKey}`;", self.worker)
         for push_type in ("slate-open", "slate-published", "auto-published"):
             self.assertIn(f'"{push_type}"', self.worker, push_type)

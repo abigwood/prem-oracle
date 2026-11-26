@@ -127,9 +127,12 @@ export const isDailyPassTick = (nowMs) => {
 /**
  * Which fixtures this tick owes a fetch, and for which pass.
  *
- *   week — kicks off on the UK date seven days from today, and has never had a
- *          forecast. Counted in UK dates, not hours, so a 23- or 25-hour DST day
- *          can neither skip a fixture nor take it twice.
+ *   week — the first forecast: kicks off 1–7 UK dates from today (within
+ *          ~7.5 days of this 06:00 tick) and has never had one. Normally that
+ *          is day 7; a fixture added later, or a week the pass missed, catches
+ *          up on the next 06:00 (e.g. this weekend's games on Friday). Counted
+ *          in UK dates, not hours, so a 23- or 25-hour DST day can neither skip
+ *          a fixture nor take it twice.
  *   day  — kicks off later today (UK date).
  *
  * A pass already recorded for the fixture is never owed again — that record is
@@ -146,7 +149,7 @@ export function dueForecasts(matches, store, nowMs) {
     const entry = store?.[match.id] || {};
     const passes = Array.isArray(entry.passes) ? entry.passes : [];
     const days = dayDiff(today, ukParts(startMs).date);
-    if (days === 7 && !passes.includes("week") && !entry.weather) due.push({ match, pass: "week", coords, startMs });
+    if (days >= 1 && days <= 7 && !passes.includes("week") && !entry.weather) due.push({ match, pass: "week", coords, startMs });
     else if (days === 0 && !passes.includes("day")) due.push({ match, pass: "day", coords, startMs });
   }
   return due;

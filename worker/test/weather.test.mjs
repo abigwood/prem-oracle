@@ -116,6 +116,20 @@ test("exactly two fetches per fixture across simulated weeks of */15 ticks — D
   assert.ok(wk.calls.every((c) => /^Bearer /.test(c.auth)));
 });
 
+test("catch-up: a fixture first seen 1–6 days out gets its first forecast at the next 06:00, then the matchday one — still two calls", async () => {
+  const e = await env();
+  const wk = fakeWeatherKit();
+  // This weekend's game: the pass first sees it on Friday (e.g. it was added late,
+  // or build 36 only looked exactly seven days out).
+  const list = [match("late", "Pride Park Stadium", "2026-11-28T15:00:00Z"), match("tue", "Anfield", "2026-12-01T20:00:00Z")];
+  for (let t = Date.parse("2026-11-27T00:00:00Z"); t < Date.parse("2026-12-02T00:00:00Z"); t += QUARTER) {
+    await weatherPass(e, { ELC: list }, t, { fetchImpl: wk.fetchImpl });
+  }
+  assert.equal(wk.calls.length, 4, "two fixtures, two calls each");
+  const store = JSON.parse(e.KV.store.get(weatherKey("ELC")));
+  assert.deepEqual(store.tue.passes, ["week", "day"]);
+});
+
 test("a week pass, then a day pass, each one call — and a pass is claimed before its call", async () => {
   const e = await env();
   const wk = fakeWeatherKit({ status: 500 });
@@ -213,7 +227,7 @@ test("only a whole forecast is ever served: no null-as-0°C, no missing icon or 
   assert.equal(usableWeather({ temp: -2, icon: "❄️", desc: "Snow" }), true);
 });
 
-test("only the 06:00 tick reaches WeatherKit, and only for the 7-days-out and today fixtures", async () => {
+test("only the 06:00 tick reaches WeatherKit, and only for fixtures 1–7 days out with no forecast yet, and today's", async () => {
   const list = [
     match("today", "Anfield", "2026-11-28T15:00:00Z"),
     match("week", "Anfield", "2026-12-05T15:00:00Z"),
@@ -222,7 +236,10 @@ test("only the 06:00 tick reaches WeatherKit, and only for the 7-days-out and to
     match("gone", "Anfield", "2026-11-28T05:00:00Z"),
   ];
   const due = dueForecasts(list, {}, Date.parse("2026-11-28T06:00:00Z"));
-  assert.deepEqual(due.map((d) => [d.match.id, d.pass]), [["today", "day"], ["week", "week"]]);
+  assert.deepEqual(due.map((d) => [d.match.id, d.pass]), [["today", "day"], ["week", "week"], ["six", "week"]]);
+  // Already forecast (or already tried) — never owed a first forecast again.
+  const tried = dueForecasts(list, { six: { passes: ["week"] }, week: { weather: { temp: 1 } } }, Date.parse("2026-11-28T06:00:00Z"));
+  assert.deepEqual(tried.map((d) => d.match.id), ["today"]);
   const e = await env();
   const wk = fakeWeatherKit();
   await weatherPass(e, { PL: list }, Date.parse("2026-11-28T09:00:00Z"), { fetchImpl: wk.fetchImpl });

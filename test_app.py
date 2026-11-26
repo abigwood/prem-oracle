@@ -79,7 +79,7 @@ class PremOracleTests(unittest.TestCase):
         self.assertIn("setupNativePushNotifications", app)
         self.assertIn("/push-token", app)
         self.assertIn("teamIntel", app)
-        self.assertIn("VENUE_OUTLOOK", app)
+        self.assertNotIn("VENUE_OUTLOOK", app)  # v1.9: real WeatherKit forecasts only
         self.assertIn(".team-crest", css)
         self.assertIn("TEAM_MARKERS", app)
         self.assertIn('"Arsenal": { bg: "#E20613"', app)

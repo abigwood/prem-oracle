@@ -52,6 +52,7 @@ import {
   validateSlate,
 } from "./logic.js";
 import { apnsConfigured, sendPush } from "./apns.js";
+import { mergeWeather, weatherConfigured, weatherKey, weatherPass, isDailyPassTick } from "./weather.js";
 import { NotifyLedger, utcDay } from "./notify/ledger.js";
 import { LeagueRegistrar } from "./league_registrar.js";
 import {
@@ -168,6 +169,8 @@ function fixtureRevision(list) {
     bite(String(match.status || ""));
     bite(String(match.startAt || ""));
     bite(String(match.result ? match.result.join("-") : ""));
+    // A new forecast is a changed answer, so it moves the ETag too.
+    if (match.weather) bite(`${match.weather.temp}${match.weather.icon}${match.weather.at}`);
   }
   return (hash >>> 0).toString(36);
 }
@@ -350,7 +353,15 @@ async function fixtures(env, competition = DEFAULT_COMPETITION, fresh = false) {
   if (!response.ok) throw new Error(`fixture fetch ${response.status}`);
   const body = await response.json();
   const resultStore = await currentResults(env, code);
-  cache.list = (body.fixtures || []).map((match) => mergeResultOverlay(match, resultStore[match.id]));
+  // v1.9 §B: stored WeatherKit forecasts ride on the fixture objects the client
+  // already fetches. One read of weather:<COMP> per cache refresh — the same
+  // cadence as the results read above, never per request and never per user —
+  // and none at all while the feature's secrets are absent.
+  const weatherStore = weatherConfigured(env) ? await kvGet(env, weatherKey(code)) : null;
+  cache.list = mergeWeather(
+    (body.fixtures || []).map((match) => mergeResultOverlay(match, resultStore[match.id])),
+    weatherStore,
+  );
   cache.intel = {
     teams: body.teams && typeof body.teams === "object" ? body.teams : {},
     modelVersion: body.modelVersion || null,
@@ -3548,6 +3559,27 @@ async function revealSlot(env, url) {
   }, 200, env, noStore);
 }
 
+/**
+ * v1.9 §B: the once-a-day WeatherKit pass, on the 06:00 UK tick only. Every
+ * other tick returns before reading anything; with the secrets absent, so does
+ * this one. Failures are swallowed — a missed forecast is no pill, and the
+ * next chance is the next pass, never a retry.
+ */
+export async function dailyWeather(env, nowMs, options = {}) {
+  if (!weatherConfigured(env) || !isDailyPassTick(nowMs)) return null;
+  try {
+    const lists = {};
+    for (const code of COMPETITION_CODES) {
+      if (competitionConfigured(env, code)) lists[code] = await fixtures(env, code);
+    }
+    const stats = await weatherPass(env, lists, nowMs, options);
+    for (const code of stats.changed) clearFixtureCache(code);
+    return stats;
+  } catch {
+    return null;
+  }
+}
+
 export default {
   async scheduled(event, env, ctx) {
     // Cron events carry the moment they were meant to fire. Using it rather than
@@ -3561,6 +3593,7 @@ export default {
     ctx.waitUntil(planRevealSlots(env, nowMs));
     ctx.waitUntil(weeklyLoop(env, nowMs));
     ctx.waitUntil(podiumAnnouncements(env));
+    ctx.waitUntil(dailyWeather(env, nowMs));
   },
   async fetch(request, env) {
     if (request.method === "OPTIONS") return applyCors(new Response(null, { headers: cors(env) }), env, request);

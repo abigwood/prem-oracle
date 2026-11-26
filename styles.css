@@ -331,6 +331,14 @@ main {
   text-transform: uppercase;
 }
 .weather-pill { border-color: #cde7d6; background: #f0faf1; }
+.weather-attribution {
+  align-self: center;
+  color: var(--muted);
+  font-size: .62rem;
+  font-weight: 700;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
 .venue-pill {
   min-width: 0;
   overflow: hidden;

@@ -169,31 +169,6 @@ const TEAM_CODES = {
 // NOT hardcoded: when it is empty (or a team is missing) the UI shows neutral
 // states rather than inventing numbers.
 let teamIntel = {};
-const VENUE_OUTLOOK = {
-  "Emirates Stadium": { icon: "🌤", temp: 20, desc: "London late-summer outlook" },
-  "MKM Stadium": { icon: "🌥", temp: 18, desc: "Hull coastal outlook" },
-  "Hill Dickinson Stadium": { icon: "🌦", temp: 18, desc: "Liverpool dockside outlook" },
-  "Portman Road": { icon: "🌤", temp: 19, desc: "Ipswich late-summer outlook" },
-  "St James' Park": { icon: "🌦", temp: 17, desc: "Newcastle outlook" },
-  "St. James' Park": { icon: "🌦", temp: 17, desc: "Newcastle outlook" },
-  "City Ground": { icon: "🌤", temp: 19, desc: "Nottingham late-summer outlook" },
-  "The City Ground": { icon: "🌤", temp: 19, desc: "Nottingham late-summer outlook" },
-  "Villa Park": { icon: "🌤", temp: 19, desc: "Birmingham late-summer outlook" },
-  "Gtech Community Stadium": { icon: "🌤", temp: 20, desc: "West London late-summer outlook" },
-  "Amex Stadium": { icon: "🌥", temp: 18, desc: "Brighton coastal outlook" },
-  "American Express Stadium": { icon: "🌥", temp: 18, desc: "Brighton coastal outlook" },
-  "Coventry Building Society Arena": { icon: "🌤", temp: 19, desc: "Coventry late-summer outlook" },
-  "Craven Cottage": { icon: "🌤", temp: 20, desc: "West London late-summer outlook" },
-  "Old Trafford": { icon: "🌦", temp: 18, desc: "Manchester outlook" },
-  "Anfield": { icon: "🌦", temp: 18, desc: "Liverpool outlook" },
-  "Stadium of Light": { icon: "🌦", temp: 17, desc: "Sunderland coastal outlook" },
-  "Elland Road": { icon: "🌥", temp: 18, desc: "Leeds outlook" },
-  "Vitality Stadium": { icon: "🌤", temp: 19, desc: "Bournemouth coastal outlook" },
-  "Etihad Stadium": { icon: "🌦", temp: 18, desc: "Manchester outlook" },
-  "Selhurst Park": { icon: "🌤", temp: 20, desc: "South London late-summer outlook" },
-  "Stamford Bridge": { icon: "🌤", temp: 20, desc: "West London late-summer outlook" },
-  "Tottenham Hotspur Stadium": { icon: "🌤", temp: 20, desc: "North London late-summer outlook" },
-};
 
 let fixtures = [];
 let currentView = "picks";
@@ -1868,22 +1843,24 @@ function probabilityStrip(match) {
   </div>`;
 }
 
+/**
+ * v1.9 §B: a forecast is shown only when the worker has a real one — Apple
+ * WeatherKit, fetched a week out and on the morning of the match, delivered on
+ * the fixture itself. Nothing is ever invented: no forecast, no pill.
+ */
 function weatherIntel(match) {
+  const weather = match?.weather;
+  if (!weather || !Number.isFinite(Number(weather.temp))) return null;
   if (fixtureDayDiff(match) > 7) return null;
-  if (match.weather) return match.weather;
-  const outlook = VENUE_OUTLOOK[match.venue];
-  if (!outlook) return null;
-  return { ...outlook, provisional: true };
+  return { icon: weather.icon || "", temp: Math.round(Number(weather.temp)), desc: weather.desc || "Forecast" };
 }
 
 function matchIntelStrip(match) {
   const weather = weatherIntel(match);
-  const weatherTitle = weather
-    ? `${weather.desc}${weather.provisional ? "; live forecast nearer kick-off" : ""}`
-    : "";
   return `<div class="match-intel-strip">
-    ${weather ? `<span class="intel-pill weather-pill" title="${escapeHTML(weatherTitle)}">${weather.icon} ${weather.temp}°C <em>${weather.provisional ? "Outlook" : "Forecast"}</em></span>` : ""}
+    ${weather ? `<span class="intel-pill weather-pill" title="${escapeHTML(weather.desc)}">${escapeHTML(weather.icon)} ${weather.temp}°C <em>Forecast</em></span>` : ""}
     ${match.venue ? `<span class="intel-pill venue-pill">📍 ${escapeHTML(match.venue)}</span>` : ""}
+    ${weather ? `<a class="weather-attribution" href="https://weatherkit.apple.com/legal-attribution.html" target="_blank" rel="noopener"> Weather</a>` : ""}
   </div>`;
 }
 

@@ -23,9 +23,10 @@ test("X1 · without the bindings the cron does exactly what it does today", asyn
   const env = {};   // no NOTIFY_QUEUE, no NOTIFY_LEDGER, no APNs secrets
   const ctx = { waitUntil: (p) => calls.push(p) };
   await worker.scheduled({ scheduledTime: Date.now() }, env, ctx);
-  // Four background jobs as before plus v1.9's reveal planner (a no-op without
-  // REVEAL_SLOT), and none of them throws on a bare env.
-  assert.equal(calls.length, 5);
+  // Four background jobs as before, plus v1.9's reveal planner (a no-op without
+  // REVEAL_SLOT) and weather pass (a no-op without its secrets), and none of
+  // them throws on a bare env.
+  assert.equal(calls.length, 6);
   await Promise.all(calls.map((p) => Promise.resolve(p).catch(() => null)));
 });
 

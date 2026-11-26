@@ -331,7 +331,7 @@ test("display only: scoring, settlement, the table and the exports never see it"
   // Every "pick-pill" in the app is inside the row's builder or (v1.9 Slice 2)
   // the matchday screens' — none in a share card, an export or the table.
   const count = (src) => src.split("pick-pill").length - 1;
-  assert.equal(count(APP), ["pickRowOutcome", "pointsPill", "dayTableRow"].reduce((n, fn) => n + count(sourceOf(fn)), 0));
+  assert.equal(count(APP), ["pickRowOutcome", "pointsPill", "dayTableRow", "matchdayRow"].reduce((n, fn) => n + count(sourceOf(fn)), 0));
   for (const fn of ["drawWeeklyPage", "weeklyCardModel", "drawRevealCard", "shareScorecardNow", "roundTableHtml", "seasonTableHtml"]) {
     assert.doesNotMatch(sourceOf(fn), /pick-pill/, fn);
   }

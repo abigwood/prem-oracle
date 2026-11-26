@@ -234,6 +234,15 @@ test("results mode · not held yet: the normal screen, and ONE read for last wee
   assert.deepEqual(app.fetched, ["AAA:13"], "one read, however many paints");
 });
 
+test("results mode · every league gets its card: a league whose last week is not held is fetched, once", async () => {
+  const states = { BBB: { code: "BBB", name: "Bravo", currentPeriod: "14", table: SEASON, lineupFixtureIds: ["pl-1"] } };
+  const app = mounted({ codes: ["AAA", "BBB"], states });
+  assert.equal(app.document.querySelectorAll("[data-results-league]").length, 1);
+  app.paint();
+  await flush();
+  assert.deepEqual(app.fetched, ["BBB:13"]);
+});
+
 test("results mode · web is the same as iOS — nothing in it asks which platform this is", () => {
   const web = mounted({ native: false });
   assert.ok(web.document.querySelector("[data-results-mode] [data-your-results]"));
@@ -318,7 +327,8 @@ test("scorecard · each match: FT score, the viewer first, then the top 8 mates 
   assert.equal(visible[1], "Tom");
   const sam = rows.find((r) => r.textContent.includes("Sam"));
   assert.match(sam.textContent, /No pick/);
-  assert.equal(sam.getAttribute("aria-label"), "Sam, no pick");
+  assert.equal(sam.getAttribute("aria-label"), "Sam, no pick, 0 points");
+  assert.equal(sam.querySelector(".pick-pill-none").textContent, "0");
   assert.equal(block.querySelector("[data-md-more]").textContent, "+ 4 more mates");
   // A miss is a grey 0, a right result a purple +N.
   const p2 = app.document.querySelector("[data-scorecard-match='pl-2']");

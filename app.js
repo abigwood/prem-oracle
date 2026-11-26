@@ -3411,6 +3411,8 @@ function picksView() {
     // week's results are the screen — then that week's finished rows.
     const results = resultsModeFor(state);
     if (results) {
+      // Every league's card, not just this one's: fetch any week not yet held.
+      for (const { code, period } of resultsSnapshot().missing) requestResultsRound(code, period);
       const ids = roundIds(results.round);
       return `${installNotice()}${invite}
         ${head(state.name, pickActionSummary([], { published: false }), [])}
@@ -6891,11 +6893,13 @@ const pointsWords = (pts) => `${pts} point${pts === 1 ? "" : "s"}`;
 function matchdayRow(row, { extra = false, pill = true } = {}) {
   const pick = row.none ? "No pick" : `${row.p1}-${row.p2}`;
   const spoken = `${row.you ? "You" : row.nick}, ${row.none ? "no pick" : `picked ${pick}`}${
-    pill && row.pts != null && !row.none ? `, ${pointsWords(row.pts)}${row.exact ? ", exact score" : ""}` : ""}`;
+    pill && row.none ? ", 0 points" : pill && row.pts != null ? `, ${pointsWords(row.pts)}${row.exact ? ", exact score" : ""}` : ""}`;
   return `<li class="md-row${row.you ? " is-you" : ""}${row.none ? " is-none" : ""}${extra ? " is-extra" : ""}" aria-label="${escapeHTML(spoken)}">
     <span class="md-nick" aria-hidden="true">${escapeHTML(row.nick)}${row.you ? ` <em class="md-you">YOU</em>` : ""}</span>
     <span class="md-pick${row.none ? " is-none" : ""}" aria-hidden="true">${row.none ? "No pick" : escapeHTML(pick)}</span>
-    ${pill && !row.none ? `<span class="md-pill" aria-hidden="true">${pointsPill(row)}</span>` : ""}
+    ${pill ? `<span class="md-pill" aria-hidden="true">${row.none
+    // "No pick" is already said in the pick column; on a finished match it scored an honest 0.
+    ? `<span class="pick-pill pick-pill-none">0</span>` : pointsPill(row)}</span>` : ""}
   </li>`;
 }
 

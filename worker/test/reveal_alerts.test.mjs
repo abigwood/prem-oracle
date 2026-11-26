@@ -593,11 +593,14 @@ test("lock screen · the postponement, podium and host notices say 'Your league'
   assert.deepEqual(postponedMessage("Arsenal v Chelsea", "Matchweek 13", 5), {
     title: "Your league", body: "Arsenal v Chelsea was postponed and no longer counts. Matchweek 13 now scores 5 fixtures." });
   assert.equal(postponedMessage("A v B", "Week 4", 1).body, "A v B was postponed and no longer counts. Week 4 now scores 1 fixture.");
-  assert.deepEqual(podiumMessage(13, [{ place: "gold", nick: "Tom", pts: 12 }, { place: "silver", nick: "Sam", pts: 9 }]), {
-    title: "Your league", body: "Matchweek 13 podium: 🏆 Tom 12 · 🥈 Sam 9" });
+  assert.deepEqual(podiumMessage(13), { title: "Your league", body: "Matchweek 13 is settled. See who made the podium." });
+  // No mate's name or points either: the call is given nothing to print them from.
+  const announce = SOURCE.slice(SOURCE.indexOf("async function podiumAnnouncements("), SOURCE.indexOf("\n}\n", SOURCE.indexOf("async function podiumAnnouncements(")));
+  assert.doesNotMatch(SOURCE.slice(SOURCE.indexOf("export const podiumMessage"), SOURCE.indexOf("});", SOURCE.indexOf("export const podiumMessage"))), /nick|pts|PLACE_EMOJI/);
+  assert.match(announce, /podiumMessage\(target\.matchweek\)/);
   // Each one carries the league code privately, so the tap opens that league.
   assert.match(SOURCE, /postponedMessage\(gone, periodTitleFor\(league, period, weekNo\), change\.fixtureIds\.length\), leagueRoute\(league\.code\)\)/);
-  assert.match(SOURCE, /podiumMessage\(target\.matchweek, podium\), leagueRoute\(league\.code\)\)/);
+  assert.match(SOURCE, /podiumMessage\(target\.matchweek\), leagueRoute\(league\.code\)\)/);
   // And no push anywhere in the worker is built from a league's name.
   for (const call of SOURCE.matchAll(/(?:pushToUids|pushOnce)\([\s\S]*?\);/g)) {
     assert.doesNotMatch(call[0], /league\.name/, call[0].slice(0, 80));

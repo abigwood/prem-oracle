@@ -2838,7 +2838,6 @@ async function planKickoffReminders(env, nowMs = Date.now()) {
 const FALLBACK_LEAD_MS = 24 * 60 * 60 * 1000;
 const SLATE_NOTICE_TTL_S = 60 * 24 * 60 * 60;
 const PODIUM_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000;
-const PLACE_EMOJI = { gold: "🏆", silver: "🥈", bronze: "🥉" };
 
 const kickoffMs = (match) => Date.parse(match.startAt || match.lockAt) || Infinity;
 const byKickoff = (a, b) => kickoffMs(a) - kickoffMs(b) || String(a.id).localeCompare(String(b.id));
@@ -3112,10 +3111,14 @@ function periodIsOpen(period, nowMs, firstKickoffMs) {
   return opens == null || nowMs >= opens;
 }
 
-/** v1.9: the podium says "Your league" on the lock screen, never the league's name. */
-export const podiumMessage = (matchweek, podium) => ({
+/**
+ * v1.9: the podium on the lock screen names nobody — not the league ("Your
+ * league") and not the mates on it, nor their points. Who made it is in the
+ * app, one tap away.
+ */
+export const podiumMessage = (matchweek) => ({
   title: "Your league",
-  body: `Matchweek ${matchweek} podium: ${podium.map((entry) => `${PLACE_EMOJI[entry.place]} ${entry.nick} ${entry.pts}`).join(" · ")}`,
+  body: `Matchweek ${matchweek} is settled. See who made the podium.`,
 });
 
 // One podium announcement per league per matchweek, on the existing APNs path.
@@ -3158,7 +3161,7 @@ async function podiumAnnouncements(env) {
       const podium = computePodium(memberList, target.roundFixtures, picks);
       await env.KV.put(noticeKey, "1", { expirationTtl: SLATE_NOTICE_TTL_S });
       if (!podium.length) continue;
-      await pushToUids(env, memberList.map((member) => member.uid), podiumMessage(target.matchweek, podium), leagueRoute(league.code));
+      await pushToUids(env, memberList.map((member) => member.uid), podiumMessage(target.matchweek), leagueRoute(league.code));
     }
   }
   await kvPut(env, "sweep:settled", settled);

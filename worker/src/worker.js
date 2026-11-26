@@ -52,7 +52,7 @@ import {
   validateSlate,
 } from "./logic.js";
 import { apnsConfigured, sendPush } from "./apns.js";
-import { mergeWeather, weatherConfigured, weatherKey, weatherPass, isDailyPassTick } from "./weather.js";
+import { mergeWeather, withoutWeather, weatherConfigured, weatherKey, weatherPass, isDailyPassTick } from "./weather.js";
 import { NotifyLedger, utcDay } from "./notify/ledger.js";
 import { LeagueRegistrar } from "./league_registrar.js";
 import {
@@ -429,7 +429,10 @@ async function getFixtures(env, request) {
   if (requested && !isCompetition(requested)) return json({ error: "unknown competition" }, 400, env);
   const competition = normaliseCompetition(requested);
   const fresh = url.searchParams.get("refresh") === "1";
-  const list = await fixtures(env, competition, fresh);
+  // v1.9: forecasts only to a client that shows Apple's attribution (?wx=1).
+  const attributes = url.searchParams.get("wx") === "1";
+  const cached = await fixtures(env, competition, fresh);
+  const list = attributes ? cached : withoutWeather(cached);
   const cache = cacheFor(competition);
   const revision = fixtureRevision(list);
   // 467KB was re-downloaded on every launch and every three-minute tick,

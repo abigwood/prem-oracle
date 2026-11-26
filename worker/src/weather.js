@@ -255,7 +255,9 @@ export async function fetchKickoffForecast(env, { coords, startMs }, { fetchImpl
     const at = Date.parse(h?.forecastStart);
     return Number.isFinite(at) && at <= startMs && startMs < at + HOUR_MS;
   });
-  const temp = Number(hour?.temperature);
+  // null/"" would pass Number() as 0 — a forecast of 0°C nobody made.
+  const raw = hour?.temperature;
+  const temp = typeof raw === "number" ? raw : NaN;
   if (!hour || !Number.isFinite(temp)) throw new Error("weatherkit: no forecast for the kick-off hour");
   return { ...describeCondition(hour.conditionCode), temp: Math.round(temp), at: new Date(nowMs).toISOString() };
 }
@@ -347,12 +349,31 @@ function prune(store, nowMs) {
  * cache refresh, so a forecast reaches the client inside the /fixtures answer
  * it already fetches — no new request, no per-request read.
  */
+export const usableWeather = (weather) => !!weather
+  && typeof weather.temp === "number" && Number.isFinite(weather.temp)
+  && typeof weather.icon === "string" && weather.icon !== ""
+  && typeof weather.desc === "string" && weather.desc !== "";
+
+/**
+ * Forecasts are for clients that can attribute them. Builds up to 1.8.1 (and
+ * the web on main) draw match.weather without Apple's Weather mark, which
+ * WeatherKit requires wherever its data shows — so they are sent the list
+ * without it, exactly as before. 1.9 asks with ?wx=1.
+ */
+export const withoutWeather = (list) => list.map((match) => {
+  if (!match || !("weather" in match)) return match;
+  const { weather: _dropped, ...rest } = match;
+  return rest;
+});
+
 export function mergeWeather(list, store) {
   if (!store) return list;
   return list.map((match) => {
     const weather = store[match.id]?.weather;
-    return weather && Number.isFinite(Number(weather.temp))
-      ? { ...match, weather: { icon: weather.icon, temp: Number(weather.temp), desc: weather.desc, at: weather.at } }
+    // Only a whole forecast is ever sent: a number for the temperature and the
+    // icon and words to go with it. Anything less is no pill, never "undefined".
+    return usableWeather(weather)
+      ? { ...match, weather: { icon: weather.icon, temp: weather.temp, desc: weather.desc, at: weather.at } }
       : match;
   });
 }

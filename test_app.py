@@ -761,7 +761,7 @@ class CompetitionAppTests(unittest.TestCase):
     def test_the_app_loads_every_selected_competition(self):
         # The URL is versioned by the feed's revision now, not the clock, so
         # every layer of cache can actually hold it.
-        self.assertIn("const query = [`competition=${code}`];", self.app)
+        self.assertIn("const query = [`competition=${code}`, \"wx=1\"];", self.app)
         self.assertIn('query.push(`rev=${encodeURIComponent(revision)}`)', self.app)
         self.assertIn("competitionMeta(code).data", self.app)
         self.assertIn('data: "data/fixtures-elc.json"', self.app)

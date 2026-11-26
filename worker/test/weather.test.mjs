@@ -10,7 +10,7 @@ import { readFileSync } from "node:fs";
 import worker, { dailyWeather } from "../src/worker.js";
 import {
   STADIUMS, buildWeatherToken, dueForecasts, isDailyPassTick, ukParts,
-  weatherCallsKey, weatherKey, weatherPass,
+  weatherCallsKey, weatherKey, weatherPass, mergeWeather, usableWeather,
 } from "../src/weather.js";
 
 const ROOT = new URL("../../", import.meta.url);
@@ -186,12 +186,31 @@ test("absent secrets: no fetch, no KV read, no weather on /fixtures", async () =
     assert.ok(!kv.ops.some(([, key]) => key.startsWith("weather:")), "read weather:<COMP> with the feature off");
     // On: the same stored forecast rides on the fixture the client already fetches.
     const on = { ...(await env()), FIXTURES_URL: "https://example.com/f.json", KV: kv };
-    const served = await (await worker.fetch(new Request("https://w.test/fixtures?competition=PL&refresh=1"), on)).json();
+    const served = await (await worker.fetch(new Request("https://w.test/fixtures?competition=PL&refresh=1&wx=1"), on)).json();
     assert.deepEqual(served.fixtures[0].weather, { icon: "☀️", temp: 9, desc: "Clear", at: "x" });
     assert.notEqual(served.revision, body.revision, "a forecast must move the revision");
+    // 1.8.1 and the web on main ask without wx=1: they draw match.weather with
+    // no Apple Weather mark, so they are sent exactly what they got before —
+    // no weather field, and the revision a forecast cannot move.
+    const old = await (await worker.fetch(new Request("https://w.test/fixtures?competition=PL&refresh=1"), on)).json();
+    assert.equal("weather" in old.fixtures[0], false);
+    assert.equal(old.revision, body.revision);
+    // And the 1.9 client always asks with it.
+    assert.match(readFileSync(new URL("../../app.js", import.meta.url), "utf8"), /const query = \[`competition=\$\{code\}`, "wx=1"\];/);
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test("only a whole forecast is ever served: no null-as-0°C, no missing icon or words", async () => {
+  const m = match("m1", "Anfield", "2026-11-28T15:00:00Z");
+  const served = (weather) => mergeWeather([m], { m1: { weather } })[0].weather;
+  for (const bad of [{ temp: null, icon: "☀️", desc: "Clear" }, { temp: "9", icon: "☀️", desc: "Clear" },
+    { temp: 9, desc: "Clear" }, { temp: 9, icon: "☀️" }, { temp: NaN, icon: "☀️", desc: "Clear" }, null]) {
+    assert.equal(served(bad), undefined, JSON.stringify(bad));
+  }
+  assert.deepEqual(served({ temp: 0, icon: "❄️", desc: "Snow", at: "x" }), { temp: 0, icon: "❄️", desc: "Snow", at: "x" });
+  assert.equal(usableWeather({ temp: -2, icon: "❄️", desc: "Snow" }), true);
 });
 
 test("only the 06:00 tick reaches WeatherKit, and only for the 7-days-out and today fixtures", async () => {

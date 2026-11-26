@@ -359,7 +359,8 @@ function rememberRevision(code, revision) {
 
 function fixturesUrl(code, refresh) {
   const revision = fixtureRevisions[code];
-  const query = [`competition=${code}`];
+  // wx=1: this build shows Apple's Weather mark, so the worker may send forecasts.
+  const query = [`competition=${code}`, "wx=1"];
   if (refresh) query.push("refresh=1");
   else if (revision) query.push(`rev=${encodeURIComponent(revision)}`);
   return `${API}/fixtures?${query.join("&")}`;

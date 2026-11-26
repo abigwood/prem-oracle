@@ -1,6 +1,6 @@
 const SEASON_START = new Date("2026-08-21T20:00:00+01:00");
 const SEASON_START_DATE = "2026-08-21";
-const APP_BUILD = "20261125c";
+const APP_BUILD = "20261126a";
 const API = window.PREM_API || null;
 // Canonical public home of the web app. Inside the Capacitor shell the page is
 // served from premoracle://localhost, so location.origin can never be used to
@@ -359,7 +359,8 @@ function rememberRevision(code, revision) {
 
 function fixturesUrl(code, refresh) {
   const revision = fixtureRevisions[code];
-  const query = [`competition=${code}`];
+  // wx=1: this build shows Apple's Weather mark, so the worker may send forecasts.
+  const query = [`competition=${code}`, "wx=1"];
   if (refresh) query.push("refresh=1");
   else if (revision) query.push(`rev=${encodeURIComponent(revision)}`);
   return `${API}/fixtures?${query.join("&")}`;

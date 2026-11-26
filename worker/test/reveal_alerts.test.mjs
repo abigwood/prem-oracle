@@ -9,7 +9,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import worker, {
-  planRevealSlots, planMatchdayResults, deliverAlertJob, weekSetMessage,
+  planRevealSlots, planMatchdayResults, deliverAlertJob, weekSetMessage, postponedMessage, podiumMessage,
 } from "../src/worker.js";
 import {
   RevealSlot, slotName, dayName, ukDate, ukMidnightMs, resultsDeadlineMs, ukWeekday,
@@ -586,6 +586,26 @@ test("E · 'the week is set' and 'Line-up updated' never put the league name on 
   for (const fn of ["async function autoPublish(", "async function applyFallback(", "async function publishSlate("]) {
     const body = SOURCE.slice(SOURCE.indexOf(fn), SOURCE.indexOf("\n}\n", SOURCE.indexOf(fn)));
     assert.ok(!/pushToUids[^;]*league\.name|pushOnce[^;]*league\.name/.test(body), `${fn} still names the league`);
+  }
+});
+
+test("lock screen · the postponement, podium and host notices say 'Your league', never its name", () => {
+  assert.deepEqual(postponedMessage("Arsenal v Chelsea", "Matchweek 13", 5), {
+    title: "Your league", body: "Arsenal v Chelsea was postponed and no longer counts. Matchweek 13 now scores 5 fixtures." });
+  assert.equal(postponedMessage("A v B", "Week 4", 1).body, "A v B was postponed and no longer counts. Week 4 now scores 1 fixture.");
+  assert.deepEqual(podiumMessage(13, [{ place: "gold", nick: "Tom", pts: 12 }, { place: "silver", nick: "Sam", pts: 9 }]), {
+    title: "Your league", body: "Matchweek 13 podium: 🏆 Tom 12 · 🥈 Sam 9" });
+  // Each one carries the league code privately, so the tap opens that league.
+  assert.match(SOURCE, /postponedMessage\(gone, periodTitleFor\(league, period, weekNo\), change\.fixtureIds\.length\), leagueRoute\(league\.code\)\)/);
+  assert.match(SOURCE, /podiumMessage\(target\.matchweek, podium\), leagueRoute\(league\.code\)\)/);
+  // And no push anywhere in the worker is built from a league's name.
+  for (const call of SOURCE.matchAll(/(?:pushToUids|pushOnce)\([\s\S]*?\);/g)) {
+    assert.doesNotMatch(call[0], /league\.name/, call[0].slice(0, 80));
+  }
+  for (const fn of ["async function remindHost(", "async function reconcilePostponements(", "async function podiumAnnouncements(", "export function postponedMessage(", "export const podiumMessage"]) {
+    const body = SOURCE.slice(SOURCE.indexOf(fn), SOURCE.indexOf("\n}\n", SOURCE.indexOf(fn)) + 3);
+    assert.ok(body.length > 20, fn);
+    assert.doesNotMatch(body.replace(/\/\/.*|\*.*$/gm, ""), /league\.name/, fn);
   }
 });
 

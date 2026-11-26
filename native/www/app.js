@@ -1860,7 +1860,7 @@ function matchIntelStrip(match) {
   return `<div class="match-intel-strip">
     ${weather ? `<span class="intel-pill weather-pill" title="${escapeHTML(weather.desc)}">${escapeHTML(weather.icon)} ${weather.temp}°C <em>Forecast</em></span>` : ""}
     ${match.venue ? `<span class="intel-pill venue-pill">📍 ${escapeHTML(match.venue)}</span>` : ""}
-    ${weather ? `<a class="weather-attribution" href="https://weatherkit.apple.com/legal-attribution.html" target="_blank" rel="noopener"> Weather</a>` : ""}
+    ${weather ? `<a class="weather-attribution" href="https://weatherkit.apple.com/legal-attribution.html" target="_blank" rel="noopener"><img src="icons/weather/Apple_Weather_blk_en_1X_090122.png" srcset="icons/weather/Apple_Weather_blk_en_2X_090122.png 2x, icons/weather/Apple_Weather_blk_en_3X_090122.png 3x" width="77" height="14" alt="Apple Weather"></a>` : ""}
   </div>`;
 }
 
@@ -3298,7 +3298,7 @@ const pickSummarySkeleton = (shape = null) => {
 const picksLoadFailedCard = () =>
   `<div class="launch-card picks-load-failed" role="status" data-picks-load-failed>
       <strong>Couldn\u2019t load your picks</strong>
-      <p>Check your connection, then pull down to try again. Your saved picks are safe.</p>
+      <p>Check your connection, then tap Try again. Your saved picks are safe.</p>
       <button type="button" class="primary" data-retry-picks>Try again</button>
     </div>`;
 

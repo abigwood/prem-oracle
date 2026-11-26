@@ -180,7 +180,7 @@ const oneCard = (app) => {
   assert.equal(cards.length, 1, `${cards.length} failure cards`);
   const card = cards[0];
   assert.equal(card.querySelector("strong").textContent, "Couldn’t load your picks");
-  assert.equal(card.querySelector("p").textContent, "Check your connection, then pull down to try again. Your saved picks are safe.");
+  assert.equal(card.querySelector("p").textContent, "Check your connection, then tap Try again. Your saved picks are safe.");
   const retry = card.querySelector("button[data-retry-picks]");
   assert.equal(retry.textContent, "Try again");
   assert.equal(card.getAttribute("role"), "status");

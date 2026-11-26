@@ -39,7 +39,17 @@ test("a real forecast reads '<icon> <temp>°C Forecast', with Apple's attributio
   const mark = d.querySelector("a.weather-attribution");
   assert.ok(mark, "a forecast without Apple's attribution");
   assert.equal(mark.getAttribute("href"), LEGAL);
-  assert.equal(mark.textContent, " Weather");
+  // Apple's official mark as an image, so it renders on every browser — never
+  // the U+F8FF logo character, which only Apple fonts draw.
+  const img = mark.querySelector("img");
+  assert.equal(img.getAttribute("alt"), "Apple Weather");
+  assert.equal(img.getAttribute("src"), "icons/weather/Apple_Weather_blk_en_1X_090122.png");
+  assert.match(img.getAttribute("srcset"), /Apple_Weather_blk_en_2X_090122\.png 2x, icons\/weather\/Apple_Weather_blk_en_3X_090122\.png 3x/);
+  assert.doesNotMatch(APP, /\uF8FF/);
+  for (const scale of ["1X", "2X", "3X"]) {
+    const png = readFileSync(new URL(`../icons/weather/Apple_Weather_blk_en_${scale}_090122.png`, import.meta.url));
+    assert.equal(png.subarray(1, 4).toString(), "PNG", `${scale} mark missing`);
+  }
   assert.equal(mark.getAttribute("rel"), "noopener");
 });
 

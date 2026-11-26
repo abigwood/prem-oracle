@@ -1402,7 +1402,9 @@ class WeeklyLoopTests(unittest.TestCase):
     def test_the_host_nudge_copy_splits_on_the_league_shape(self):
         remind = self.worker[self.worker.index("async function remindHost"):]
         remind = remind[:remind.index("/**\n * Resolves what a league")]
-        self.assertIn("`Set this week's fixtures for ${league.name}`", remind)
+        # v1.9: the push never names the league on the lock screen.
+        self.assertIn('"Set this week\'s fixtures for your league"', remind)
+        self.assertNotIn("league.name", remind)
         self.assertIn("`Matchweek ${period} is open — set your fixtures`", remind)
         self.assertIn("isMixedLeague(league)", remind)
         # The same split in the app's own host banner.

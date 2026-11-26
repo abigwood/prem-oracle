@@ -2893,11 +2893,12 @@ async function pushOnce(env, pushType, leagueId, periodKey, uids, body, route = 
  * window and has no number to give, so naming one would be a lie.
  */
 async function remindHost(env, league, period, weekNo = null) {
+  // v1.9: the lock screen says "your league", never the name (the §E rule).
   const body = isMixedLeague(league)
-    ? `Set this week's fixtures for ${league.name}`
+    ? "Set this week's fixtures for your league"
     : `Matchweek ${period} is open — set your fixtures`;
   void weekNo;   // the mixed copy deliberately says "this week", not a number
-  await pushOnce(env, "slate-open", league.code, period, [league.owner], body);
+  await pushOnce(env, "slate-open", league.code, period, [league.owner], body, leagueRoute(league.code));
 }
 
 /**
@@ -3018,7 +3019,18 @@ async function reconcilePostponements(env, league, slate, period, roundFixtures,
   const gone = change.dropped.map((id) => fixtureLabel(byId.get(id))).join(", ");
   const memberList = await members(env, league);
   await pushToUids(env, memberList.map((member) => member.uid),
-    `${gone} was postponed and no longer counts in ${league.name}. ${periodTitleFor(league, period, weekNo)} now scores ${change.fixtureIds.length} fixtures.`);
+    postponedMessage(gone, periodTitleFor(league, period, weekNo), change.fixtureIds.length), leagueRoute(league.code));
+}
+
+/**
+ * v1.9: a postponement, as the lock screen says it — "Your league", never the
+ * league's own name (the §E rule); the code rides privately in `po.l`.
+ */
+export function postponedMessage(gone, periodTitle, count) {
+  return {
+    title: "Your league",
+    body: `${gone} was postponed and no longer counts. ${periodTitle} now scores ${count} ${count === 1 ? "fixture" : "fixtures"}.`,
+  };
 }
 
 /**
@@ -3100,8 +3112,11 @@ function periodIsOpen(period, nowMs, firstKickoffMs) {
   return opens == null || nowMs >= opens;
 }
 
-const podiumMessage = (league, matchweek, podium) =>
-  `Matchweek ${matchweek} podium in ${league.name}: ${podium.map((entry) => `${PLACE_EMOJI[entry.place]} ${entry.nick} ${entry.pts}`).join(" · ")}`;
+/** v1.9: the podium says "Your league" on the lock screen, never the league's name. */
+export const podiumMessage = (matchweek, podium) => ({
+  title: "Your league",
+  body: `Matchweek ${matchweek} podium: ${podium.map((entry) => `${PLACE_EMOJI[entry.place]} ${entry.nick} ${entry.pts}`).join(" · ")}`,
+});
 
 // One podium announcement per league per matchweek, on the existing APNs path.
 // The whole sweep is skipped unless the settled-fixture count has moved since
@@ -3143,7 +3158,7 @@ async function podiumAnnouncements(env) {
       const podium = computePodium(memberList, target.roundFixtures, picks);
       await env.KV.put(noticeKey, "1", { expirationTtl: SLATE_NOTICE_TTL_S });
       if (!podium.length) continue;
-      await pushToUids(env, memberList.map((member) => member.uid), podiumMessage(league, target.matchweek, podium));
+      await pushToUids(env, memberList.map((member) => member.uid), podiumMessage(target.matchweek, podium), leagueRoute(league.code));
     }
   }
   await kvPut(env, "sweep:settled", settled);

@@ -517,7 +517,7 @@ const CARD_NAMES = ["CARD_W_PX", "CARD_H_PX", "CARD_W", "CARD_HEAD_H", "CARD_HER
   "seasonMovement", "movementMark", "cardMovementText", "cardMovementWidth", "drawCardMovement",
   "slateIdsOf", "weeklyMovement", "settlementWindows", "windowPointsByUid",
   "weeklyFinalMismatchLines", "noteWeeklyFinalMismatch", "seasonShareFreshness", "weeklySharePublished", "shareCardState",
-  "weeklyCardCaption", "podiumCounts", "weeklyRanks", "sharedRankByUid", "winnerNames",
+  "weeklyCardCaption", "podiumCounts", "weeklyRanks", "sharedRankByUid", "winnerNames", "weekLeaders", "cardHasMovement",
   "finalScore", "isVoidFixture", "isPostponed", "VOID_STATUSES",
   "CARD", "CARD_PAD", "cardFont", "cardDate", "sentenceCase",
   "CARD_TYPE_FLOOR", "CARD_SECOND_FLOOR", "CARD_MIN_ROW", "cardHonoursParts", "CARD_HONOURS_SEP", "cardHonoursWidth", "cardHonoursSize", "drawCardCellSplit", "CARD_MOVE_GAP", "CARD_MOVE_COLOUR", "CARD_SEASON_MAX_ROWS", "CARD_ROW_TWO_LINE", "CARD_TABLE_LEAD", 
@@ -660,18 +660,34 @@ test("C-B · a not-started week crowns nobody and leads nobody", () => {
 test("C-B · an in-progress week may name a leader, on settled points", () => {
   const s = cardBox();
   const model = s.weeklyCardModel({ code: "AAA", name: "Sunday Six" }, wround(3, slots(2)));
-  assert.equal(model.heroEyebrow, "LEADING ON SETTLED POINTS");
+  // Mid-week: "AS IT STANDS" and who is leading — never "winner" or "champion".
+  assert.equal(model.heroEyebrow, "AS IT STANDS");
   assert.equal(model.heroName, "Player 1");
-  assert.match(model.heroLine, /in progress · after 2 of 6/);
-  assert.ok(!/champion/i.test(model.heroEyebrow + model.heroLine));
+  assert.match(model.heroLine, /^Leading Matchweek 3 · \d+ pts$/);
+  assert.match(model.headline, /in progress · after 2 of 6/, "the progress still travels in the headline");
+  assert.ok(!/champion|winner/i.test(model.heroEyebrow + model.heroLine));
 });
 
-test("C-B · only a Final week names a champion", () => {
+test("C-B · only a Final week names a winner", () => {
   const s = cardBox();
   const model = s.weeklyCardModel({ code: "AAA", name: "Sunday Six" }, wround(3, slots(6), true));
-  assert.match(model.heroEyebrow, /CHAMPION/);
-  assert.match(model.heroLine, /champion/);
+  assert.equal(model.heroEyebrow, "MATCHWEEK 3 WINNER");
+  assert.equal(model.heroLine, "23 pts");
   assert.match(model.headline, /Week 3 · Final/);
+  // A mixed league's own wording: "Week N".
+  const mixed = s.weeklyCardModel({ code: "AAA", name: "Sunday Six" }, { ...wround(3, slots(6), true), matchday: null, period: "3" });
+  assert.match(mixed.heroEyebrow, /WINNER$/);
+});
+
+test("C-B · a mid-week tie for the lead names both leaders, never broken by alphabet", () => {
+  const s = cardBox();
+  const round = wround(3, slots(2));
+  round.table = [{ uid: "u0", nick: "Bex", pts: 5, exact: 1 }, { uid: "u1", nick: "Adam", pts: 5, exact: 0 }, { uid: "u2", nick: "Cal", pts: 2, exact: 0 }];
+  const model = s.weeklyCardModel({ code: "AAA", name: "Sunday Six" }, round);
+  assert.equal(model.heroEyebrow, "AS IT STANDS");
+  assert.equal(model.heroName, "Bex & Adam");
+  assert.equal(model.heroLine, "Leading Matchweek 3 · 5 pts");
+  assert.match(s.weeklyCardCaption({ code: "AAA", name: "Sunday Six" }, round), /Bex & Adam leading on 5/);
 });
 
 test("C-B · the caption says nothing-settled ONLY at 0 of M", () => {

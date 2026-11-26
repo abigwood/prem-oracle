@@ -482,7 +482,7 @@ test("320pt · reveal and scorecard rows never wrap: names ellipsise, picks and 
 
 const PROFILE = HTML.slice(HTML.indexOf('<dialog id="profileDialog">'), HTML.indexOf("</dialog>", HTML.indexOf('<dialog id="profileDialog">')) + 9);
 
-function settings({ native = true, permission = "granted", answer = {}, afterAsk = "granted" } = {}) {
+function settings({ native = true, permission = "granted", answer = {}, afterAsk = "granted", api: apiStub = null, prefs = null } = {}) {
   const dom = new JSDOM(`<!doctype html><body>${PROFILE}</body>`);
   const { document } = dom.window;
   const posts = [];
@@ -493,15 +493,16 @@ function settings({ native = true, permission = "granted", answer = {}, afterAsk
     requestPermissions: async () => { asked.push("request"); permission = afterAsk; return { receive: afterAsk }; },
     register: async () => { asked.push("register"); },
   };
-  const box = load(["applyAlertPrefs", "loadAlertPrefs", "pushPlugin", "pushPermission", "ensurePushPermission",
+  const box = load(["storeAlertPrefs", "mergedOffers", "applyAlertPrefs", "changeAlertPrefs", "syncAlertPrefs", "loadAlertPrefs", "pushPlugin", "pushPermission", "ensurePushPermission",
     "setAlertPref", "retireAlertOffer", "ALERT_OFFER_COPY", "alertOffer", "ALERT_SWITCHES", "renderMatchdayAlerts",
     "syncAlertCheckboxes", "renderNotificationsDenied"], {
     document, API: "https://api.test", STORAGE: { alertPrefs: "ap", notifyAsk: "ask" },
     readJSON: () => null, isNativeApp: () => native,
-    alertPrefs: { reveal: false, results: false, offers: { reveal: false, results: false }, loaded: false },
+    alertPrefs: prefs || { reveal: false, results: false, offers: { reveal: false, results: false }, loaded: false, updatedAt: 0, dirty: false },
+    alertPrefsRev: 0, alertPrefsSync: null, alertPrefsAgain: false,
     window: { capacitorPushNotifications: { PushNotifications: push } },
     localStorage: { getItem: (k) => storage.get(k) ?? null, setItem: (k, v) => storage.set(k, String(v)) },
-    api: async (path, body) => {
+    api: apiStub ? (path, body) => { if (body) posts.push(plain(body)); return apiStub(path, body); } : async (path, body) => {
       if (body) { posts.push(plain(body)); return { reveal: false, results: false, offers: {}, ...answer, ...body, offers: { ...(answer.offers || {}), ...(body.offers || {}) } }; }
       return { reveal: false, results: false, offers: { reveal: false, results: false }, ...answer };
     },
@@ -541,12 +542,16 @@ test("Profile · iOS notifications denied: the message, the Settings button, and
   assert.match(sourceOf("openIosSettings"), /"app-settings:"/);
 });
 
-test("Profile · ticking a box when iOS was never asked asks on that tap, then saves only that switch", async () => {
+test("Profile · ticking a box when iOS was never asked asks on that tap, then saves the whole state", async () => {
   const s = settings({ permission: "prompt" });
   await s.box.renderMatchdayAlerts();
   assert.equal(await s.box.setAlertPref("reveal", true), true);
+  await flush();
   assert.deepEqual(s.asked, ["request", "register"]);
-  assert.deepEqual(s.posts, [{ uid: "u1", reveal: true }], "sent more than the one switch");
+  assert.equal(s.posts.length, 1);
+  const { updatedAt, ...sent } = s.posts[0];
+  assert.deepEqual(sent, { uid: "u1", offers: { reveal: false, results: false }, reveal: true, results: false });
+  assert.ok(updatedAt > 0, "a choice carries when it was made");
   assert.equal(s.document.querySelector("[data-alert-pref='reveal']").checked, true);
   // Refused at the prompt: nothing saved, the box falls back.
   const no = settings({ permission: "prompt", afterAsk: "denied" });
@@ -583,13 +588,106 @@ test("offers · once, in context: native, prefs known, switch off, never accepte
 test("offers · Turn on or × retires it on the server, with the prefs (so a reinstall keeps it)", async () => {
   const s = settings();
   await s.box.retireAlertOffer("results");
-  assert.deepEqual(s.posts, [{ uid: "u1", offers: { results: true } }]);
+  // Never chosen on this device: only the offers go, so a dismissal cannot
+  // switch off an alert another device turned on.
+  assert.deepEqual(s.posts, [{ uid: "u1", offers: { reveal: false, results: true } }]);
   assert.equal(s.box.alertPrefs.offers.results, true);
   // Turn on ticks the very same Profile switch, then retires the offer.
   assert.match(APP, /setAlertPref\(kind, true\)\.finally\(\(\) => retireAlertOffer\(kind\)\);/);
   // The offers sit under the first reveal card and the scorecard.
   assert.match(sourceOf("revealCardView"), /\$\{alertOffer\("reveal"\)\}/);
   assert.match(sourceOf("scorecardScreenView"), /\$\{alertOffer\("results"\)\}/);
+});
+
+// --- build 37 · the boxes stick ---------------------------------------------------
+
+/** An api whose answers the test releases one by one. */
+function gatedApi(serverFor) {
+  const pending = [];
+  const fn = (path, body) => new Promise((resolve, reject) => pending.push({ path, body: plain(body), resolve, reject }));
+  fn.pending = pending;
+  fn.answer = async (i = 0) => { const p = pending.splice(i, 1)[0]; p.resolve(serverFor(p)); await flush(); await flush(); };
+  fn.fail = async (i = 0) => { const p = pending.splice(i, 1)[0]; p.reject(new Error("offline")); await flush(); await flush(); };
+  return fn;
+}
+const boxes = (s) => [...s.document.querySelectorAll("[data-alert-pref]")].map((b) => b.checked);
+const echo = ({ body }) => ({ ...body, offers: { reveal: false, results: false, ...(body?.offers || {}) }, stale: false });
+
+test("build 37 · rapid tick of both boxes: one save in flight, the second carries both, nothing unticks", async () => {
+  const api = gatedApi(({ body }) => echo({ body }));
+  const s = settings({ api, prefs: { reveal: false, results: false, offers: { reveal: false, results: false }, loaded: true, updatedAt: 0, dirty: false } });
+  await s.box.renderMatchdayAlerts();
+  api.pending.length = 0; // the render's own GET is not under test here
+  await s.box.setAlertPref("reveal", true);
+  await s.box.setAlertPref("results", true);
+  assert.equal(api.pending.length, 1, "two saves in flight at once");
+  assert.deepEqual(boxes(s), [true, true]);
+  // The first answer only knows about reveal — it must not untick results.
+  await api.answer();
+  assert.deepEqual(boxes(s), [true, true], "an in-flight answer unticked the other box");
+  assert.equal(api.pending.length, 1, "the newer choice was never sent");
+  assert.deepEqual([api.pending[0].body.reveal, api.pending[0].body.results], [true, true], "latest save is the whole state");
+  await api.answer();
+  assert.deepEqual(boxes(s), [true, true]);
+  assert.equal(s.box.alertPrefs.dirty, false);
+  assert.equal(api.pending.length, 0);
+});
+
+test("build 37 · tick, close, reopen within 5s / 60s: a stale GET never unticks a box", async () => {
+  const api = gatedApi(({ path, body }) => body ? echo({ body })
+    : { reveal: false, results: false, offers: { reveal: false, results: false }, updatedAt: 1 }); // stale server copy
+  const s = settings({ api, prefs: { reveal: false, results: false, offers: { reveal: false, results: false }, loaded: true, updatedAt: 0, dirty: false } });
+  await s.box.renderMatchdayAlerts(); api.pending.length = 0;
+  await s.box.setAlertPref("reveal", true);
+  await s.box.setAlertPref("results", true);
+  await api.answer(); await api.answer();
+  for (const label of ["5s", "60s"]) {
+    await s.box.renderMatchdayAlerts();            // reopen Profile: renders from local, then GETs
+    assert.deepEqual(boxes(s), [true, true], `reopen ${label} painted unticked`);
+    await api.answer();                            // the stale GET arrives
+    assert.deepEqual(boxes(s), [true, true], `a stale GET (${label}) unticked a box`);
+  }
+});
+
+test("build 37 · a GET answering while a save is in flight is ignored", async () => {
+  const api = gatedApi(({ body }) => body ? echo({ body }) : { reveal: false, results: false, offers: {}, updatedAt: 9e15 });
+  const s = settings({ api, prefs: { reveal: false, results: false, offers: { reveal: false, results: false }, loaded: true, updatedAt: 0, dirty: false } });
+  await s.box.renderMatchdayAlerts();               // GET pending (index 0)
+  await s.box.setAlertPref("reveal", true);         // POST pending (index 1)
+  await api.answer(0);                              // the GET lands first, claiming to be newer
+  assert.deepEqual(boxes(s), [true, false], "the device's own newer choice was overwritten");
+});
+
+test("build 37 · another device chose later: the server's newer choice is adopted", async () => {
+  const api = gatedApi(({ body }) => body ? { reveal: false, results: true, offers: {}, updatedAt: 9e15, stale: true } : null);
+  const s = settings({ api, prefs: { reveal: false, results: false, offers: { reveal: false, results: false }, loaded: true, updatedAt: 5, dirty: false } });
+  await s.box.renderMatchdayAlerts(); api.pending.length = 0;
+  await s.box.setAlertPref("reveal", true);
+  await api.answer();
+  assert.deepEqual(boxes(s), [false, true]);
+  // And a fresh GET from a newer device is adopted on open.
+  const api2 = gatedApi(() => ({ reveal: true, results: true, offers: {}, updatedAt: 100 }));
+  const t = settings({ api: api2, prefs: { reveal: false, results: false, offers: { reveal: false, results: false }, loaded: true, updatedAt: 50, dirty: false } });
+  await t.box.renderMatchdayAlerts();
+  await api2.answer();
+  assert.deepEqual(boxes(t), [true, true]);
+});
+
+test("build 37 · offline tick: kept ticked, sent on the next open instead of a GET, and on reconnect", async () => {
+  const api = gatedApi(({ body }) => echo({ body }));
+  const s = settings({ api, prefs: { reveal: false, results: false, offers: { reveal: false, results: false }, loaded: true, updatedAt: 0, dirty: false } });
+  await s.box.renderMatchdayAlerts(); api.pending.length = 0;
+  await s.box.setAlertPref("reveal", true);
+  await api.fail();                                  // offline
+  assert.deepEqual(boxes(s), [true, false]);
+  assert.equal(s.box.alertPrefs.dirty, true);
+  assert.equal(JSON.parse(s.storage.get("ap")).dirty, true, "the unsaved choice survives a relaunch");
+  await s.box.renderMatchdayAlerts();                // reopen: must POST the choice, not GET over it
+  assert.equal(api.pending.length, 1);
+  assert.equal(api.pending[0].body.reveal, true);
+  await api.answer();
+  assert.equal(s.box.alertPrefs.dirty, false);
+  assert.match(APP, /addEventListener\("online", \(\) => \{ if \(alertPrefs\.dirty\) syncAlertPrefs\(\); \}\)/);
 });
 
 // --- F5 · the finished row's grey ---------------------------------------------------

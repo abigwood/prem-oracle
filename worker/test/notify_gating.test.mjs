@@ -82,8 +82,9 @@ test("B2 · the reviewed bindings are configured, and named exactly", () => {
   // LeagueRegistrar — and nothing else; a second producer would be a second
   // name for the same switch, and a second consumer would double every delivery.
   assert.equal((active.match(/name = "NOTIFY_LEDGER"\nclass_name = "NotifyLedger"/g) || []).length, 1);
-  // v1.9 Slice 2 adds a third — RevealSlot — and nothing else.
-  assert.equal(active.match(/\[\[durable_objects\.bindings\]\]/g).length, 3);
+  // v1.9 Slice 2 adds a third — RevealSlot — and build 37 a fourth — PrefsStore.
+  assert.equal(active.match(/\[\[durable_objects\.bindings\]\]/g).length, 4);
+  assert.match(active, /name = "PREFS_STORE"\nclass_name = "PrefsStore"/);
   assert.match(active, /name = "LEAGUE_REGISTRAR"\nclass_name = "LeagueRegistrar"/);
   assert.match(active, /name = "REVEAL_SLOT"\nclass_name = "RevealSlot"/);
   assert.equal(active.match(/\[\[queues\.producers\]\]/g).length, 1);
@@ -115,9 +116,10 @@ test("B2 · activation adds a binding, never a second migration", () => {
   const active = directives();
   assert.match(active, /\[\[migrations\]\]/);
   assert.match(active, /new_sqlite_classes = \["NotifyLedger"\]/);
-  // v1 (NotifyLedger), v2 (LeagueRegistrar), v3 (RevealSlot) — all additive.
-  assert.equal(active.match(/\[\[migrations\]\]/g).length, 3);
-  assert.equal(active.match(/^tag = /gm).length, 3);
+  // v1 (NotifyLedger), v2 (LeagueRegistrar), v3 (RevealSlot), v4 (PrefsStore) — all additive.
+  assert.equal(active.match(/\[\[migrations\]\]/g).length, 4);
+  assert.equal(active.match(/^tag = /gm).length, 4);
+  assert.match(active, /tag = "v4"\nnew_sqlite_classes = \["PrefsStore"\]/);
   assert.match(active, /tag = "v3"\nnew_sqlite_classes = \["RevealSlot"\]/);
   assert.match(active, /tag = "v1"/, "the applied migration tag changed");
   assert.match(active, /tag = "v2"\nnew_sqlite_classes = \["LeagueRegistrar"\]/);

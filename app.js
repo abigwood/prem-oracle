@@ -3644,6 +3644,17 @@ function leagueCompetitionNames(state) {
   return codes.map((code) => competitionMeta(code).name).join(" + ");
 }
 
+/**
+ * Who leads a week still in progress: everyone level on the top score, joined
+ * as the winners are ("A & B"), so a tie is never broken by alphabet.
+ */
+function weekLeaders(round) {
+  const table = round?.table || [];
+  const pts = table[0]?.pts ?? 0;
+  const names = table.filter((row) => (row.pts ?? 0) === pts).map((row) => row.nick).filter(Boolean).join(" & ");
+  return { names, pts };
+}
+
 function winnerNames(round) {
   return (round?.winners || [])
     .map((winnerUid) => (round.table || []).find((row) => row.uid === winnerUid)?.nick)
@@ -5042,13 +5053,20 @@ function drawCardCellSplit(ctx, y, height) {
   ctx.fillRect(CARD_COL.split, y, 2, height);
 }
 
-function drawCardTableHead(ctx, y) {
+/**
+ * Whether any row moved. A MOVE heading over a column of nothing (no
+ * comparison yet) or of dashes only (nobody moved) is a column with nothing
+ * to say, so the card leaves it out — on every page alike.
+ */
+const cardHasMovement = (rows) => (rows || []).some((row) => row.movement != null && Number(row.movement) !== 0);
+
+function drawCardTableHead(ctx, y, { move = true } = {}) {
   ctx.fillStyle = CARD.muted;
   ctx.font = cardFont(800, 22);
   ctx.fillText("PLAYER", CARD_COL.name, y + 36);
   // Centred on its own column, over the markers it names.
   ctx.textAlign = "center";
-  ctx.fillText("MOVE", CARD_COL.move, y + 36);
+  if (move) ctx.fillText("MOVE", CARD_COL.move, y + 36);
   ctx.textAlign = "right";
   ctx.fillText("EXACT", CARD_COL.exact, y + 36);
   ctx.fillText("PTS", CARD_COL.pts, y + 36);
@@ -5186,7 +5204,8 @@ function weeklyCardModel(state, round) {
   // "Started" means something has actually settled. Until then there are no
   // settled points to lead on.
   const started = status.terminal > 0;
-  const leader = started ? ((round.table || [])[0] || null) : null;
+  const leaders = started ? weekLeaders(round) : null;
+  const weekCaps = /\d/.test(week) ? week.toUpperCase() : "WEEK";
   return {
     league: state.name,
     // The honest state, not a claim of finality (M9).
@@ -5195,14 +5214,18 @@ function weeklyCardModel(state, round) {
     // before a ball has settled is not a smaller lie than crowning a champion:
     // the order at 0-0-0 is alphabetical, and the card would be inventing a
     // story out of a tie-break.
+    //
+    // A winner is named only once the week is complete; until then the box
+    // says "AS IT STANDS" and who is leading — never "winner" mid-week.
+    // The week is the league's own wording (Matchweek N / Week N).
     heroEyebrow: final
-      ? (champions.length > 1 ? "JOINT MATCHWEEK CHAMPIONS" : "MATCHWEEK CHAMPION")
-      : started ? "LEADING ON SETTLED POINTS" : "NOT STARTED",
-    heroName: final ? (names || "Nobody") : started ? (leader?.nick || "Nobody") : "",
+      ? (champions.length > 1 ? `JOINT ${weekCaps} WINNERS` : `${weekCaps} WINNER`)
+      : started ? "AS IT STANDS" : "NOT STARTED",
+    heroName: final ? (names || "Nobody") : started ? (leaders.names || "Nobody") : "",
     heroLine: final
-      ? `${week} champion · ${pts} pts`
+      ? `${pts} pts`
       : started
-        ? `${status.label} · ${leader?.pts ?? 0} pts`
+        ? `Leading ${week} · ${leaders.pts} pts`
         : status.label,
     podium: groups,
     rows: (round.table || []).map((row, index) => ({
@@ -5240,10 +5263,14 @@ function weeklyCardPages(state, round) {
 function drawWeeklyPage(model, hero, m, page) {
     const { canvas, ctx } = cardCanvas(m.contentHeight);
     drawCardHeader(ctx, model.league, model.headline, cardPageLabel(page, m.pages));
-    const y = cardTableTop(CARD_HEAD_H + CARD_GAP + hero + CARD_GAP, m.tableHeight);
+    // The table sits directly under the highlight box. Centring it in the
+    // leftover height opened a large empty band between the two on any table
+    // shorter than a page; the spare room now falls below the footer instead.
+    const y = cardTableTop(CARD_HEAD_H + CARD_GAP + hero + CARD_GAP, m.tableHeight, 0);
     const top = y + CARD_TABLE_HEAD_H;
+    const move = cardHasMovement(model.rows);
     drawCardHero(ctx, CARD_HEAD_H + CARD_GAP, model, hero);
-    drawCardTableHead(ctx, y);
+    drawCardTableHead(ctx, y, { move });
     const rows = cardPageRows(model.rows, page, m);
     rows.forEach((row, index) => {
       const rowTop = top + index * m.rowH;
@@ -5260,7 +5287,7 @@ function drawWeeklyPage(model, hero, m, page) {
       // Same MOVE column as the season card, in the same place, so the two
       // exports are read the same way.
       ctx.textAlign = "center";
-      drawCardMovement(ctx, CARD_COL.move, baseline, row.movement, m.second);
+      if (move) drawCardMovement(ctx, CARD_COL.move, baseline, row.movement, m.second);
       ctx.textAlign = "left";
       ctx.textAlign = "right";
       ctx.fillStyle = CARD.muted;
@@ -5383,9 +5410,10 @@ function drawSeasonPage(model, m, page) {
     drawCardHeader(ctx, model.league, model.headline, cardPageLabel(page, m.pages));
     const y = cardTableTop(CARD_HEAD_H + CARD_GAP, m.tableHeight, CARD_TABLE_LEAD);
     const top = y + CARD_TABLE_HEAD_H;
+    const move = cardHasMovement(model.rows);
     // The headings are repeated on every page, so a page read on its own is
     // still a table rather than a list of numbers.
-    drawCardTableHead(ctx, y);
+    drawCardTableHead(ctx, y, { move });
     const rows = cardPageRows(model.rows, page, m);
     rows.forEach((row, index) => {
       const rowTop = top + index * m.rowH;
@@ -5462,7 +5490,7 @@ function weeklyCardCaption(state, round) {
   const competition = leagueCompetitionNames(state);
   const week = round.matchday != null ? `Matchweek ${round.matchday}` : periodLabel(round.period);
   const status = weeklyShareStatus(round);
-  const leader = (round.table || [])[0] || null;
+  const leaders = weekLeaders(round);
   // Nothing settled is not the same as something settled, and neither is the
   // same as finished. Saying "nothing settled yet" after two results is as
   // wrong as naming a winner before any.
@@ -5472,7 +5500,7 @@ function weeklyCardCaption(state, round) {
       ? `published — nothing settled yet`
       // TERMINAL, not settled: a void is finished and scored nothing, so calling
       // it settled would credit a game nobody got points for.
-      : `after ${status.terminal} of ${status.total} fixtures${leader ? `, ${leader.nick} leading on ${leader.pts}` : ""}`;
+      : `after ${status.terminal} of ${status.total} fixtures${leaders.names ? `, ${leaders.names} leading on ${leaders.pts}` : ""}`;
   return `🏆 ${competition} ${week}: ${lead}. Think you can call it? Join ${state.name} with code ${state.code}: ${inviteLinkFor(state.code)}`;
 }
 
@@ -7441,22 +7469,90 @@ function drawRevealCard({ league, fixture }) {
 // read here: turning one of these on asks iOS on that tap if it has never been
 // asked, and does nothing else to the reminders.
 
-let alertPrefs = readJSON(STORAGE.alertPrefs, null) || { reveal: false, results: false, offers: { reveal: false, results: false }, loaded: false };
+// v1.9 build 37: what THIS DEVICE chose is what the boxes show. `updatedAt`
+// is when it last chose (its own clock); `dirty` means the server has not yet
+// acknowledged that choice. Every save sends the whole state, one at a time
+// (latest wins), and no answer or GET older than the device's own choice can
+// untick a box. Offers only ever go false -> true.
+const ALERT_PREFS_BLANK = { reveal: false, results: false, offers: { reveal: false, results: false }, loaded: false, updatedAt: 0, dirty: false };
+let alertPrefs = { ...ALERT_PREFS_BLANK, ...(readJSON(STORAGE.alertPrefs, null) || {}) };
+let alertPrefsRev = 0;          // bumped on every local change
+let alertPrefsSync = null;      // the one save in flight, if any
+let alertPrefsAgain = false;    // a change arrived while it was in flight
 
+function storeAlertPrefs() {
+  try { localStorage.setItem(STORAGE.alertPrefs, JSON.stringify(alertPrefs)); } catch { /* memory still holds it */ }
+}
+
+const mergedOffers = (mine, theirs) => ({
+  reveal: mine?.reveal === true || theirs?.reveal === true,
+  results: mine?.results === true || theirs?.results === true,
+});
+
+/** Adopt the server's choice (it is at least as new as ours). */
 function applyAlertPrefs(answer) {
   alertPrefs = {
     reveal: answer?.reveal === true,
     results: answer?.results === true,
-    offers: { reveal: answer?.offers?.reveal === true, results: answer?.offers?.results === true },
+    offers: mergedOffers(alertPrefs.offers, answer?.offers),
     loaded: true,
+    updatedAt: Number(answer?.updatedAt) || 0,
+    dirty: false,
   };
-  try { localStorage.setItem(STORAGE.alertPrefs, JSON.stringify(alertPrefs)); } catch { /* memory still holds it */ }
+  storeAlertPrefs();
+}
+
+/** A local change: shown at once, saved in order. */
+function changeAlertPrefs(change) {
+  alertPrefs = { ...alertPrefs, ...change, dirty: true };
+  alertPrefsRev += 1;
+  storeAlertPrefs();
+  syncAlertCheckboxes();
+  return syncAlertPrefs();
+}
+
+/** Send the whole state; one request in flight; repeat while newer changes wait. */
+function syncAlertPrefs() {
+  if (!API) return Promise.resolve();
+  if (alertPrefsSync) { alertPrefsAgain = true; return alertPrefsSync; }
+  alertPrefsSync = (async () => {
+    try {
+      do {
+        alertPrefsAgain = false;
+        const rev = alertPrefsRev;
+        // Never chosen on this device: send only the offers, so a dismissal
+        // cannot switch off an alert another device turned on.
+        const body = { uid: uid(), offers: { ...alertPrefs.offers } };
+        if (alertPrefs.updatedAt > 0) Object.assign(body, { reveal: alertPrefs.reveal, results: alertPrefs.results, updatedAt: alertPrefs.updatedAt });
+        let answer;
+        try { answer = await api("/notification-prefs", body); } catch { return; } // stays dirty; retried on next open or reconnect
+        if (rev !== alertPrefsRev) continue;           // a newer local choice is queued: it wins
+        if (answer?.stale || !(alertPrefs.updatedAt > 0)) applyAlertPrefs(answer); // another device chose later
+        else alertPrefs = { ...alertPrefs, offers: mergedOffers(alertPrefs.offers, answer?.offers), loaded: true, dirty: false };
+        storeAlertPrefs();
+        syncAlertCheckboxes();
+      } while (alertPrefsAgain);
+    } finally {
+      alertPrefsSync = null;
+    }
+  })();
+  return alertPrefsSync;
+}
+
+// Ticked offline: saved the moment the connection is back.
+if (typeof window !== "undefined" && window.addEventListener) {
+  window.addEventListener("online", () => { if (alertPrefs.dirty) syncAlertPrefs(); });
 }
 
 async function loadAlertPrefs() {
   if (!API || !isNativeApp()) return;
+  if (alertPrefs.dirty) { await syncAlertPrefs(); return; } // an unsaved choice is sent, not overwritten
+  const rev = alertPrefsRev;
   try {
-    applyAlertPrefs(await api(`/notification-prefs?uid=${encodeURIComponent(uid())}`));
+    const answer = await api(`/notification-prefs?uid=${encodeURIComponent(uid())}`);
+    if (rev !== alertPrefsRev || alertPrefs.dirty || alertPrefsSync) return; // chosen meanwhile: ours wins
+    if ((Number(answer?.updatedAt) || 0) >= (alertPrefs.updatedAt || 0)) applyAlertPrefs(answer);
+    else { alertPrefs = { ...alertPrefs, offers: mergedOffers(alertPrefs.offers, answer?.offers), loaded: true }; storeAlertPrefs(); }
     syncAlertCheckboxes();
   } catch {
     // Unknown is shown as what this device last knew; offers stay hidden until known.
@@ -7495,26 +7591,15 @@ async function setAlertPref(kind, on) {
     renderNotificationsDenied(await pushPermission());
     return false;
   }
-  alertPrefs = { ...alertPrefs, [kind]: !!on };
-  try { localStorage.setItem(STORAGE.alertPrefs, JSON.stringify(alertPrefs)); } catch { /* see above */ }
-  syncAlertCheckboxes();
-  if (!API) return true;
-  try {
-    applyAlertPrefs(await api("/notification-prefs", { uid: uid(), [kind]: !!on }));
-    syncAlertCheckboxes();
-  } catch {
-    // Kept locally; the Profile switch shows what this device asked for.
-  }
+  // Strictly later than any choice this device already knows of.
+  changeAlertPrefs({ [kind]: !!on, updatedAt: Math.max(Date.now(), (alertPrefs.updatedAt || 0) + 1) });
   return true;
 }
 
 /** Turn on OR ×: either way the offer is done, everywhere this account signs in. */
 async function retireAlertOffer(kind) {
-  alertPrefs = { ...alertPrefs, offers: { ...alertPrefs.offers, [kind]: true } };
-  try { localStorage.setItem(STORAGE.alertPrefs, JSON.stringify(alertPrefs)); } catch { /* see above */ }
   document.querySelectorAll(`[data-alert-offer="${kind}"]`).forEach((node) => node.remove());
-  if (!API) return;
-  try { await api("/notification-prefs", { uid: uid(), offers: { [kind]: true } }); } catch { /* retried by nothing; shown again at worst */ }
+  await changeAlertPrefs({ offers: { ...alertPrefs.offers, [kind]: true } });
 }
 
 const ALERT_OFFER_COPY = {

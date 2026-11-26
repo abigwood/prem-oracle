@@ -124,7 +124,8 @@ function cards({ native = false } = {}) {
     ${lift("function cardCanvas(contentHeight)")}
     ${lift("function drawCardHeader(ctx, league, line, page = \"\")")}
     ${lift("function drawCardHero(ctx, y, model, height = CARD_HERO_H)")}
-    ${lift("function drawCardTableHead(ctx, y)")}
+    ${liftConst("cardHasMovement")}
+    ${lift("function drawCardTableHead(ctx, y, { move = true } = {})")}
     ${lift("function drawCardCellSplit(ctx, y, height)")}
     ${lift("function drawWeeklyRowBand(ctx, y, height, place)")}
     ${lift("function drawCardRowRule(ctx, y)")}
@@ -171,6 +172,7 @@ function cards({ native = false } = {}) {
     ${lift("function drawSeasonPage(model, m, page)")}
     ${lift("function drawSeasonTableCard(state)")}
     ${lift("function podiumCounts(row)")}
+    ${lift("function weekLeaders(round)")}
     ${lift("function winnerNames(round)")}
     ${lift("function leagueCompetitionNames(state)")}
     ${lift("function inviteLinkFor(code)")}
@@ -322,7 +324,7 @@ test("the weekly card leads with the winner and the rostrum", () => {
   const app = build(LEAGUE, SETTLED_WEEK, "matchday");
   const model = app.weeklyModel();
   assert.equal(model.heroName, "Adam");
-  assert.equal(model.heroLine, "Matchweek 3 champion · 23 pts");
+  assert.equal(model.heroLine, "23 pts");
   assert.deepEqual(model.podium.map((group) => group.place), ["gold", "silver", "bronze"]);
   app.drawWeekly();
   const drawn = texts(app.recorded()[0]);
@@ -352,7 +354,7 @@ test("medals follow the podium, not the row order", () => {
   assert.deepEqual(model.rows.map((row) => row.place), ["gold", "gold", "bronze"]);
   assert.deepEqual(model.podium.map((group) => group.place), ["gold", "bronze"]);
   assert.equal(model.heroName, "Adam & Bex");
-  assert.equal(model.heroEyebrow, "JOINT MATCHWEEK CHAMPIONS");
+  assert.equal(model.heroEyebrow, "JOINT MATCHWEEK 3 WINNERS");
   app.drawWeekly();
   const calls = app.recorded()[0];
   // The right edge of the standings rows, where the row medals live — the
@@ -375,13 +377,14 @@ test("a tied week names both champions in the hero, with no rostrum to stack", (
   };
   const app = build(LEAGUE, tied, "matchday");
   const model = app.weeklyModel();
-  assert.equal(model.heroEyebrow, "JOINT MATCHWEEK CHAMPIONS");
+  assert.equal(model.heroEyebrow, "JOINT MATCHWEEK 3 WINNERS");
   app.drawWeekly();
   const drawn = app.recorded()[0].text.map((entry) => entry.text);
   // v1.7 readability ruling: the export carries no rostrum, so a shared place
   // is a joint hero and two gold rows — never a stack of names on a block.
   assert.ok(drawn.some((text) => text.includes("Adam")), "the champions are named");
-  assert.equal(drawn.filter((text) => text === "23 pts").length, 0,
+  // The one "23 pts" is the highlight box's own subline; a rostrum would add more.
+  assert.equal(drawn.filter((text) => text === "23 pts").length, 1,
     "a rostrum points line was drawn");
   // Both gold rows still carry their medal in the table.
   assert.equal(drawn.filter((text) => text === "🏆").length, 2,
@@ -396,7 +399,7 @@ test("a weekly card from an old worker draws no podium it was never sent", () =>
   assert.deepEqual(model.rows.map((row) => row.place), [null, null, null]);
   // The winner is still known, because `winners` predates the podium.
   assert.equal(model.heroName, "Adam");
-  assert.equal(model.heroLine, "Matchweek 3 champion · 23 pts");
+  assert.equal(model.heroLine, "23 pts");
   app.drawWeekly();
   const drawn = texts(app.recorded()[0]);
   assert.equal(drawn.filter((text) => text === "🥈" || text === "🥉").length, 0);

@@ -55,6 +55,7 @@ import { apnsConfigured, sendPush } from "./apns.js";
 import { mergeWeather, withoutWeather, weatherConfigured, weatherKey, weatherPass, isDailyPassTick } from "./weather.js";
 import { NotifyLedger, utcDay } from "./notify/ledger.js";
 import { LeagueRegistrar } from "./league_registrar.js";
+import { PrefsStore, applyPrefs } from "./prefs_store.js";
 import {
   RevealSlot, PLAN_AHEAD_MS, REVEAL_EXPIRY_MS, RESULTS_EXPIRY_MS,
   slotName, dayName, revealKey, resultsAlertKey, revealCollapseId, resultsCollapseId,
@@ -318,7 +319,7 @@ async function pushToUids(env, uids, message, route = null) {
     if (!record?.token) return;
     try {
       const response = await sendPush(record.token, payload, env);
-      if (response.status === 410) await env.KV.delete(`push:${uid}`);
+      if (response.status === 410) await dropPushToken(env, uid, record.token);
       else sent++;
     } catch { /* transient APNs failure; retried on the next cron tick */ }
   }));
@@ -1157,7 +1158,7 @@ async function deleteAccount(env, body) {
 
   // 5 · Only now erase the credential, push token and user record.
   if (recovery) await env.KV.delete(`recovery:${recovery}`);
-  await env.KV.delete(`push:${uid}`);
+  await erasePushRecord(env, uid);
   await env.KV.delete(`user:${uid}`);
 
   // 6 · Both sides done — clear the intent, then notify any new hosts.
@@ -2137,14 +2138,49 @@ async function savePushToken(env, body) {
   const token = String(body.token || "").trim();
   if (!uid || !token) return json({ error: "uid and token required" }, 400, env);
   await ensureUser(env, uid, body.nickname);
+  const platform = String(body.platform || "ios").slice(0, 20);
+  if (env.PREFS_STORE) {
+    await prefsStoreClient(env, uid).call("token", { token, platform });
+    return json({ ok: true }, 200, env);
+  }
   const existing = await kvGet(env, `push:${uid}`);
   await kvPut(env, `push:${uid}`, {
     ...preferenceFields(existing),
     token,
-    platform: String(body.platform || "ios").slice(0, 20),
+    platform,
     updatedAt: Date.now(),
   });
   return json({ ok: true }, 200, env);
+}
+
+/**
+ * One RPC to the uid's PrefsStore — the single, ordered writer of push:<uid>.
+ * Without the binding (rollback) every caller below falls back to direct KV.
+ */
+export function prefsStoreClient(env, uid) {
+  const stub = env.PREFS_STORE.get(env.PREFS_STORE.idFromName(uid));
+  return {
+    async call(op, args = {}) {
+      const response = await stub.fetch("https://prefs-store/rpc", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ uid, op, ...args }),
+      });
+      if (!response.ok) throw new Error(`prefs-store ${op} failed: ${response.status}`);
+      return response.json();
+    },
+  };
+}
+
+/** APNs said 410 for this token: forget the token, keep every choice. */
+async function dropPushToken(env, uid, token) {
+  if (env.PREFS_STORE) { await prefsStoreClient(env, uid).call("dropToken", { token: token || null }); return; }
+  await env.KV.delete(`push:${uid}`);
+}
+
+async function erasePushRecord(env, uid) {
+  if (env.PREFS_STORE) await prefsStoreClient(env, uid).call("erase");
+  await env.KV.delete(`push:${uid}`);
 }
 
 /**
@@ -2160,6 +2196,7 @@ function preferenceFields(record) {
   if (record?.offers?.reveal === true) offers.reveal = true;
   if (record?.offers?.results === true) offers.results = true;
   if (Object.keys(offers).length) out.offers = offers;
+  if (Number.isFinite(record?.choiceAt)) out.choiceAt = record.choiceAt;
   return out;
 }
 
@@ -2172,6 +2209,9 @@ function prefsBody(env, uid, record) {
     reveal: record?.reveal === true,
     results: record?.results === true,
     offers: { reveal: record?.offers?.reveal === true, results: record?.offers?.results === true },
+    // When the reveal/results choice was last made (client clock, clamped).
+    // A client never lets an answer older than its own latest choice untick a box.
+    updatedAt: Number.isFinite(record?.choiceAt) ? record.choiceAt : 0,
     competitions: COMPETITION_CODES
       .filter((code) => competitionConfigured(env, code))
       .map((code) => ({ code, name: COMPETITIONS[code].name })),
@@ -2201,32 +2241,39 @@ async function setNotificationPrefs(env, body) {
   for (const key of ["reveal", "results"]) {
     if (has(key) && typeof body[key] !== "boolean") return json({ error: `${key} must be true or false` }, 400, env);
   }
+  if (has("updatedAt") && (typeof body.updatedAt !== "number" || !Number.isFinite(body.updatedAt))) {
+    return json({ error: "updatedAt must be a number (ms)" }, 400, env);
+  }
   if (has("offers")) {
     const offers = body.offers;
     if (!offers || typeof offers !== "object" || Array.isArray(offers)
-      || Object.entries(offers).some(([k, v]) => !["reveal", "results"].includes(k) || v !== true)) {
+      || Object.entries(offers).some(([k, v]) => !["reveal", "results"].includes(k) || typeof v !== "boolean")
+      || !Object.values(offers).some((v) => v === true) && !has("reveal") && !has("results") && !has("mute")) {
       return json({ error: "offers may only mark reveal or results as answered (true)" }, 400, env);
     }
   }
   // A record without a token is created on purpose: a choice made before APNs
   // registration (or on the web) must still be there when the token arrives.
-  const record = (await kvGet(env, `push:${uid}`)) || {};
-  const next = { ...record, ...preferenceFields(record), updatedAt: Date.now() };
-  if (has("mute")) next.mute = [...new Set(body.mute)];
-  for (const key of ["reveal", "results"]) {
-    if (!has(key)) continue;
-    if (body[key]) next[key] = true; else delete next[key];
+  const change = {};
+  for (const key of ["mute", "reveal", "results", "offers", "updatedAt"]) if (has(key)) change[key] = body[key];
+  if (env.PREFS_STORE) {
+    const { record, stale } = await prefsStoreClient(env, uid).call("prefs", { body: change });
+    return json({ ok: true, stale: !!stale, ...prefsBody(env, uid, record) }, 200, env);
   }
-  // Offers only ever go false -> true.
-  if (has("offers")) next.offers = { ...(next.offers || {}), ...body.offers };
+  // Rollback path only (no PREFS_STORE binding): best-effort read-modify-write.
+  const existing = (await kvGet(env, `push:${uid}`)) || {};
+  const { record: next, stale } = applyPrefs({ ...existing, ...preferenceFields(existing) }, change);
   await kvPut(env, `push:${uid}`, next);
-  return json({ ok: true, ...prefsBody(env, uid, next) }, 200, env);
+  return json({ ok: true, stale, ...prefsBody(env, uid, next) }, 200, env);
 }
 
 async function getNotificationPrefs(env, url) {
   const uid = url.searchParams.get("uid") || "";
   if (!uid) return json({ error: "uid required" }, 400, env);
-  return json(prefsBody(env, uid, await kvGet(env, `push:${uid}`)), 200, env);
+  const record = env.PREFS_STORE
+    ? (await prefsStoreClient(env, uid).call("get")).record
+    : await kvGet(env, `push:${uid}`);
+  return json(prefsBody(env, uid, record), 200, env, { "cache-control": "private, no-store" });
 }
 
 // Migration control surface. Secret-gated, and deliberately not wired to any
@@ -2715,7 +2762,7 @@ async function notifyKickoffs(env) {
     await Promise.all(audience.map(async ({ uid, token }) => {
       try {
         const response = await sendPush(token, payload, env);
-        if (response.status === 410) await env.KV.delete(`push:${uid}`);
+        if (response.status === 410) await dropPushToken(env, uid, token);
       } catch { /* transient APNs failure; retried next cron tick */ }
     }));
     await env.KV.put(`notified:${match.id}`, "1", { expirationTtl: NOTIFIED_TTL_S });
@@ -2774,7 +2821,7 @@ function notifyDeps(env, nowMs) {
     readPicks: async (fixtureId) => (await kvGet(env, `picks:${fixtureId}`)) || {},
     readSlate: (code, period) => kvGet(env, slateKey(code, period)),
     readPush: (uid) => kvGet(env, `push:${uid}`),
-    dropPushToken: (uid) => env.KV.delete(`push:${uid}`),
+    dropPushToken: (uid, token) => dropPushToken(env, uid, token),
     revealSlot: (name) => revealClient(env, name),
     isMember: async (code, uid) => !!(await kvGet(env, leagueMemberKey(code, uid))),
     /**
@@ -3389,7 +3436,7 @@ export async function deliverAlertJob(job, env, deps) {
         collapseId: reveal ? revealCollapseId(job.t) : resultsCollapseId(job.d),
         expiration: Math.floor(expiration / 1000),
       });
-      if (response.status === 410) { await deps.dropPushToken(r.uid); drop("unregistered"); continue; }
+      if (response.status === 410) { await deps.dropPushToken(r.uid, push.token); drop("unregistered"); continue; }
       if (response.ok) { outcomes.push({ key, gen, result: "sent" }); stats.sent++; continue; }
     } catch { /* transient; retried */ }
     outcomes.push({ key, gen, result: "failed" });
@@ -3651,6 +3698,7 @@ export default {
 export { NotifyLedger };
 export { LeagueRegistrar };
 export { RevealSlot };
+export { PrefsStore };
 
 async function route(request, env) {
   const url = new URL(request.url);

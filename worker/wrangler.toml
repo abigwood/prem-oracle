@@ -43,6 +43,15 @@ new_sqlite_classes = ["LeagueRegistrar"]
 tag = "v3"
 new_sqlite_classes = ["RevealSlot"]
 
+# v1.9 build 37. The PrefsStore Durable Object — one instance per uid, the
+# single ordered writer of push:<uid> (token, mute, reveal/results, offers). It
+# mirrors the whole record to KV after every write, so every reader is
+# unchanged. Rolling back is deleting the binding and redeploying: writes then
+# fall back to the direct KV read-modify-write of build 36.
+[[migrations]]
+tag = "v4"
+new_sqlite_classes = ["PrefsStore"]
+
 # ---------------------------------------------------------------------------
 # B2 ACTIVATION. These three blocks are the whole switch: with them the cron
 # plans into the queue and the consumer delivers; without them the same code
@@ -64,6 +73,11 @@ class_name = "LeagueRegistrar"
 [[durable_objects.bindings]]
 name = "REVEAL_SLOT"
 class_name = "RevealSlot"
+
+# v1.9 build 37. Absent -> prefs/token writes use direct KV (build 36 behaviour).
+[[durable_objects.bindings]]
+name = "PREFS_STORE"
+class_name = "PrefsStore"
 
 [[queues.producers]]
 binding = "NOTIFY_QUEUE"

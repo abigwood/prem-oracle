@@ -223,7 +223,8 @@ test("the load bookkeeping: confirmed by any server answer, failed only by a rea
   // The deadline is armed before the first paint, and "Try again" is wired to the retry.
   assert.ok(APP.indexOf("\narmPicksLoadTimeout();\n") > 0
     && APP.indexOf("\narmPicksLoadTimeout();\n") < APP.indexOf("Promise.all([loadFixtures(), hydrateIdentity()])"));
-  assert.match(APP, /if \(event\.target\.closest\("\[data-retry-picks\]"\)\) \{ retryPicksLoad\(\); return; \}/);
+  // "Try again" retries what is on screen: the week, or (v1.9 Slice 2) an open matchday screen.
+  assert.match(APP, /if \(event\.target\.closest\("\[data-retry-picks\]"\)\) \{\s*\n\s*if \(matchdayScreen\) \{[^\n]*loadMatchdayScreen\(matchdayScreen\); return; \}\s*\n\s*retryPicksLoad\(\);\s*\n\s*return;/);
   assert.match(sourceOf("retryPicksLoad"), /leagueLoadFailed\.clear\(\);[\s\S]*picksLoadTimedOut = false;[\s\S]*hydrateIdentity\(\)/);
   assert.match(constOf("PICKS_LOAD_TIMEOUT_MS"), /= 15000;/);
 });
@@ -327,9 +328,13 @@ test("display only: scoring, settlement, the table and the exports never see it"
   }
   const uses = APP.split("pickRowOutcome(").length - 1;
   assert.equal(uses, 2, "the pill is built somewhere other than the row");   // its definition + pickRow
-  // Every "pick-pill" in the app is inside the row's builder — none in a share card, an export or the table.
+  // Every "pick-pill" in the app is inside the row's builder or (v1.9 Slice 2)
+  // the matchday screens' — none in a share card, an export or the table.
   const count = (src) => src.split("pick-pill").length - 1;
-  assert.equal(count(APP), count(sourceOf("pickRowOutcome")));
+  assert.equal(count(APP), ["pickRowOutcome", "pointsPill", "dayTableRow"].reduce((n, fn) => n + count(sourceOf(fn)), 0));
+  for (const fn of ["drawWeeklyPage", "weeklyCardModel", "drawRevealCard", "shareScorecardNow", "roundTableHtml", "seasonTableHtml"]) {
+    assert.doesNotMatch(sourceOf(fn), /pick-pill/, fn);
+  }
 });
 
 test("320pt: the line spans the whole row and never wraps; the pills use the approved colours", () => {

@@ -83,6 +83,12 @@ export function load(names, stubs = {}) {
     pickRowOutcome: () => "",
     weekShapeFor: () => null,
     rememberWeekShape: () => {},
+    // v1.9 Slice 2: no matchday screen open, no results mode, no slim link and
+    // no scorecard links, unless a test lifts the real ones (matchday.test.mjs).
+    matchdayScreen: null,
+    resultsModeFor: () => null,
+    resultsSlimLink: () => "",
+    scorecardLinks: () => "",
     isLeagueHost: () => false,
     slateForPeriod: () => null,
     currentPeriodKey: () => null,

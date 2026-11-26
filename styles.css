@@ -2430,3 +2430,122 @@ body.picker-open { overflow: hidden; }
    place so nothing moves under a finger when it arrives, and plainly cannot be
    pressed — an icon that looks ready before it is would be worse than absent. */
 .share-icon[disabled] { color: var(--muted); cursor: default; opacity: .55; }
+
+/* --- v1.9 F5: a finished row sits a step darker than the page ------------- */
+/* #ECEFF4 against the #F5F7FB page; the muted lines darken to #475569 so the
+   date, FT and "You x-y" keep 6.6:1 on the grey (#64748B would be 4.1:1). Ink
+   is 14.3:1, and the pills carry their own grounds (5.2:1 and up). */
+.pick-row.is-finished { background: #ECEFF4; border-color: #DCE1E8; }
+.pick-row.is-finished .pick-row-date,
+.pick-row.is-finished .pick-row-caption,
+.pick-row.is-finished .pick-row-word,
+.pick-row.is-finished .pick-row-you { color: #475569; }
+
+/* --- v1.9 Slice 2: the matchday screens ------------------------------------ */
+.md-back {
+  display: inline-flex; align-items: center; min-height: 44px; margin: 0 0 2px; padding: 0 4px 0 0;
+  border: 0; background: none; color: var(--purple); font-size: .9rem; font-weight: 900;
+}
+.md-league { margin-top: 16px; }
+.md-league-head { margin: 0 0 8px; font-size: .95rem; font-weight: 900; color: var(--ink); }
+.md-league-head span { color: var(--muted); font-weight: 800; }
+.md-hub-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%;
+  min-height: 56px; margin-top: 6px; padding: 8px 14px; border: 1px solid var(--line); border-radius: 12px;
+  background: var(--white); color: var(--ink);
+}
+.md-see { font-size: .85rem; font-weight: 900; color: var(--purple); white-space: nowrap; }
+.md-fixture-title { display: flex; align-items: center; }
+.md-section { margin-top: 18px; }
+.md-subhead { margin: 18px 0 8px; font-size: .9rem; font-weight: 900; color: var(--ink); }
+.md-section .md-subhead { margin-top: 0; }
+.md-rows { margin: 8px 0 0; padding: 0; list-style: none; }
+.md-rows:not(.is-all) .md-row.is-extra { display: none; }
+.md-row {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 10px;
+  min-height: 40px; padding: 6px 10px; border-radius: 9px; font-size: .86rem;
+}
+.md-table .md-row { grid-template-columns: 2ch minmax(0, 1fr) auto; }
+.md-row + .md-row { margin-top: 3px; }
+.md-row:nth-child(odd) { background: var(--white); }
+.md-row.is-you { background: var(--purple-soft); }
+.md-row.is-you .md-nick { color: var(--purple); font-weight: 900; }
+.md-rank { font-weight: 900; color: var(--muted); font-variant-numeric: tabular-nums; }
+.md-nick { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 800; color: var(--ink); }
+.md-you {
+  margin-left: 4px; padding: 1px 6px; border-radius: 999px; background: var(--purple); color: var(--white);
+  font-size: .62rem; font-style: normal; font-weight: 900; letter-spacing: .06em;
+}
+.md-pick { font-weight: 900; font-variant-numeric: tabular-nums; color: var(--ink); white-space: nowrap; }
+.md-pick.is-none { color: #5A6478; font-weight: 800; }
+.md-pill { display: flex; justify-content: flex-end; white-space: nowrap; }
+.md-more {
+  min-height: 40px; margin-top: 4px; padding: 0 10px; border: 0; background: none;
+  color: var(--purple); font-size: .84rem; font-weight: 900;
+}
+.md-more-note { margin: 6px 10px 0; color: var(--muted); font-size: .84rem; font-weight: 800; }
+.md-match-head {
+  display: flex; align-items: center; justify-content: center; gap: 12px; margin: 0;
+  padding: 10px; border: 1px solid #DCE1E8; border-radius: 12px; background: #ECEFF4;
+}
+.md-match-score { display: flex; flex-direction: column; align-items: center; min-width: 52px; }
+.md-match-head .pick-row-caption, .md-match-head .pick-row-word { color: #475569; }
+.md-score { font-size: 1.2rem; font-weight: 900; color: var(--ink); font-variant-numeric: tabular-nums; }
+.md-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.md-chip {
+  min-height: 36px; padding: 0 12px; border: 1px solid var(--line); border-radius: 999px;
+  background: var(--white); color: var(--ink); font-size: .8rem; font-weight: 800;
+}
+.md-chip.is-on { border-color: var(--purple); background: var(--purple); color: var(--white); }
+.md-share { margin-top: 18px; }
+.md-share:disabled { opacity: .5; }
+.md-banner {
+  display: flex; flex-direction: column; gap: 2px; width: 100%; margin: 6px 0 4px; padding: 12px 14px;
+  border: 0; border-radius: 14px; background: var(--purple); color: var(--white); text-align: left;
+  font-size: .82rem; font-weight: 800;
+}
+.md-banner-title { color: var(--grass); font-size: .74rem; font-weight: 900; letter-spacing: .08em; }
+
+.results-block { margin-top: 12px; }
+.results-summary {
+  padding: 14px 16px; border-radius: 16px; background: var(--purple); color: var(--white);
+}
+.results-summary .eyebrow { color: var(--grass); }
+.results-summary h2, .results-summary h3 { margin: 2px 0 4px; color: var(--white); }
+.results-summary p { margin: 0; font-size: .86rem; font-weight: 800; }
+.results-league {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 10px; width: 100%;
+  margin-top: 8px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 14px;
+  background: var(--white); color: var(--ink); text-align: left;
+}
+.results-league > span:not(.results-go) { grid-column: 1; }
+.results-league-name { font-size: .92rem; font-weight: 900; overflow-wrap: anywhere; }
+.results-league-line { font-size: .82rem; font-weight: 800; color: #475569; }
+.results-go { grid-column: 2; grid-row: 1 / span 3; align-self: center; font-size: 1.2rem; font-weight: 900; color: var(--purple); }
+.results-winner {
+  display: inline-block; margin-left: 4px; padding: 1px 7px; border-radius: 999px; background: #DFF7E9;
+  color: #0B6B3A; font-size: .62rem; font-weight: 900; letter-spacing: .06em; vertical-align: 1px;
+}
+.results-link {
+  display: block; min-height: 40px; margin: 8px 0 0; padding: 0; border: 0; background: none;
+  color: var(--purple); font-size: .88rem; font-weight: 900; text-align: left;
+}
+.scorecard-links { margin-top: 6px; }
+
+.alert-offer {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 10px;
+  margin-top: 16px; padding: 12px 12px 12px 14px; border: 1px solid var(--line); border-radius: 14px; background: var(--white);
+}
+.alert-offer p { margin: 0; font-size: .86rem; font-weight: 800; color: var(--ink); }
+.alert-offer .primary { width: auto; min-height: 40px; margin: 0; padding: 0 14px; }
+.alert-offer-dismiss {
+  width: 40px; height: 40px; border: 0; border-radius: 50%; background: none; color: var(--muted);
+  font-size: 1.3rem; font-weight: 900;
+}
+.notif-row-sub > span { display: flex; flex-direction: column; gap: 2px; }
+.notif-row-sub small { font-size: .74rem; font-weight: 700; color: var(--muted); }
+.notif-denied { margin: 8px 0 4px; }
+.notif-denied p { margin: 0 0 8px; font-size: .8rem; font-weight: 700; color: var(--ink); line-height: 1.45; }
+.notif-row input:disabled { opacity: .45; }
+.round-standings tr.is-you td { background: var(--purple-soft); }
+.round-standings tr.is-you .player-name { color: var(--purple); font-weight: 900; }

@@ -6,7 +6,7 @@ import { load, APP, sourceOf } from "./harness.mjs";
 /** vm-realm objects carry a foreign prototype; compare the values. */
 const plain = (v) => (v == null ? v : JSON.parse(JSON.stringify(v)));
 
-const ROUTE = ["NOTIFY_PAYLOAD_VERSION", "safeParseJSON", "readNotificationRoute"];
+const ROUTE = ["NOTIFY_PAYLOAD_VERSION", "NOTIFY_MATCHDAY_VERSION", "UK_DATE_RE", "matchdayRouteFromBlock", "safeParseJSON", "readNotificationRoute"];
 
 // --- N7 · the payload is never trusted -------------------------------------
 
@@ -20,6 +20,9 @@ test("N7 · a well-formed routing block is read", () => {
   // Some transports stringify nested objects.
   assert.deepEqual(plain(s.readNotificationRoute({ po: JSON.stringify({ v: 1, f: "m1", l: "AAA" }) })),
     { fixtureId: "m1", league: "AAA" });
+  // v1.9 E: a week-level notice ("Matchweek 13 is set") carries its league and
+  // no fixture — that league's My Picks.
+  assert.deepEqual(plain(s.readNotificationRoute({ po: { v: 1, l: "aaa" } })), { fixtureId: "", league: "AAA" });
 });
 
 test("N7 · anything unrecognised is refused rather than guessed at", () => {
@@ -29,7 +32,6 @@ test("N7 · anything unrecognised is refused rather than guessed at", () => {
     ["no routing block", { aps: { alert: "hi" } }],
     ["a future version", { po: { v: 2, f: "m1", l: "AAA" } }],
     ["no version", { po: { f: "m1", l: "AAA" } }],
-    ["no fixture", { po: { v: 1, l: "AAA" } }],
     ["no league", { po: { v: 1, f: "m1" } }],
     ["empty strings", { po: { v: 1, f: "", l: "" } }],
     ["malformed json", { po: "{not json" }],

@@ -3202,10 +3202,15 @@ class ContextualNotificationAskTests(unittest.TestCase):
         self.assertIn('permission.receive === "granted"', setup)  # only registers if already granted
 
     def test_the_only_permission_request_is_remind_me(self):
-        # requestPermissions appears exactly once in the whole client, in
-        # requestReminders (the Remind me action).
-        self.assertEqual(self.app.count("requestPermissions"), 1)
+        # requestPermissions appears exactly twice in the whole client: in
+        # requestReminders (the Remind me action) and, since v1.9 Slice 2, in
+        # ensurePushPermission — reached only by ticking a Matchday alerts
+        # switch (or its in-context Turn on), never at launch.
+        self.assertEqual(self.app.count("requestPermissions"), 2)
         self.assertIn("requestPermissions", self._fn("requestReminders"))
+        self.assertIn("requestPermissions", self._fn("ensurePushPermission"))
+        self.assertEqual(self.app.count("ensurePushPermission("), 2)  # its definition + setAlertPref
+        self.assertIn("ensurePushPermission()", self._fn("setAlertPref"))
 
     def test_ask_is_gated_native_prompt_and_at_most_once(self):
         fn = self._fn("maybeOfferReminders")

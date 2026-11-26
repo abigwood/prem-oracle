@@ -98,7 +98,7 @@ test("T2 · notifications still open the fixture on My Picks", () => {
   assert.match(open, /currentView = "picks";/, "the no-route fallback still lands somewhere");
   assert.ok(!open.includes('"today"'), "a notification can still reach Next");
   // The payload contract itself is untouched.
-  const box = load(["readNotificationRoute", "safeParseJSON", "NOTIFY_PAYLOAD_VERSION"], {});
+  const box = load(["readNotificationRoute", "safeParseJSON", "NOTIFY_PAYLOAD_VERSION", "NOTIFY_MATCHDAY_VERSION", "UK_DATE_RE", "matchdayRouteFromBlock"], {});
   assert.deepEqual(JSON.parse(JSON.stringify(
     box.readNotificationRoute({ po: { v: 1, f: "m1", l: "aaa" } }))),
     { fixtureId: "m1", league: "AAA" });

@@ -45,6 +45,7 @@ function world({ codes = ["AAA111", "SWAF5M"], active = "AAA111", launchUrl = ""
   const box = load([
     "leagueCodeFromUrl", "requestedView", "LEGACY_VIEWS", "normaliseView", "linkRoute", "followLinkRoute",
     "LAST_LINK_KEY", "LINK_REPEAT_MS", "followIncomingLink", "setupNativeUniversalLinks",
+    "MATCHDAY_VIEWS", "UK_DATE_RE", "matchdayRouteFromBlock", "matchdayRouteFromSearch",
     "openJoinSheet", "clearJoinFeedback",
   ], {
     document,

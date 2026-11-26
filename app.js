@@ -736,12 +736,23 @@ async function loadFixturesForLeagues() {
   const have = new Set(activeCompetitions());
   const missing = [...wanted].filter((code) => !have.has(code) && !extraFixtures[`__loaded_${code}`]);
   if (!missing.length) return;
-  await Promise.allSettled(missing.map(async (code) => {
-    const data = await loadOneCompetition(code, false);
-    const next = { ...extraFixtures, [`__loaded_${code}`]: true };
-    for (const fixture of data.fixtures || []) next[String(fixture.id)] = fixture;
-    extraFixtures = next;
-  }));
+  // One flight per competition: the tab and a scorecard asking together share it.
+  const flights = missing.map((code) => {
+    if (!fixtureListFlights.has(code)) {
+      fixtureListFlights.set(code, loadOneFixtureList(code).finally(() => fixtureListFlights.delete(code)));
+    }
+    return fixtureListFlights.get(code);
+  });
+  await Promise.allSettled(flights);
+}
+
+const fixtureListFlights = new Map();
+
+async function loadOneFixtureList(code) {
+  const data = await loadOneCompetition(code, false);
+  const next = { ...extraFixtures, [`__loaded_${code}`]: true };
+  for (const fixture of data.fixtures || []) next[String(fixture.id)] = fixture;
+  extraFixtures = next;
 }
 
 function rememberCompetition(codes) {
@@ -6951,9 +6962,15 @@ let matchdayGeneration = 0;
 async function openMatchdayScreen(route) {
   const screen = { ...route, status: "loading", id: ++matchdayGeneration, openedAt: clockMs() };
   matchdayScreen = screen;
-  await navigateToView("picks");
+  // v1.9 build 39: the tab change is STARTED, not awaited first. Its tail warms
+  // every other league's /state and fetches missing fixture lists (Championship
+  // included) — seconds on a phone — and a scorecard drawn from the device copy
+  // must never wait for any of it. currentView is set synchronously inside, so
+  // the screen below renders on My Picks as before.
+  const navigated = navigateToView("picks");
   appScroller()?.scrollTo({ top: 0 });
   await loadMatchdayScreen(screen);
+  await navigated;
 }
 
 function closeMatchdayScreen() {
@@ -6974,6 +6991,9 @@ async function loadMatchdayScreen(screen) {
     if (screen.view === "scorecard") {
       screen.paintedView = matchdayScreenView();
       noteScorecardOpen(screen);
+      // The final paint: whatever settles afterwards (a quiet refresh, other
+      // leagues, the banner) — the same screen, or a repaint if it changed.
+      screen.settling?.then((repainted) => noteScorecardFinal(screen, repainted));
     }
   }
 }
@@ -6987,14 +7007,24 @@ const scorecardOpens = [];
 
 function noteScorecardOpen(screen) {
   if (screen.status !== "ready" || !Number.isFinite(screen.openedAt)) return;
-  scorecardOpens.push({ ms: Math.max(0, Math.round(clockMs() - screen.openedAt)), from: screen.from || "network" });
+  const entry = { ms: Math.max(0, Math.round(clockMs() - screen.openedAt)), from: screen.from || "network", final: null };
+  screen.openEntry = entry;
+  scorecardOpens.push(entry);
   if (scorecardOpens.length > 10) scorecardOpens.shift();
+}
+
+/** When everything behind the first paint has landed: repainted, or not. */
+function noteScorecardFinal(screen, repainted) {
+  const entry = screen.openEntry;
+  if (!entry || !Number.isFinite(screen.openedAt)) return;
+  entry.final = { ms: Math.max(0, Math.round(clockMs() - screen.openedAt)), from: repainted ? "network" : "unchanged" };
 }
 
 function scorecardOpenLines() {
   if (!scorecardOpens.length) return [];
-  return ["", "scorecard opens — ms tap to content (newest last):",
-    ...scorecardOpens.map((entry) => `  ${entry.ms} ms  ${entry.from}`)];
+  return ["", "scorecard opens — first paint / final paint, ms from tap (newest last):",
+    ...scorecardOpens.map((entry) => `  first ${entry.ms} ms ${entry.from}` +
+      (entry.final ? `  ·  final ${entry.final.ms} ms ${entry.final.from}` : "  ·  final pending"))];
 }
 
 function matchdayScreenView() {
@@ -7127,10 +7157,15 @@ const usableRound = (round) => !!(round && !round.error && round.reveal);
  * screen actually changed.
  */
 async function loadScorecardScreen(screen) {
-  // A cold tap may beat the fixture lists for a second competition. Nothing is
-  // fetched when every competition is already loaded.
-  try { await loadFixturesForLeagues(); } catch { /* the leagues we can place still show */ }
-  const leagues = scorecardLeagues(screen.d);
+  // Missing fixture lists (a second competition, the Championship) are STARTED
+  // here and awaited only when no league can be placed on this day without
+  // them — a cold install. A day the device already knows draws now.
+  const fixturesLanded = Promise.resolve().then(() => loadFixturesForLeagues()).catch(() => {});
+  let leagues = scorecardLeagues(screen.d);
+  if (!leagues.length) {
+    await fixturesLanded;
+    leagues = scorecardLeagues(screen.d);
+  }
   screen.leagues = leagues;
   if (!leagues.length) { screen.status = "empty"; return; }
   if (!leagues.some((league) => league.code === screen.league)) {
@@ -7156,11 +7191,25 @@ async function loadScorecardScreen(screen) {
     screen.from = fetches.has(screen.league) ? "device+refresh" : "device";
   }
   screen.status = usableRound(screen.rounds[screen.league]) ? "ready" : "failed";
-  // The rest never holds the screen up.
-  screen.settling = Promise.all([...fetches.values(), ensureResultsRounds().catch(() => 0)]).then(() => {
-    if (screen !== matchdayScreen || screen.status !== "ready") return;
+  // The rest never holds the screen up. A fixture list that lands late may
+  // place another league on this day: its chip and week join the screen.
+  const lateLeagues = fixturesLanded.then(async () => {
+    const more = scorecardLeagues(screen.d).filter((league) => !screen.leagues.some((known) => known.code === league.code));
+    if (!more.length) return;
+    screen.leagues = [...screen.leagues, ...more].sort((a, b) => (a.code < b.code ? -1 : 1));
+    await Promise.all(more.map(async (league) => {
+      const copy = cachedRoundState(league.code, league.period);
+      const round = dayFullySettled(copy, league) ? copy : await loadMatchdayRound(league.code, league.period).catch(() => null);
+      if (usableRound(round)) screen.rounds[league.code] = round;
+    }));
+  });
+  screen.settling = Promise.all([...fetches.values(), ensureResultsRounds().catch(() => 0), lateLeagues]).then(() => {
+    if (screen !== matchdayScreen || screen.status !== "ready") return false;
     const view = matchdayScreenView();
-    if (view !== screen.paintedView) { render(); screen.paintedView = view; }
+    if (view === screen.paintedView) return false;
+    render();
+    screen.paintedView = view;
+    return true;
   });
 }
 

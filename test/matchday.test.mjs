@@ -813,17 +813,54 @@ test("build 38 · My Picks prefetches each settled day once per league+day, one 
   assert.match(sourceOf("scorecardLinks"), /prefetchScorecards\(done\);/);
 });
 
-test("build 38 · the diagnostics timer: last ten opens, tap to content, and nothing identifying", () => {
-  const box = load(["noteScorecardOpen", "scorecardOpenLines"], { scorecardOpens: [], clockMs: () => 1000 });
+test("build 39 · the diagnostics timer: first and final paint, last ten opens, nothing identifying", () => {
+  let now = 1000;
+  const box = load(["noteScorecardOpen", "noteScorecardFinal", "scorecardOpenLines"], { scorecardOpens: [], clockMs: () => now });
   for (let i = 0; i < 12; i++) box.noteScorecardOpen({ status: "ready", openedAt: 1000 - (i + 1) * 10, from: i % 2 ? "device" : "network" });
   box.noteScorecardOpen({ status: "failed", openedAt: 0 });
   assert.equal(box.scorecardOpens.length, 10);
+  const screen = { status: "ready", openedAt: 1000, from: "device" };
+  box.noteScorecardOpen(screen);                     // first paint at 0 ms
+  now = 1900; box.noteScorecardFinal(screen, true);  // a quiet refresh repainted at 900 ms
   const lines = box.scorecardOpenLines();
-  assert.equal(lines[1], "scorecard opens — ms tap to content (newest last):");
-  assert.equal(lines.at(-1), "  120 ms  device");
+  assert.equal(lines[1], "scorecard opens — first paint / final paint, ms from tap (newest last):");
+  assert.equal(lines.at(-1), "  first 0 ms device  ·  final 900 ms network");
+  assert.match(lines.at(-2), /^  first 120 ms device  ·  final pending$/);
   assert.doesNotMatch(lines.join("\n"), /uid|AAA|2026/);
   assert.match(sourceOf("diagnosticsText"), /\.\.\.scorecardOpenLines\(\)/);
   assert.match(sourceOf("loadMatchdayScreen"), /noteScorecardOpen\(screen\)/);
+  assert.match(sourceOf("loadMatchdayScreen"), /noteScorecardFinal\(screen, repainted\)/);
+});
+
+test("build 39 · a fully settled day paints in the same task as the tap — it awaits NO network at all", async () => {
+  const never = () => new Promise(() => {});
+  const asked = [];
+  const renders = [];
+  const copies = { "AAA:13": { reveal: settledReveal(["pl-1", "pl-2"]) }, "BBB:13": { reveal: settledReveal(["pl-1"]) } };
+  const box = load(["openMatchdayScreen", "loadMatchdayScreen", "loadScorecardScreen", "dayFullySettled", "usableRound",
+    "noteScorecardOpen", "noteScorecardFinal"], {
+    matchdayGeneration: 0, scorecardOpens: [], clockMs: () => 0,
+    // Every network-backed step the old path waited on: none of them ever answers.
+    navigateToView: (view) => { asked.push(`nav:${view}`); return never(); },
+    loadFixturesForLeagues: () => { asked.push("fixtures"); return never(); },
+    loadMatchdayRound: (code) => { asked.push(`round:${code}`); return never(); },
+    ensureResultsRounds: () => { asked.push("banner"); return never(); },
+    api: () => { asked.push("api"); return never(); },
+    fetch: () => { asked.push("fetch"); return never(); },
+    scorecardLeagues: () => DAY_LEAGUES, activeLeague: "AAA",
+    cachedRoundState: (code, period) => copies[`${code}:${period}`] || null,
+    appScroller: () => null, render: () => renders.push(box.matchdayScreen?.status),
+    matchdayScreenView: () => "view", loadRevealScreen: never, loadResultsScreen: never,
+  });
+  box.openMatchdayScreen({ view: "scorecard", d: "2026-11-24", league: "AAA" });   // not awaited: the tap
+  for (let i = 0; i < 20; i++) await Promise.resolve();                         // microtasks only — no timer, no I/O
+  assert.equal(box.matchdayScreen.status, "ready", `the settled day waited on: ${asked.join(", ")}`);
+  assert.equal(box.matchdayScreen.from, "device");
+  assert.ok(renders.includes("ready"), "content was not painted");
+  assert.ok(!asked.some((step) => step.startsWith("round:")), "a settled day asked the network for its week");
+  // And the source can never go back to awaiting the tab change before drawing.
+  assert.doesNotMatch(sourceOf("openMatchdayScreen"), /await navigateToView/);
+  assert.doesNotMatch(sourceOf("loadScorecardScreen").split("let leagues")[0], /await /);
 });
 
 test("build 38 · day share card: 'TUESDAY'S TOP SCORER' / '2 pts'; tie: 'TUESDAY'S JOINT TOP SCORERS'", () => {

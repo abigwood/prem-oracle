@@ -1,6 +1,6 @@
 const SEASON_START = new Date("2026-08-21T20:00:00+01:00");
 const SEASON_START_DATE = "2026-08-21";
-const APP_BUILD = "20261126b";
+const APP_BUILD = "20261126c";
 const API = window.PREM_API || null;
 // Canonical public home of the web app. Inside the Capacitor shell the page is
 // served from premoracle://localhost, so location.origin can never be used to
@@ -6949,7 +6949,7 @@ let matchdayScreen = null;
 let matchdayGeneration = 0;
 
 async function openMatchdayScreen(route) {
-  const screen = { ...route, status: "loading", id: ++matchdayGeneration };
+  const screen = { ...route, status: "loading", id: ++matchdayGeneration, openedAt: clockMs() };
   matchdayScreen = screen;
   await navigateToView("picks");
   appScroller()?.scrollTo({ top: 0 });
@@ -6969,7 +6969,32 @@ async function loadMatchdayScreen(screen) {
   } catch {
     screen.status = "failed";
   }
-  if (screen === matchdayScreen) render();
+  if (screen === matchdayScreen) {
+    render();
+    if (screen.view === "scorecard") {
+      screen.paintedView = matchdayScreenView();
+      noteScorecardOpen(screen);
+    }
+  }
+}
+
+// --- v1.9 build 38: how long a scorecard takes to show -------------------------
+//
+// Tap to first content, the last ten opens, kept in memory only and shown in
+// the diagnostics the viewer copies from Profile. No uid, no league, no date.
+const clockMs = () => (typeof performance !== "undefined" && performance.now ? performance.now() : Date.now());
+const scorecardOpens = [];
+
+function noteScorecardOpen(screen) {
+  if (screen.status !== "ready" || !Number.isFinite(screen.openedAt)) return;
+  scorecardOpens.push({ ms: Math.max(0, Math.round(clockMs() - screen.openedAt)), from: screen.from || "network" });
+  if (scorecardOpens.length > 10) scorecardOpens.shift();
+}
+
+function scorecardOpenLines() {
+  if (!scorecardOpens.length) return [];
+  return ["", "scorecard opens — ms tap to content (newest last):",
+    ...scorecardOpens.map((entry) => `  ${entry.ms} ms  ${entry.from}`)];
 }
 
 function matchdayScreenView() {
@@ -7078,8 +7103,32 @@ function scorecardLeagues(day) {
   return out;
 }
 
+/**
+ * v1.9 build 38: a settled day is immutable, so the device's own copy of the
+ * week is enough to draw it. A day counts as fully settled in that copy when
+ * every one of the league's fixtures that day is marked settled or void there.
+ */
+function dayFullySettled(round, league) {
+  if (!round || round.error || !Array.isArray(round.reveal)) return false;
+  const entries = new Map(round.reveal.map((entry) => [String(entry.id), entry]));
+  return (league?.ids || []).length > 0 && league.ids.every((id) => {
+    const entry = entries.get(String(id));
+    return !!entry && (entry.settled === true || entry.voided === true) && Array.isArray(entry.picks);
+  });
+}
+
+const usableRound = (round) => !!(round && !round.error && round.reveal);
+
+/**
+ * Draws from the device copy at once when it has the chosen league's week,
+ * and waits only for that one league otherwise. Everything else — other
+ * leagues' chips, the week-complete banner, a quiet refresh of a day that was
+ * not fully settled when saved — lands afterwards and repaints only if the
+ * screen actually changed.
+ */
 async function loadScorecardScreen(screen) {
-  // A cold tap may beat the fixture lists for a second competition.
+  // A cold tap may beat the fixture lists for a second competition. Nothing is
+  // fetched when every competition is already loaded.
   try { await loadFixturesForLeagues(); } catch { /* the leagues we can place still show */ }
   const leagues = scorecardLeagues(screen.d);
   screen.leagues = leagues;
@@ -7090,13 +7139,29 @@ async function loadScorecardScreen(screen) {
     screen.league = (leagues.find((league) => league.code === activeLeague) || leagues[0]).code;
   }
   screen.rounds = {};
-  await Promise.all(leagues.map(async (league) => {
-    screen.rounds[league.code] = await loadMatchdayRound(league.code, league.period);
-  }));
-  // The week-complete banner speaks for every league, so it needs theirs too.
-  await ensureResultsRounds();
-  const chosen = screen.rounds[screen.league];
-  screen.status = chosen && !chosen.error && chosen.reveal ? "ready" : "failed";
+  const stale = [];
+  for (const league of leagues) {
+    const copy = cachedRoundState(league.code, league.period);
+    if (usableRound(copy)) screen.rounds[league.code] = copy;
+    if (!dayFullySettled(copy, league)) stale.push(league);
+  }
+  const fetches = new Map(stale.map((league) => [league.code, loadMatchdayRound(league.code, league.period).then((round) => {
+    if (usableRound(round)) screen.rounds[league.code] = round;
+  }).catch(() => {})]));
+  // Where the first paint came from, for the diagnostics timer.
+  if (!usableRound(screen.rounds[screen.league])) {
+    screen.from = "network";
+    await fetches.get(screen.league);
+  } else {
+    screen.from = fetches.has(screen.league) ? "device+refresh" : "device";
+  }
+  screen.status = usableRound(screen.rounds[screen.league]) ? "ready" : "failed";
+  // The rest never holds the screen up.
+  screen.settling = Promise.all([...fetches.values(), ensureResultsRounds().catch(() => 0)]).then(() => {
+    if (screen !== matchdayScreen || screen.status !== "ready") return;
+    const view = matchdayScreenView();
+    if (view !== screen.paintedView) { render(); screen.paintedView = view; }
+  });
 }
 
 /** The day, worked out from one league's round: who scored what, match by match. */
@@ -7383,8 +7448,39 @@ function scorecardLinks(ids) {
   }
   const done = [...days].filter(([, settled]) => settled).map(([day]) => day).sort();
   if (!done.length) return "";
+  prefetchScorecards(done);
   return `<div class="scorecard-links">${done.map((day) =>
     `<button type="button" class="results-link" data-open-scorecard="${escapeHTML(day)}">${escapeHTML(ukWeekday(day))}'s scorecard ›</button>`).join("")}</div>`;
+}
+
+/**
+ * v1.9 build 38: My Picks has drawn a link to a settled day, so the scorecard
+ * behind it is fetched quietly — once per league+day per session, after the
+ * paint, and not at all when the device copy already holds that day settled.
+ */
+const scorecardPrefetched = new Set();
+
+function prefetchScorecards(days) {
+  const wanted = [];
+  for (const day of days) {
+    for (const league of scorecardLeagues(day)) {
+      const key = `${league.code}:${day}`;
+      if (scorecardPrefetched.has(key)) continue;
+      scorecardPrefetched.add(key);
+      if (dayFullySettled(cachedRoundState(league.code, league.period), league)) continue;
+      wanted.push(league);
+    }
+  }
+  if (!wanted.length || !API) return;
+  setTimeout(() => {
+    const periods = new Set();
+    for (const league of wanted) {
+      const once = `${league.code}:${league.period}`;
+      if (periods.has(once)) continue;               // two days of one week: one request
+      periods.add(once);
+      loadMatchdayRound(league.code, league.period).catch(() => {});
+    }
+  }, 600);
 }
 
 // --- shares, drawn only from what the screen holds ---------------------------
@@ -7394,12 +7490,15 @@ function shareScorecardNow() {
   const model = screen?.view === "scorecard" && screen.status === "ready" ? scorecardModel(screen) : null;
   if (!model) return;
   const top = model.table.filter((row) => row.pts > 0 && row.pts === model.table[0]?.pts);
+  const day = ukWeekday(screen.d).toUpperCase();
   const card = {
     league: model.league.name,
     headline: `${ukWeekday(screen.d)}'s scorecard · ${ukShortDate(screen.d)}`,
-    heroEyebrow: top.length > 1 ? "JOINT TOP SCORERS" : "TOP SCORER",
+    // The day's own honour: "TUESDAY'S TOP SCORER" / "2 pts". No week label —
+    // the headline already names the day and date.
+    heroEyebrow: top.length > 1 ? `${day}'S JOINT TOP SCORERS` : `${day}'S TOP SCORER`,
     heroName: top.map((row) => row.nick).join(" & ") || "Nobody",
-    heroLine: `${weekWording(model.league.period)} · ${top[0]?.pts ?? 0} pts`,
+    heroLine: `${top[0]?.pts ?? 0} pts`,
     podium: [],
     rows: model.table.map((row) => ({ rank: row.rank, nick: row.nick, pts: row.pts, exact: row.exact, movement: null, place: null })),
     code: model.league.code,
@@ -8220,6 +8319,7 @@ function diagnosticsText() {
     `rootFont ${report.rootFontPx}px  native ${report.native}`,
     ...matchweekMismatchLines(),
     ...weeklyFinalMismatchLines(),
+    ...scorecardOpenLines(),
   ];
   // Times are milliseconds from the physical pointerdown, which is where a slow
   // tap actually begins — not where a handler eventually hears about it.

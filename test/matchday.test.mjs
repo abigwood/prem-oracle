@@ -121,6 +121,7 @@ const PICKS_NAMES = [
   "scorecardLeagues", "scorecardModel", "scorecardScreenView", "dayTableRow", "dayTableMore", "scorecardMatch", "weekCompleteBanner",
   "resultsSnapshot", "resultsCard", "resultsSummary", "resultsMoveBadge", "movementMark", "yourResultsBlock",
   "resultsModeFor", "resultsRoundFlights", "requestResultsRound", "resultsLinkSeenAt", "resultsSlimLink", "scorecardLinks",
+  "scorecardPrefetched", "prefetchScorecards", "dayFullySettled", "usableRound",
   "ordinal", "ORDINALS", "alertOffer", "ALERT_OFFER_COPY", "byKickoffAsc", "sharedRankByUid",
 ];
 
@@ -135,7 +136,9 @@ function mounted({ state = leagueState13(), rounds = { "AAA:13": ROUND13 }, fixt
   const dom = new JSDOM(`<!doctype html><body><main id="app"></main></body>`);
   const { document } = dom.window;
   const fetched = [];
+  const timers = [];        // deferred work (the scorecard prefetch) runs only when a test says so
   const b = load(PICKS_NAMES, {
+    setTimeout: (fn) => { timers.push(fn); return timers.length; },
     picks: MY_PICKS, fixtures, document, API: "https://api.test",
     fixturesStatus: "ready", confirmedLeagues: new Set(["AAA"]), leagueLoadFailed: new Set(), picksLoadTimedOut: false,
     leagueNames: { AAA: "Burtons Premier" }, expandedPickId: null, activeLeague: active,
@@ -158,7 +161,7 @@ function mounted({ state = leagueState13(), rounds = { "AAA:13": ROUND13 }, fixt
   const paint = () => { document.getElementById("app").innerHTML = b.picksView(); };
   paint();
   const text = () => document.getElementById("app").textContent.replace(/\s+/g, " ").trim();
-  return { box: b, document, paint, text, fetched, storage };
+  return { box: b, document, paint, text, fetched, storage, timers };
 }
 
 // --- results mode on My Picks ------------------------------------------------------
@@ -717,4 +720,132 @@ test("F5 · a SETTLED row is grey (#ECEFF4 / #DCE1E8); open, locked, in-play, vo
   };
   assert.ok(contrast("#475569", "#ECEFF4") >= 4.5);
   assert.ok(contrast("#17202A", "#ECEFF4") >= 4.5);
+});
+
+// --- build 38 · the scorecard opens fast ------------------------------------------
+
+const settledReveal = (ids, extra = {}) => ids.map((id) => ({ id, settled: true, voided: false, picks: [], ...extra }));
+const DAY_LEAGUES = [
+  { code: "AAA", name: "A", period: "13", ids: ["pl-1", "pl-2"] },
+  { code: "BBB", name: "B", period: "13", ids: ["pl-1"] },
+];
+
+function loaderBox({ copies = {}, network = {}, hang = false, gate = null } = {}) {
+  const calls = [];
+  const renders = [];
+  const box = load(["loadScorecardScreen", "dayFullySettled", "usableRound"], {
+    loadFixturesForLeagues: async () => {},
+    scorecardLeagues: () => DAY_LEAGUES,
+    activeLeague: "AAA",
+    cachedRoundState: (code, period) => copies[`${code}:${period}`] || null,
+    loadMatchdayRound: (code, period) => {
+      calls.push(`${code}:${period}`);
+      if (hang && code !== "AAA") return new Promise(() => {});      // never answers
+      return (gate || Promise.resolve()).then(() => network[`${code}:${period}`] || null);
+    },
+    ensureResultsRounds: () => (hang ? new Promise(() => {}) : Promise.resolve(0)),
+    matchdayScreenView: () => JSON.stringify(box.matchdayScreen?.rounds || {}),
+    render: () => renders.push(1),
+  });
+  return { box, calls, renders };
+}
+
+test("build 38 · a fully settled day draws from the device copy with no request at all", async () => {
+  const copies = { "AAA:13": { reveal: settledReveal(["pl-1", "pl-2"]) }, "BBB:13": { reveal: settledReveal(["pl-1"]) } };
+  const { box, calls } = loaderBox({ copies });
+  const screen = { view: "scorecard", d: "2026-11-24", league: "AAA" };
+  box.matchdayScreen = screen;
+  await box.loadScorecardScreen(screen);
+  await screen.settling;
+  assert.equal(screen.status, "ready");
+  assert.equal(screen.from, "device");
+  assert.deepEqual(calls, [], "a settled day asked the network");
+});
+
+test("build 38 · a day not fully settled when saved draws at once, then refreshes quietly and repaints only if changed", async () => {
+  const copies = { "AAA:13": { reveal: [{ id: "pl-1", settled: true, picks: [] }, { id: "pl-2", revealed: true }] } };
+  const network = { "AAA:13": { reveal: settledReveal(["pl-1", "pl-2"]) }, "BBB:13": { reveal: settledReveal(["pl-1"]) } };
+  let open;
+  const gate = new Promise((resolve) => { open = resolve; });
+  const { box, calls, renders } = loaderBox({ copies, network, gate });
+  const screen = { view: "scorecard", d: "2026-11-24", league: "AAA", paintedView: "" };
+  box.matchdayScreen = screen;
+  await box.loadScorecardScreen(screen);
+  assert.equal(screen.status, "ready");
+  assert.equal(screen.from, "device+refresh");
+  assert.equal(screen.rounds.AAA, copies["AAA:13"], "did not draw the device copy first");
+  open();
+  await screen.settling;
+  assert.deepEqual(calls.sort(), ["AAA:13", "BBB:13"]);
+  assert.equal(screen.rounds.AAA, network["AAA:13"]);
+  assert.equal(renders.length, 1, "the quiet refresh did not repaint the changed screen");
+});
+
+test("build 38 · first open waits only for the chosen league — never for other leagues or the banner", async () => {
+  const network = { "AAA:13": { reveal: settledReveal(["pl-1", "pl-2"]) } };
+  const { box } = loaderBox({ network, hang: true });
+  const screen = { view: "scorecard", d: "2026-11-24", league: "AAA" };
+  box.matchdayScreen = screen;
+  const done = await Promise.race([box.loadScorecardScreen(screen).then(() => "loaded"), new Promise((r) => setTimeout(() => r("blocked"), 200))]);
+  assert.equal(done, "loaded", "the screen waited on another league or the banner");
+  assert.equal(screen.status, "ready");
+  assert.equal(screen.from, "network");
+});
+
+test("build 38 · My Picks prefetches each settled day once per league+day, one request per week, none when held", () => {
+  const app = mounted();
+  app.box.scorecardPrefetched.clear();
+  app.fetched.length = 0;
+  app.timers.length = 0;
+  const legs = [{ code: "AAA", name: "A", period: "99", ids: ["pl-1"] }];   // a week the device does not hold
+  app.box.scorecardLeagues = () => legs;
+  app.box.prefetchScorecards(["2026-11-28", "2026-11-29"]);  // two days, same week
+  app.box.prefetchScorecards(["2026-11-28", "2026-11-29"]);  // a repaint
+  assert.equal(app.timers.length, 1, "prefetch ran during the paint or was scheduled twice");
+  app.timers[0]();
+  assert.deepEqual(app.fetched, ["AAA:99"], "not one request for the week");
+  // A day the device already holds settled is not fetched at all.
+  const held = mounted({ rounds: { "AAA:13": ROUND13, "AAA:99": { reveal: settledReveal(["pl-1"]) } } });
+  held.box.scorecardPrefetched.clear(); held.timers.length = 0;
+  held.box.scorecardLeagues = () => legs;
+  held.box.prefetchScorecards(["2026-11-30"]);
+  assert.equal(held.timers.length, 0);
+  assert.match(sourceOf("scorecardLinks"), /prefetchScorecards\(done\);/);
+});
+
+test("build 38 · the diagnostics timer: last ten opens, tap to content, and nothing identifying", () => {
+  const box = load(["noteScorecardOpen", "scorecardOpenLines"], { scorecardOpens: [], clockMs: () => 1000 });
+  for (let i = 0; i < 12; i++) box.noteScorecardOpen({ status: "ready", openedAt: 1000 - (i + 1) * 10, from: i % 2 ? "device" : "network" });
+  box.noteScorecardOpen({ status: "failed", openedAt: 0 });
+  assert.equal(box.scorecardOpens.length, 10);
+  const lines = box.scorecardOpenLines();
+  assert.equal(lines[1], "scorecard opens — ms tap to content (newest last):");
+  assert.equal(lines.at(-1), "  120 ms  device");
+  assert.doesNotMatch(lines.join("\n"), /uid|AAA|2026/);
+  assert.match(sourceOf("diagnosticsText"), /\.\.\.scorecardOpenLines\(\)/);
+  assert.match(sourceOf("loadMatchdayScreen"), /noteScorecardOpen\(screen\)/);
+});
+
+test("build 38 · day share card: 'TUESDAY'S TOP SCORER' / '2 pts'; tie: 'TUESDAY'S JOINT TOP SCORERS'", () => {
+  const cards = [];
+  const box = load(["shareScorecardNow"], {
+    ukWeekday: () => "Tuesday", ukShortDate: () => "24 Nov",
+    inviteLinkFor: (c) => `https://x/${c}`,
+    weeklyCardGeometry: () => ({ hero: 1, m: { pages: 1 } }),
+    drawWeeklyPage: (card) => { cards.push(card); return {}; },
+    cardPng: () => ({}), shareCardFile: () => {},
+  });
+  const run = (table) => {
+    box.matchdayScreen = { view: "scorecard", status: "ready", d: "2026-11-24" };
+    box.scorecardModel = () => ({ league: { name: "L", code: "AAA", period: "13" }, table });
+    box.shareScorecardNow();
+    return cards.at(-1);
+  };
+  const one = run([{ nick: "Adam", pts: 2, rank: 1 }, { nick: "Bex", pts: 1, rank: 2 }]);
+  assert.deepEqual([one.heroEyebrow, one.heroName, one.heroLine], ["TUESDAY'S TOP SCORER", "Adam", "2 pts"]);
+  const tie = run([{ nick: "Adam", pts: 2, rank: 1 }, { nick: "Bex", pts: 2, rank: 1 }]);
+  assert.deepEqual([tie.heroEyebrow, tie.heroName, tie.heroLine], ["TUESDAY'S JOINT TOP SCORERS", "Adam & Bex", "2 pts"]);
+  const none = run([{ nick: "Adam", pts: 0, rank: 1 }]);
+  assert.deepEqual([none.heroEyebrow, none.heroName, none.heroLine], ["TUESDAY'S TOP SCORER", "Nobody", "0 pts"]);
+  assert.doesNotMatch(JSON.stringify([one, tie, none].map((c) => c.heroEyebrow + c.heroLine)), /Week|Matchweek/);
 });

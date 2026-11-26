@@ -2933,7 +2933,11 @@ class MatesPicksTests(unittest.TestCase):
         fn = self.worker[self.worker.index("async function state(env, url)"):]
         fn = fn[:fn.index("\nasync function")]
         # Spread, so a viewer who is not a current member gets no field at all.
-        self.assertIn("...(viewerIsMember ? {", fn)
+        # v1.9 build 38: the reveal is built for the cached week, and only a
+        # current member is ever SENT it — serveRound strips it for everyone else.
+        self.assertIn("const { reveal, ...open } = relabelNicks(body, nicks);", fn)
+        self.assertIn("? json({ ...live, ...(reveal ? { reveal } : {}) }, 200, env,", fn)
+        self.assertIn(": json(live, 200, env);", fn)
         self.assertIn("const viewerIsMember = !!viewer && memberList.some((member) => member.uid === viewer);", fn)
         # And never a rejection merely for arriving without a uid: the round
         # branch has no status other than the 200 it has always returned.
@@ -2944,7 +2948,7 @@ class MatesPicksTests(unittest.TestCase):
     def test_only_the_answer_carrying_picks_is_kept_from_shared_caches(self):
         fn = self.worker[self.worker.index("async function state(env, url)"):]
         fn = fn[:fn.index("\nasync function")]
-        self.assertIn('viewerIsMember ? { "cache-control": "private, no-store" } : {}', fn)
+        self.assertIn('return viewerIsMember\n        ? json({ ...live, ...(reveal ? { reveal } : {}) }, 200, env, { "cache-control": "private, no-store" })\n        : json(live, 200, env);', fn)
 
     def test_the_reveal_costs_no_additional_reads(self):
         fn = self.worker[self.worker.index("async function state(env, url)"):]

@@ -2444,6 +2444,38 @@ async function pickerPreload(env, league, period, pool, stored) {
   };
 }
 
+// --- v1.9 build 38: the settled-week cache ------------------------------------
+//
+// One KV record per league+week, written only once the week is complete. It
+// holds the computed week WITH the reveal, so it is server-side data only: the
+// member check runs on every request and the reveal is sent to members alone,
+// `private, no-store`. Never the Cache API — that keys on the URL, uid and all.
+
+const ROUND_CACHE_VERSION = 1;
+const ROUND_CACHE_TTL_S = 7 * 24 * 60 * 60;
+const roundCacheKey = (code, period) => `roundcache:${code}:${period}`;
+
+/** Everything a settled week's answer is computed from, apart from picks (locked). */
+export function roundFingerprint(period, roundFixtures, slate, memberList) {
+  return JSON.stringify([
+    String(period),
+    (roundFixtures || []).map((match) => [String(match.id), normaliseResult(match) || null, !!isVoided(match),
+      String(match.status || ""), match.lockAt || match.startAt || null]),
+    slate ? [slate.status || null, slate.version ?? null, (slate.fixtureIds || []).map(String)] : null,
+    (memberList || []).map((member) => [member.uid, member.since || 0]).sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)),
+  ]);
+}
+
+/** Every { uid, nick } in a week's answer gets the member's CURRENT name. */
+export function relabelNicks(value, nicks) {
+  if (Array.isArray(value)) return value.map((entry) => relabelNicks(entry, nicks));
+  if (!value || typeof value !== "object") return value;
+  const out = {};
+  for (const [key, entry] of Object.entries(value)) out[key] = relabelNicks(entry, nicks);
+  if (typeof out.uid === "string" && "nick" in out && nicks.has(out.uid)) out.nick = nicks.get(out.uid);
+  return out;
+}
+
 async function state(env, url) {
   // ONE timestamp for the whole response. Gating fixture A at 14:59:59 and
   // fixture B at 15:00:00 inside the same answer would make the reveal depend
@@ -2457,13 +2489,20 @@ async function state(env, url) {
   const mixed = isMixedLeague(league);
   const plan = leagueFixturePlan(league);
   const keyOf = leaguePeriodOf(league);
-  // Each competition's fixtures already carry their own results, so the union
-  // below is a union of results:PL and results:ELC by construction.
-  const matchList = await leagueFixtures(env, league);
-  const memberList = await members(env, league);
-  const byPeriod = poolByPeriod(matchList, league);
   const periodParam = url.searchParams.get("period") ?? url.searchParams.get("md");
   const roundOnly = periodParam != null && String(periodParam).trim() !== "";
+  const roundPeriod = roundOnly ? String(periodParam).trim() : null;
+  // Each competition's fixtures already carry their own results, so the union
+  // below is a union of results:PL and results:ELC by construction.
+  // v1.9 build 38: the independent reads go out together rather than one after
+  // another — and a round request also fetches its cached settled week.
+  const [matchList, memberList, roundStored, roundCached] = await Promise.all([
+    leagueFixtures(env, league),
+    members(env, league),
+    roundOnly && slateAware(league) ? kvGet(env, slateKey(code, roundPeriod)) : null,
+    roundOnly ? kvGet(env, roundCacheKey(code, roundPeriod)) : null,
+  ]);
+  const byPeriod = poolByPeriod(matchList, league);
 
   const asCompleted = (list) => list
     .map((match) => ({
@@ -2480,18 +2519,10 @@ async function state(env, url) {
   // every fixture in the season — 932 on a mixed league — to answer a question
   // about six of them, which is most of a 1,000-subrequest budget spent on
   // rows that get thrown away.
-  const roundPeriod = roundOnly ? String(periodParam).trim() : null;
-  const roundStored = roundOnly && slateAware(league)
-    ? await kvGet(env, slateKey(code, roundPeriod))
-    : null;
   const roundSlate = isPublishedSlate(roundStored) ? roundStored : null;
   const roundPool = roundOnly ? (byPeriod.get(roundPeriod) || []) : [];
   const roundFixtures = roundOnly ? slateFixtures(roundSlate, roundPool) : [];
 
-  const pickIds = roundOnly
-    ? [...new Set([...roundFixtures, ...roundPool].map((match) => match.id))]
-    : matchList.map((match) => match.id);
-  const picks = await allPicks(env, pickIds);
   const completed = asCompleted(roundOnly ? roundPool : matchList);
 
   const rule = leagueWeeklyRule(league);
@@ -2525,11 +2556,29 @@ async function state(env, url) {
      * and it never turns a legacy call into a 403.
      */
     const viewerIsMember = !!viewer && memberList.some((member) => member.uid === viewer);
+    // A settled week is served from its cached record when nothing it was
+    // computed from has changed since. The fingerprint is recomputed from this
+    // request's own reads, so a corrected result, an amended slate, or anyone
+    // joining, leaving or being removed recomputes the week. Names are never
+    // taken from the record: serveRound puts the live ones back.
+    const fingerprint = roundFingerprint(period, roundFixtures, slate, memberList);
+    const serveRound = (body) => {
+      const nicks = new Map(memberList.map((member) => [member.uid, member.nick]));
+      const { reveal, ...open } = relabelNicks(body, nicks);
+      const live = { ...open, code, name: league.name, owner: league.owner, ...identity };
+      return viewerIsMember
+        ? json({ ...live, ...(reveal ? { reveal } : {}) }, 200, env, { "cache-control": "private, no-store" })
+        : json(live, 200, env);
+    };
+    if (roundCached?.v === ROUND_CACHE_VERSION && roundCached.fp === fingerprint && roundCached.body) {
+      return serveRound(roundCached.body);
+    }
+    const picks = await allPicks(env, [...new Set([...roundFixtures, ...pool].map((match) => match.id))]);
     const scoped = applySlates(completed.filter((match) => match.period === period),
       slate ? { [period]: slate } : {});
     // Ordered by the full tie-break, ranked on points alone — see withSharedRank.
     const table = withSharedRank(computeTable(memberList, scoped, picks));
-    return json({
+    const body = {
       code,
       name: league.name,
       owner: league.owner,
@@ -2552,7 +2601,9 @@ async function state(env, url) {
       // is no longer in it, and never was is the same answer. Anyone else is
       // simply not sent the field — `includePicks` below is the second lock on
       // the same door, so a mistake here still cannot serialize a prediction.
-      ...(viewerIsMember ? {
+      // Built for every request now (it is only ever SENT to a member — see
+      // serveRound), so the cached week can answer members and non-members.
+      ...({
         reveal: buildRoundReveal({
           fixtures: roundFixtures,
           picksByMatch: picks,
@@ -2560,13 +2611,23 @@ async function state(env, url) {
           serverNow,
           includePicks: true,
         }),
-      } : {}),
+      }),
       // Only the answer that actually carries other people's predictions is
       // withheld from shared caches. A response without the field is the same
       // public round data it has always been, with the headers it always had.
-    }, 200, env, viewerIsMember ? { "cache-control": "private, no-store" } : {});
+    };
+    if (body.complete === true) {
+      // Settled: immutable until something in the fingerprint changes.
+      try {
+        await env.KV.put(roundCacheKey(code, period),
+          JSON.stringify({ v: ROUND_CACHE_VERSION, fp: fingerprint, body }),
+          { expirationTtl: ROUND_CACHE_TTL_S });
+      } catch { /* the next request simply computes it again */ }
+    }
+    return serveRound(body);
   }
 
+  const picks = await allPicks(env, matchList.map((match) => match.id));
   const slates = slateAware(league) ? await readSlates(env, code) : {};
   const scopedFixtures = applySlates(matchList.map((match) => ({ ...match, period: keyOf(match) })), slates);
   const scopedCompleted = applySlates(completed, slates);

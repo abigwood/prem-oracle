@@ -79,7 +79,7 @@ class PremOracleTests(unittest.TestCase):
         self.assertIn("setupNativePushNotifications", app)
         self.assertIn("/push-token", app)
         self.assertIn("teamIntel", app)
-        self.assertIn("VENUE_OUTLOOK", app)
+        self.assertNotIn("VENUE_OUTLOOK", app)  # v1.9: real WeatherKit forecasts only
         self.assertIn(".team-crest", css)
         self.assertIn("TEAM_MARKERS", app)
         self.assertIn('"Arsenal": { bg: "#E20613"', app)
@@ -401,7 +401,10 @@ class SmartInviteLinkTests(unittest.TestCase):
         fn = fn[:fn.index("\n}")]
         self.assertIn('app.addListener("appUrlOpen"', fn)
         self.assertIn("app.getLaunchUrl?.()", fn, "a cold launch has no event, only a launch URL")
-        self.assertIn("openInviteFlow(code)", fn)
+        # v1.9 §1: both paths go through the one router, which Slice 2's
+        # alert taps reuse.
+        self.assertIn("followIncomingLink(data?.url", fn)
+        self.assertIn("followIncomingLink(launch.url, { launch: true })", fn)
         parse = self.app[self.app.index("function leagueCodeFromUrl(url)"):]
         parse = parse[:parse.index("\n}")]
         self.assertIn('searchParams.get("league")', parse)
@@ -758,7 +761,7 @@ class CompetitionAppTests(unittest.TestCase):
     def test_the_app_loads_every_selected_competition(self):
         # The URL is versioned by the feed's revision now, not the clock, so
         # every layer of cache can actually hold it.
-        self.assertIn("const query = [`competition=${code}`];", self.app)
+        self.assertIn("const query = [`competition=${code}`, \"wx=1\"];", self.app)
         self.assertIn('query.push(`rev=${encodeURIComponent(revision)}`)', self.app)
         self.assertIn("competitionMeta(code).data", self.app)
         self.assertIn('data: "data/fixtures-elc.json"', self.app)
@@ -813,7 +816,8 @@ class CompetitionAppTests(unittest.TestCase):
         self.assertIn("codes.length < 2", self.app)
         # Server side honours it and re-registering a device does not un-mute.
         self.assertIn("const mutes = (record, competition) =>", self.worker)
-        self.assertIn("mute: Array.isArray(existing?.mute) ? existing.mute : []", self.worker)
+        self.assertIn("...preferenceFields(existing),", self.worker)
+        self.assertIn("const out = { mute: Array.isArray(record?.mute) ? record.mute : [] };", self.worker)
 
     def test_worker_exposes_competition_endpoints(self):
         for route in ('path === "/notification-prefs"', 'path === "/admin/migration"'):
@@ -1398,7 +1402,9 @@ class WeeklyLoopTests(unittest.TestCase):
     def test_the_host_nudge_copy_splits_on_the_league_shape(self):
         remind = self.worker[self.worker.index("async function remindHost"):]
         remind = remind[:remind.index("/**\n * Resolves what a league")]
-        self.assertIn("`Set this week's fixtures for ${league.name}`", remind)
+        # v1.9: the push never names the league on the lock screen.
+        self.assertIn('"Set this week\'s fixtures for your league"', remind)
+        self.assertNotIn("league.name", remind)
         self.assertIn("`Matchweek ${period} is open — set your fixtures`", remind)
         self.assertIn("isMixedLeague(league)", remind)
         # The same split in the app's own host banner.
@@ -1406,7 +1412,7 @@ class WeeklyLoopTests(unittest.TestCase):
         self.assertIn("Matchweek ${escapeHTML(period)} is open — set your fixtures", self.app)
 
     def test_every_weekly_push_is_deduped_on_league_period_and_type(self):
-        self.assertIn("async function pushOnce(env, pushType, leagueId, periodKey, uids, body)", self.worker)
+        self.assertIn("async function pushOnce(env, pushType, leagueId, periodKey, uids, body, route = null)", self.worker)
         self.assertIn("const key = `notified:${pushType}:${leagueId}:${periodKey}`;", self.worker)
         for push_type in ("slate-open", "slate-published", "auto-published"):
             self.assertIn(f'"{push_type}"', self.worker, push_type)
@@ -2927,7 +2933,11 @@ class MatesPicksTests(unittest.TestCase):
         fn = self.worker[self.worker.index("async function state(env, url)"):]
         fn = fn[:fn.index("\nasync function")]
         # Spread, so a viewer who is not a current member gets no field at all.
-        self.assertIn("...(viewerIsMember ? {", fn)
+        # v1.9 build 38: the reveal is built for the cached week, and only a
+        # current member is ever SENT it — serveRound strips it for everyone else.
+        self.assertIn("const { reveal, ...open } = relabelNicks(body, nicks);", fn)
+        self.assertIn("? json({ ...live, ...(reveal ? { reveal } : {}) }, 200, env,", fn)
+        self.assertIn(": json(live, 200, env);", fn)
         self.assertIn("const viewerIsMember = !!viewer && memberList.some((member) => member.uid === viewer);", fn)
         # And never a rejection merely for arriving without a uid: the round
         # branch has no status other than the 200 it has always returned.
@@ -2938,7 +2948,7 @@ class MatesPicksTests(unittest.TestCase):
     def test_only_the_answer_carrying_picks_is_kept_from_shared_caches(self):
         fn = self.worker[self.worker.index("async function state(env, url)"):]
         fn = fn[:fn.index("\nasync function")]
-        self.assertIn('viewerIsMember ? { "cache-control": "private, no-store" } : {}', fn)
+        self.assertIn('return viewerIsMember\n        ? json({ ...live, ...(reveal ? { reveal } : {}) }, 200, env, { "cache-control": "private, no-store" })\n        : json(live, 200, env);', fn)
 
     def test_the_reveal_costs_no_additional_reads(self):
         fn = self.worker[self.worker.index("async function state(env, url)"):]
@@ -3176,7 +3186,7 @@ class ManageLeaguesAndCreationTests(unittest.TestCase):
         self.assertNotIn("leagueManageOpen", self._fn("submitJoinSheet"))
         self.assertNotIn("leagueManageOpen", self._fn("openJoinSheet"))
         # Invite links still open the one-step sheet at launch.
-        self.assertIn("if (joinInvite && API) openJoinSheet(joinInvite)", self.app)
+        self.assertIn("if (joinInvite && API && !sheetOpen) openJoinSheet(joinInvite)", self.app)
 
 
 class ContextualNotificationAskTests(unittest.TestCase):
@@ -3199,10 +3209,15 @@ class ContextualNotificationAskTests(unittest.TestCase):
         self.assertIn('permission.receive === "granted"', setup)  # only registers if already granted
 
     def test_the_only_permission_request_is_remind_me(self):
-        # requestPermissions appears exactly once in the whole client, in
-        # requestReminders (the Remind me action).
-        self.assertEqual(self.app.count("requestPermissions"), 1)
+        # requestPermissions appears exactly twice in the whole client: in
+        # requestReminders (the Remind me action) and, since v1.9 Slice 2, in
+        # ensurePushPermission — reached only by ticking a Matchday alerts
+        # switch (or its in-context Turn on), never at launch.
+        self.assertEqual(self.app.count("requestPermissions"), 2)
         self.assertIn("requestPermissions", self._fn("requestReminders"))
+        self.assertIn("requestPermissions", self._fn("ensurePushPermission"))
+        self.assertEqual(self.app.count("ensurePushPermission("), 2)  # its definition + setAlertPref
+        self.assertIn("ensurePushPermission()", self._fn("setAlertPref"))
 
     def test_ask_is_gated_native_prompt_and_at_most_once(self):
         fn = self._fn("maybeOfferReminders")

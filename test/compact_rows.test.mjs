@@ -253,7 +253,7 @@ test("each row's name carries both FULL team names, the kick-off and the state",
   assert.equal(label(OPEN.id), `Leeds United against Coventry City, ${kick(OPEN)}, your prediction 3-2, editable until kick-off`);
   assert.equal(label(LOCKED.id), `Manchester United against Brentford, ${kick(LOCKED)}, your prediction 3-2, locked`);
   assert.equal(label(IN_PLAY.id), `Everton against Liverpool, ${kick(IN_PLAY)}, your prediction 3-2, result pending`);
-  assert.equal(label(SETTLED.id), `Fulham against AFC Bournemouth, ${kick(SETTLED)}, final score 2-1, your prediction 3-2`);
+  assert.equal(label(SETTLED.id), `Fulham against AFC Bournemouth, ${kick(SETTLED)}, final score 2-1, your pick 3-2, 2 points`);
   assert.equal(label(VOID.id), `Sunderland against Tottenham Hotspur, ${kick(VOID)}, void, no points, your prediction 3-2`);
   assert.equal(label(POSTPONED.id), `Arsenal against Manchester City, ${kick(POSTPONED)}, postponed, no points, your prediction 3-2`);
   // The visual pieces are hidden from the accessibility tree; the name is the whole story.

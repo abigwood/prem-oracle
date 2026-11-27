@@ -38,14 +38,14 @@ function recorder() {
   return { canvas, ctx, marks, fills };
 }
 
-const NAMES = ["roundTableHtml", "seasonTableHtml", "weeklyMovementBadge", "movementBadge", "seasonMovement", "movementMark", "cardMovementText", "cardMovementWidth", "drawCardMovement", "slateIdsOf", "weeklyMovement", "settlementWindows", "windowPointsByUid", "seasonCardPages", "drawSeasonPage", "drawSeasonTableCard", "weeklyCardPages", "drawWeeklyPage", "drawWeeklyResultCard", "drawCardHeader", "drawCardHero", "drawCardTableHead", "drawCardCellSplit", "drawCardRowPlate", "drawWeeklyRowBand",
+const NAMES = ["roundTableHtml", "seasonTableHtml", "weeklyMovementBadge", "movementBadge", "seasonMovement", "movementMark", "cardMovementText", "cardMovementWidth", "drawCardMovement", "slateIdsOf", "weeklyMovement", "settlementWindows", "windowPointsByUid", "seasonCardPages", "drawSeasonPage", "drawSeasonTableCard", "weeklyCardPages", "drawWeeklyPage", "drawWeeklyResultCard", "drawCardHeader", "drawCardHero", "drawCardTableHead", "cardHasMovement", "drawCardCellSplit", "drawCardRowPlate", "drawWeeklyRowBand",
   "drawCardRowRule", "weeklyCardGeometry", "drawCardHonours", "drawCardFooter",
   "drawFitted", "fitText", "ellipsise", "roundedRect", "cardCanvas", "cardRowMetrics", "cardFont",
   "cardDate", "sentenceCase", "seasonCardModel",
   "weeklyCardModel", "weeklyCardCaption", "weeklyShareStatus", "weeklyTerminalCount",
   "shareSurface", "shareRound", "sharePeriod", "normaliseView", "LEGACY_VIEWS",
   "cardPageRows", "cardPageLabel", "cardTableTop", "CARD_MIN_NAME", "weeklySharePublished", "shareCardState", "seasonShareFreshness", "shareIconButton",
-  "podiumCounts", "weeklyRanks", "sharedRankByUid", "winnerNames", "noteWeeklyFinalMismatch",
+  "podiumCounts", "weeklyRanks", "sharedRankByUid", "winnerNames", "weekLeaders", "noteWeeklyFinalMismatch",
   "weeklyFinalMismatchLines", "finalScore", "isVoidFixture", "isPostponed", "VOID_STATUSES",
   "CARD_TYPE_FLOOR", "CARD_SECOND_FLOOR", "CARD_MIN_ROW", "cardHonoursParts", "CARD_HONOURS_SEP", "cardHonoursWidth", "cardHonoursSize", "CARD_MOVE_GAP", "CARD_MOVE_COLOUR", "CARD_SEASON_MAX_ROWS", "CARD_ROW_TWO_LINE", "CARD_TABLE_LEAD", 
   "CARD", "CARD_W", "CARD_W_PX", "CARD_H_PX", "CARD_PAD", "CARD_COL", "CARD_HEAD_H", "CARD_HERO_H",
@@ -629,7 +629,8 @@ test("podium · the exported weekly card draws no rostrum", () => {
   const drawn = texts(box);
   // The rostrum drew a big "1"/"2"/"3" on each block and a "N pts" line under
   // each name. The table draws neither.
-  assert.equal(drawn.filter((text) => /^\d+ pts$/.test(text)).length, 0,
+  // The only "N pts" line is the highlight box's own subline (the winner's).
+  assert.deepEqual(drawn.filter((text) => /^\d+ pts$/.test(text)), ["92 pts"],
     "a rostrum points line was drawn");
   assert.equal(drawn.filter((text) => text === "Adam").length, 1,
     "the champion's name was drawn twice — hero and rostrum");
@@ -1472,4 +1473,42 @@ test("cols · the on-screen tables are untouched by an export-only change", () =
   const box = paintBox({ leagueTab: "season" });
   const html = box.seasonTableHtml(seasonOf(seasonTable(4)), false);
   assert.ok(!/🏆|🥈|🥉|class="medals/.test(html), "a medal tally survives on the screen's rows");
+});
+
+// --- build 37 · the scorecard/weekly export: no gap, and no empty MOVE column ---
+
+const cardModel = (rows, extra = {}) => ({
+  league: "Sunday Six", headline: "x", heroEyebrow: "AS IT STANDS", heroName: "Adam", heroLine: "Leading Matchweek 3 · 9 pts",
+  podium: [], code: "AAA", link: "https://x/AAA", rows, ...extra,
+});
+const cardRows = (n, movement = () => null) => Array.from({ length: n }, (_, i) => ({
+  rank: i + 1, nick: `P${i + 1}`, pts: 20 - i, exact: 0, movement: movement(i), place: null,
+}));
+
+test("build 37 · the table sits directly under the highlight box, at every short size", () => {
+  for (const n of [2, 4, 6, 8]) {
+    const box = paintBox();
+    const model = cardModel(cardRows(n));
+    const { hero, m } = box.weeklyCardGeometry(n);
+    box.drawWeeklyPage(model, hero, m, 0);
+    const head = painted(box).find((mark) => mark.text === "PLAYER");
+    const heroBottom = box.evalIn("CARD_HEAD_H + CARD_GAP") + hero;
+    assert.equal(head.y - 36, heroBottom + box.evalIn("CARD_GAP"), `${n} rows: a gap opened under the box`);
+  }
+});
+
+test("build 37 · MOVE is drawn only when some row moved — weekly and scorecard alike", () => {
+  const none = paintBox();
+  const { hero, m } = none.weeklyCardGeometry(5);
+  none.drawWeeklyPage(cardModel(cardRows(5)), hero, m, 0);
+  assert.ok(!texts(none).includes("MOVE"), "MOVE heading over a column of nothing");
+  const flat = paintBox();
+  flat.drawWeeklyPage(cardModel(cardRows(5, () => 0)), hero, m, 0);
+  assert.ok(!texts(flat).includes("MOVE"), "MOVE heading over a column of dashes");
+  const moved = paintBox();
+  moved.drawWeeklyPage(cardModel(cardRows(5, (i) => (i === 1 ? 2 : 0))), hero, m, 0);
+  assert.ok(texts(moved).includes("MOVE"));
+  // The scorecard share builds rows with movement: null, so its card has no MOVE.
+  assert.match(sourceOf("shareScorecardNow"), /movement: null/);
+  assert.match(sourceOf("drawSeasonPage"), /drawCardTableHead\(ctx, y, \{ move \}\)/);
 });

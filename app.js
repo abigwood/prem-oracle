@@ -1,6 +1,6 @@
 const SEASON_START = new Date("2026-08-21T20:00:00+01:00");
 const SEASON_START_DATE = "2026-08-21";
-const APP_BUILD = "20261125c";
+const APP_BUILD = "20261126d";
 const API = window.PREM_API || null;
 // Canonical public home of the web app. Inside the Capacitor shell the page is
 // served from premoracle://localhost, so location.origin can never be used to
@@ -27,6 +27,8 @@ const STORAGE = {
   pickWeeks: "prem_oracle_pick_weeks",
   notifyAsk: "prem_oracle_notify_ask", // v1.8 §4: the contextual ask, shown at most once
   ratingAsked: "prem_oracle_rating_asked", // v1.8 §6: the review request, attempted at most once per identity+version
+  weekShape: "prem_oracle_week_shape", // v1.9 §2: the last My Picks drawn — finished rows and header lines — so a skeleton is its size
+  alertPrefs: "prem_oracle_alert_prefs", // v1.9 Slice 2: the two matchday switches and their one-time offers, as the server last said
 };
 
 function isNativeApp() {
@@ -167,31 +169,6 @@ const TEAM_CODES = {
 // NOT hardcoded: when it is empty (or a team is missing) the UI shows neutral
 // states rather than inventing numbers.
 let teamIntel = {};
-const VENUE_OUTLOOK = {
-  "Emirates Stadium": { icon: "🌤", temp: 20, desc: "London late-summer outlook" },
-  "MKM Stadium": { icon: "🌥", temp: 18, desc: "Hull coastal outlook" },
-  "Hill Dickinson Stadium": { icon: "🌦", temp: 18, desc: "Liverpool dockside outlook" },
-  "Portman Road": { icon: "🌤", temp: 19, desc: "Ipswich late-summer outlook" },
-  "St James' Park": { icon: "🌦", temp: 17, desc: "Newcastle outlook" },
-  "St. James' Park": { icon: "🌦", temp: 17, desc: "Newcastle outlook" },
-  "City Ground": { icon: "🌤", temp: 19, desc: "Nottingham late-summer outlook" },
-  "The City Ground": { icon: "🌤", temp: 19, desc: "Nottingham late-summer outlook" },
-  "Villa Park": { icon: "🌤", temp: 19, desc: "Birmingham late-summer outlook" },
-  "Gtech Community Stadium": { icon: "🌤", temp: 20, desc: "West London late-summer outlook" },
-  "Amex Stadium": { icon: "🌥", temp: 18, desc: "Brighton coastal outlook" },
-  "American Express Stadium": { icon: "🌥", temp: 18, desc: "Brighton coastal outlook" },
-  "Coventry Building Society Arena": { icon: "🌤", temp: 19, desc: "Coventry late-summer outlook" },
-  "Craven Cottage": { icon: "🌤", temp: 20, desc: "West London late-summer outlook" },
-  "Old Trafford": { icon: "🌦", temp: 18, desc: "Manchester outlook" },
-  "Anfield": { icon: "🌦", temp: 18, desc: "Liverpool outlook" },
-  "Stadium of Light": { icon: "🌦", temp: 17, desc: "Sunderland coastal outlook" },
-  "Elland Road": { icon: "🌥", temp: 18, desc: "Leeds outlook" },
-  "Vitality Stadium": { icon: "🌤", temp: 19, desc: "Bournemouth coastal outlook" },
-  "Etihad Stadium": { icon: "🌦", temp: 18, desc: "Manchester outlook" },
-  "Selhurst Park": { icon: "🌤", temp: 20, desc: "South London late-summer outlook" },
-  "Stamford Bridge": { icon: "🌤", temp: 20, desc: "West London late-summer outlook" },
-  "Tottenham Hotspur Stadium": { icon: "🌤", temp: 20, desc: "North London late-summer outlook" },
-};
 
 let fixtures = [];
 let currentView = "picks";
@@ -350,6 +327,26 @@ let fixtureRevisions = readJSON(STORAGE.fixtureRevisions, {});
 const FIXTURES_FRESH_MS = 300000;
 let fixturesLoadedAt = 0;
 
+/*
+ * v1.9 §2: where the first load stands, so a cold launch never mistakes "not
+ * here yet" for "gone".
+ *
+ * fixturesStatus  "loading" until the fixture list first answers, and again
+ *                 while a different set of competitions is fetched; "failed"
+ *                 only when neither the feed nor the bundled copy could be read.
+ * confirmedLeagues  the leagues whose state the server has answered for in
+ *                 this session. A cached state can paint rows, but only a
+ *                 confirmed one may say the host hasn't published.
+ * leagueLoadFailed  leagues whose read genuinely failed (offline, server
+ *                 error) and has not since succeeded.
+ * picksLoadTimedOut  the first load has taken longer than anybody waits.
+ */
+let fixturesStatus = "loading";
+const confirmedLeagues = new Set();
+const leagueLoadFailed = new Set();
+let picksLoadTimedOut = false;
+const PICKS_LOAD_TIMEOUT_MS = 15000;
+
 function rememberRevision(code, revision) {
   if (!revision || fixtureRevisions[code] === revision) return;
   fixtureRevisions = { ...fixtureRevisions, [code]: revision };
@@ -362,7 +359,8 @@ function rememberRevision(code, revision) {
 
 function fixturesUrl(code, refresh) {
   const revision = fixtureRevisions[code];
-  const query = [`competition=${code}`];
+  // wx=1: this build shows Apple's Weather mark, so the worker may send forecasts.
+  const query = [`competition=${code}`, "wx=1"];
   if (refresh) query.push("refresh=1");
   else if (revision) query.push(`rev=${encodeURIComponent(revision)}`);
   return `${API}/fixtures?${query.join("&")}`;
@@ -384,6 +382,9 @@ async function loadOneCompetition(code, refresh) {
 
 async function loadFixtures(refresh = false) {
   const competitions = activeCompetitions();
+  // A background refresh of the list already held keeps it on screen; only a
+  // different set of competitions is genuinely not here yet.
+  if (competitions.join("+") !== loadedCompetition) fixturesStatus = "loading";
   try {
     const payloads = await Promise.all(competitions.map((code) => loadOneCompetition(code, refresh)));
     fixtures = payloads.flatMap((data) => data.fixtures || []).sort((a, b) =>
@@ -395,10 +396,12 @@ async function loadFixtures(refresh = false) {
       (data.teams && typeof data.teams === "object") ? data.teams : {}));
     loadedCompetition = competitions.join("+");
     fixturesLoadedAt = Date.now();
+    fixturesStatus = "ready";
   } catch {
     fixtures = [];
     teamIntel = {};
     loadedCompetition = null;
+    fixturesStatus = "failed";
   }
 }
 
@@ -439,6 +442,9 @@ async function hydrateIdentity() {
     await syncUserPicks();
   } catch {
     // The PWA remains usable for cached fixtures and local picks while offline.
+    // If that left the active league unasked, its read has failed too: My Picks
+    // must not wait on an answer nobody is fetching.
+    if (activeLeague && !confirmedLeagues.has(activeLeague)) leagueLoadFailed.add(activeLeague);
   }
 }
 
@@ -730,12 +736,23 @@ async function loadFixturesForLeagues() {
   const have = new Set(activeCompetitions());
   const missing = [...wanted].filter((code) => !have.has(code) && !extraFixtures[`__loaded_${code}`]);
   if (!missing.length) return;
-  await Promise.allSettled(missing.map(async (code) => {
-    const data = await loadOneCompetition(code, false);
-    const next = { ...extraFixtures, [`__loaded_${code}`]: true };
-    for (const fixture of data.fixtures || []) next[String(fixture.id)] = fixture;
-    extraFixtures = next;
-  }));
+  // One flight per competition: the tab and a scorecard asking together share it.
+  const flights = missing.map((code) => {
+    if (!fixtureListFlights.has(code)) {
+      fixtureListFlights.set(code, loadOneFixtureList(code).finally(() => fixtureListFlights.delete(code)));
+    }
+    return fixtureListFlights.get(code);
+  });
+  await Promise.allSettled(flights);
+}
+
+const fixtureListFlights = new Map();
+
+async function loadOneFixtureList(code) {
+  const data = await loadOneCompetition(code, false);
+  const next = { ...extraFixtures, [`__loaded_${code}`]: true };
+  for (const fixture of data.fixtures || []) next[String(fixture.id)] = fixture;
+  extraFixtures = next;
 }
 
 function rememberCompetition(codes) {
@@ -808,6 +825,9 @@ async function loadLeagueState(generation = navGeneration, { roundStarted = fals
     // Cache it either way — the answer is true about the league it names, even
     // if the viewer has moved on. Only the paint is abandoned.
     saveLeagueName(state.code, state.name);
+    // v1.9 §2: the server has answered for this league, whoever asked.
+    confirmedLeagues.add(requested);
+    leagueLoadFailed.delete(requested);
     cacheLeagueState(state);
     if (superseded()) return;
     leagueState = state;
@@ -816,6 +836,8 @@ async function loadLeagueState(generation = navGeneration, { roundStarted = fals
     dropRetainedPanels(requested);
     if (rememberCompetition(leagueState.competitions || leagueState.competition)) await loadFixtures();
   } catch (error) {
+    // Recorded even when superseded: the read failed whoever asked for it.
+    if (!/league not found/i.test(error.message)) leagueLoadFailed.add(requested);
     if (superseded()) return;
     // A failed SEASON read must not throw away a valid cached week. The round
     // table has its own cache and its own request; blanking it here replaced
@@ -1186,6 +1208,7 @@ async function loadKnownLeagueNames() {
     // These responses are full season states — cache them rather than throw
     // away everything but the name.
     cacheLeagueState(result.value);
+    if (result.value?.code) confirmedLeagues.add(result.value.code);
   });
 }
 
@@ -1276,6 +1299,7 @@ async function prefetchLeagueStates() {
     const state = await api(`/state?code=${encodeURIComponent(code)}&uid=${encodeURIComponent(uid())}`);
     cacheLeagueState(state);
     saveLeagueName(state.code, state.name);
+    if (state?.code) confirmedLeagues.add(state.code);
   }));
 }
 
@@ -1831,22 +1855,24 @@ function probabilityStrip(match) {
   </div>`;
 }
 
+/**
+ * v1.9 §B: a forecast is shown only when the worker has a real one — Apple
+ * WeatherKit, fetched a week out and on the morning of the match, delivered on
+ * the fixture itself. Nothing is ever invented: no forecast, no pill.
+ */
 function weatherIntel(match) {
+  const weather = match?.weather;
+  if (!weather || !Number.isFinite(Number(weather.temp))) return null;
   if (fixtureDayDiff(match) > 7) return null;
-  if (match.weather) return match.weather;
-  const outlook = VENUE_OUTLOOK[match.venue];
-  if (!outlook) return null;
-  return { ...outlook, provisional: true };
+  return { icon: weather.icon || "", temp: Math.round(Number(weather.temp)), desc: weather.desc || "Forecast" };
 }
 
 function matchIntelStrip(match) {
   const weather = weatherIntel(match);
-  const weatherTitle = weather
-    ? `${weather.desc}${weather.provisional ? "; live forecast nearer kick-off" : ""}`
-    : "";
   return `<div class="match-intel-strip">
-    ${weather ? `<span class="intel-pill weather-pill" title="${escapeHTML(weatherTitle)}">${weather.icon} ${weather.temp}°C <em>${weather.provisional ? "Outlook" : "Forecast"}</em></span>` : ""}
+    ${weather ? `<span class="intel-pill weather-pill" title="${escapeHTML(weather.desc)}">${escapeHTML(weather.icon)} ${weather.temp}°C <em>Forecast</em></span>` : ""}
     ${match.venue ? `<span class="intel-pill venue-pill">📍 ${escapeHTML(match.venue)}</span>` : ""}
+    ${weather ? `<a class="weather-attribution" href="https://weatherkit.apple.com/legal-attribution.html" target="_blank" rel="noopener"><img src="icons/weather/Apple_Weather_blk_en_1X_090122.png" srcset="icons/weather/Apple_Weather_blk_en_2X_090122.png 2x, icons/weather/Apple_Weather_blk_en_3X_090122.png 3x" width="77" height="14" alt="Apple Weather"></a>` : ""}
   </div>`;
 }
 
@@ -2976,7 +3002,7 @@ const pickEditable = (match) => matchweekRowState(match) === "open";
  * Matchweek.
  */
 function pickRow(slot, { expanded }) {
-  if (!slot.fixture) return matchweekUnavailable(slot.id);
+  if (!slot.fixture) return fixturesStatus === "loading" ? pickRowSkeleton() : matchweekUnavailable(slot.id);
   const match = slot.fixture;
   const id = String(match.id);
   const pick = picks[id];
@@ -2989,8 +3015,10 @@ function pickRow(slot, { expanded }) {
   // disclosure opens the result card (score, prediction, points) above the
   // mates, where the old layout drew that card permanently.
   const result = isSettledCard(match, pick);
-  const classes = ["pick-row", result ? "pick-row-result" : "", expanded ? "is-open" : "",
-    !result && !pick ? "is-needed" : ""].filter(Boolean).join(" ");
+  // v1.9 F5: a finished row (FT with a final score) sits a step darker than the
+  // page; open, locked and in-play rows stay white.
+  const classes = ["pick-row", result ? "pick-row-result" : "", state === "settled" ? "is-finished" : "",
+    expanded ? "is-open" : "", !result && !pick ? "is-needed" : ""].filter(Boolean).join(" ");
 
   // The badges are the live ones, unmodified: teamBadge() reads TEAM_MARKERS
   // and TEAM_CODES and nothing else, and the row only sizes them down. The
@@ -3002,6 +3030,7 @@ function pickRow(slot, { expanded }) {
       <span class="pick-row-when" aria-hidden="true"><span class="pick-row-date">${escapeHTML(when.date)}</span><span class="pick-row-time">${escapeHTML(when.time)}</span></span>
       <span class="pick-row-match" aria-hidden="true">${teamBadge(match.player1)}<span class="pick-row-v">v</span>${teamBadge(match.player2)}</span>
       ${pickRowMark(match, pick, state)}
+      ${pickRowOutcome(match, pick, state)}
       ${pickJustSaved(pick) ? `<span class="pick-row-saved" data-pick-saved aria-hidden="true">Saved</span>` : ""}
     </button>
     <div class="pick-row-body" id="${bodyId}">${body}</div>
@@ -3047,6 +3076,26 @@ function pickRowMark(match, pick, state) {
 }
 
 /**
+ * v1.9 §3: under a finished row's score, the viewer's own pick and what it
+ * earned — "You 2-2" and a pill — so a settled week reads at a glance.
+ *
+ * Display only. The points are scorePickLocal's, the port the suite holds to
+ * the worker's scorePick, so the pill can never disagree with the table.
+ * Only a row with a final score gets one: open, locked, in-play (kicked off,
+ * or full time with no result yet), void and postponed rows are unchanged.
+ */
+function pickRowOutcome(match, pick, state) {
+  if (state !== "settled") return "";
+  const actual = finalScore(match);
+  if (!pick) {
+    return `<span class="pick-row-outcome" data-pick-outcome="none" aria-hidden="true"><span class="pick-pill pick-pill-none">No pick</span></span>`;
+  }
+  const { pts, exact, hit } = scorePickLocal(pick, { p1: actual[0], p2: actual[1] });
+  const [kind, text] = exact ? ["exact", `+${pts} exact`] : hit ? ["result", `+${pts}`] : ["miss", "0"];
+  return `<span class="pick-row-outcome" data-pick-outcome="${kind}" aria-hidden="true"><span class="pick-row-you">You ${pick.p1}-${pick.p2}</span><span class="pick-pill pick-pill-${kind}">${text}</span></span>`;
+}
+
+/**
  * What the disclosure holds.
  *
  * An editable fixture gets the WHOLE card — the same `matchCard` Next builds,
@@ -3081,8 +3130,11 @@ function pickRowLabel(match, pick, editable) {
   const state = matchweekRowState(match);
   let tail;
   if (state === "settled") {
+    // v1.9 §3: what the pill shows, in words — "your pick 2-2, 1 point".
     const actual = finalScore(match);
-    tail = `final score ${actual[0]}-${actual[1]}, ${mine}`;
+    const { pts, exact } = scorePickLocal(pick, { p1: actual[0], p2: actual[1] });
+    const earned = pick ? `your pick ${pick.p1}-${pick.p2}, ${pts} point${pts === 1 ? "" : "s"}${exact ? ", exact score" : ""}` : "no pick";
+    tail = `final score ${actual[0]}-${actual[1]}, ${earned}`;
   } else if (state === "void") tail = `void, no points, ${mine}`;
   else if (state === "postponed") tail = `postponed, no points, ${mine}`;
   else if (state === "in-progress") tail = `${mine}, result pending`;
@@ -3179,7 +3231,9 @@ function pickCounts(slots) {
 function pickActionSummary(slots, { published = true } = {}) {
   if (!published) return "Waiting on your host to publish this week\u2019s fixtures";
   const { required, made, outstanding } = pickCounts(slots);
-  if (!required) return "Waiting on your host to publish this week\u2019s fixtures";
+  // A published week whose fixtures this device cannot name HAS been published:
+  // its rows say what is wrong, and the host is not the one to wait on.
+  if (!required) return slots?.length ? "" : "Waiting on your host to publish this week\u2019s fixtures";
   if (outstanding) {
     return `${outstanding} prediction${outstanding === 1 ? "" : "s"} still needed`;
   }
@@ -3189,6 +3243,116 @@ function pickActionSummary(slots, { published = true } = {}) {
   // Nothing left to do, but not everything got done: the rest locked first,
   // and saying "all in" would be a claim about picks that were never made.
   return `${made} of ${required} predictions made \u00b7 the rest have locked`;
+}
+
+/* --- v1.9 §2: a calm cold launch ------------------------------------------
+ *
+ * Opening from closed used to paint "Fixture temporarily unavailable" on every
+ * row and "Waiting on your host to publish" above them for the second or two
+ * before the fixture list arrived: true of nothing, said six times. Until the
+ * first load resolves the screen is the SHAPE of the week, in the real row's
+ * own grid, so the rows that replace it land exactly where it stood.
+ */
+
+// Three rows when the week's size is not yet known: a typical slate's top half.
+const PICK_SKELETON_ROWS = 3;
+
+/**
+ * One row's shape: date block, two grey circles, score block — no words. A row
+ * that was finished last time also has its pick line's shape, because a
+ * finished row is a line taller and the skeleton must be the row it becomes.
+ */
+const pickRowSkeleton = (finished = false) =>
+  `<div class="pick-row pick-row-skeleton" data-pick-skeleton aria-hidden="true"><div class="pick-row-head">
+      <span class="pick-row-when"><span class="skeleton-bar skeleton-date"></span><span class="skeleton-bar skeleton-time"></span></span>
+      <span class="pick-row-match"><span class="skeleton-circle"></span><span class="pick-row-v">v</span><span class="skeleton-circle"></span></span>
+      <span class="pick-row-mark"><span class="skeleton-bar skeleton-score"></span></span>${
+      finished ? `<span class="pick-row-outcome"><span class="skeleton-bar skeleton-outcome"></span></span>` : ""}
+    </div></div>`;
+
+/**
+ * The shape of the My Picks last drawn: its league and week, which rows were
+ * finished, and the header's two lines. A cold launch reopens on exactly this
+ * screen, so the skeleton is drawn to it — finished rows a line taller, the
+ * header lines as grey bars that wrap where the words did — and nothing moves
+ * when the real thing arrives. One entry, written only when it changes: a
+ * paint is not a storage write. Sizes only; nothing here is ever shown as text.
+ */
+let weekShape = readJSON(STORAGE.weekShape, null);
+function rememberWeekShape(code, period, slots, summary, detail) {
+  if (!code || period == null) return;
+  // One flag per row, in slate order: was it finished (and so a line taller)?
+  const rows = slots.map((slot) => !!slot.fixture && matchweekRowState(slot.fixture) === "settled");
+  const next = { code, period: String(period), rows, summary: summary || "", detail: detail || "" };
+  if (JSON.stringify(weekShape) === JSON.stringify(next)) return;
+  weekShape = next;
+  try { localStorage.setItem(STORAGE.weekShape, JSON.stringify(next)); } catch { /* a skeleton's size, not data */ }
+}
+/** The remembered shape, if it is this league's. */
+const weekShapeFor = (code) => (weekShape && weekShape.code === code ? weekShape : null);
+
+/**
+ * The subtitle, grey. Drawn from the lines last shown when there are some — in
+ * the real paragraphs, as transparent text on grey, so the bars wrap exactly
+ * where the words will — and as two plain bars when there are none. A screen
+ * reader is told only that the week is loading.
+ */
+const pickSummarySkeleton = (shape = null) => {
+  const loading = `<span class="sr-only">Loading this week\u2026</span>`;
+  if (!shape?.summary) {
+    return `<p class="pick-summary pick-skeleton-lines" data-pick-summary>${loading}<span class="skeleton-bar skeleton-line" aria-hidden="true"></span><span class="skeleton-bar skeleton-line skeleton-line-short" aria-hidden="true"></span></p>`;
+  }
+  return `<p class="pick-summary" data-pick-summary>${loading}<span class="skeleton-text" aria-hidden="true">${escapeHTML(shape.summary)}</span></p>${
+    shape.detail ? `<p class="pick-detail" aria-hidden="true"><span class="skeleton-text">${escapeHTML(shape.detail)}</span></p>` : ""}`;
+};
+
+/** A genuine failure — offline, a server error, a load nobody would wait for. Said once. */
+const picksLoadFailedCard = () =>
+  `<div class="launch-card picks-load-failed" role="status" data-picks-load-failed>
+      <strong>Couldn\u2019t load your picks</strong>
+      <p>Check your connection, then tap Try again. Your saved picks are safe.</p>
+      <button type="button" class="primary" data-retry-picks>Try again</button>
+    </div>`;
+
+/**
+ * Has the active league's week been answered for?
+ *
+ *   "ready"    the server has answered for this league this session (or there
+ *              is no server to ask)
+ *   "failed"   its read genuinely failed, or the first load timed out
+ *   "loading"  neither, yet
+ */
+function picksLoadPhase(state) {
+  if (!API || !activeLeague) return "ready";
+  if (state && confirmedLeagues.has(activeLeague)) return "ready";
+  if (leagueLoadFailed.has(activeLeague) || picksLoadTimedOut) return "failed";
+  return "loading";
+}
+
+/** "Try again": the failed reads, once more, behind the skeleton. */
+async function retryPicksLoad() {
+  leagueLoadFailed.clear();
+  picksLoadTimedOut = false;
+  render();
+  armPicksLoadTimeout();
+  await Promise.all([fixturesStatus === "ready" ? null : loadFixtures(), hydrateIdentity()]);
+  render();
+}
+
+/**
+ * The longest the first load is waited on before it counts as failed. A fetch
+ * has no timeout of its own, and a request that hangs on a bad network would
+ * otherwise leave the skeleton up for ever. Whatever arrives later still paints.
+ */
+let picksLoadTimer = null;
+function armPicksLoadTimeout() {
+  clearTimeout(picksLoadTimer);
+  picksLoadTimer = setTimeout(() => {
+    const state = matchweekLeagueState();
+    if (fixturesStatus !== "loading" && picksLoadPhase(state) !== "loading") return;
+    picksLoadTimedOut = true;
+    render();
+  }, PICKS_LOAD_TIMEOUT_MS);
 }
 
 /**
@@ -3203,6 +3367,8 @@ function pickActionSummary(slots, { published = true } = {}) {
 function picksView() {
   // No league at all is the first question, and it is only about membership.
   if (!leagueCodes.length) return `${installNotice()}${onboardingState()}`;
+  // v1.9 Slice 2: a reveal, a scorecard or Your results, standing on My Picks.
+  if (matchdayScreen) return matchdayScreenView();
 
   // An invitation in hand but not yet joined: said once, at the top, on the
   // screen the viewer actually lands on.
@@ -3211,31 +3377,64 @@ function picksView() {
         escapeHTML(inviteCode)}</strong><p>Tap to choose your name and join.</p></div></button>`
     : "";
 
+  // A null summary is a week still on its way (v1.9 §2): grey lines in the
+  // subtitle's place, never a sentence that might not be true.
   const head = (name, summary, lines) =>
     `<div class="section-head"><div>
       <span class="eyebrow">${escapeHTML(name || playerName || "Your predictions")}</span>
       <h2>My Picks</h2>
-      <p class="pick-summary" data-pick-summary>${escapeHTML(summary)}</p>
+      ${summary == null ? pickSummarySkeleton(weekShapeFor(activeLeague))
+        : summary ? `<p class="pick-summary" data-pick-summary>${escapeHTML(summary)}</p>` : ""}
       ${lines.filter(Boolean).length
         ? `<p class="pick-detail">${lines.filter(Boolean).map(escapeHTML).join(" \u00b7 ")}</p>`
         : ""}
     </div></div>`;
+  // v1.9 §2: until the first load resolves, the shape of the week and no words;
+  // on a genuine failure, one card for the screen rather than one per row.
+  // As many rows as last time, finished ones a line taller; three when unknown.
+  const waiting = (name, context) => {
+    const rows = weekShapeFor(activeLeague)?.rows || Array(PICK_SKELETON_ROWS).fill(false);
+    return `${installNotice()}${invite}${head(name, null, [])}${context}
+      <div class="pick-list" data-pick-list aria-busy="true">${rows.map((finished) => pickRowSkeleton(finished)).join("")}</div>`;
+  };
+  const failed = (name, context) => `${installNotice()}${invite}${head(name, "", [])}${context}${picksLoadFailedCard()}`;
 
   const state = matchweekLeagueState();
   if (!state) {
-    return `${installNotice()}${invite}
-      ${head(matchweekLeagueName(), "Loading this week\u2026", [])}
-      ${matchweekContext(null)}
-      ${pulsingStatus("Loading this week\u2026")}`;
+    return picksLoadPhase(null) === "failed"
+      ? failed(matchweekLeagueName(), matchweekContext(null))
+      : waiting(matchweekLeagueName(), matchweekContext(null));
   }
 
   const plan = matchweekSlate(state);
   if (!plan) {
+    // A cached "nothing published" may be out of date: the host can have
+    // published since it was stored. Only the server's answer may say so.
+    const phase = picksLoadPhase(state);
+    if (phase === "loading") return waiting(state.name, matchweekContext(state));
+    if (phase === "failed") return failed(state.name, matchweekContext(state));
     // Nothing published. Whether that is "the host hasn't chosen yet" or
     // "there is nothing to choose from yet" is the launch tree's question,
     // and it is only worth asking once there is no slate to show.
     if (launchBranch() === "preseason") {
       return `${installNotice()}${invite}${preseasonState(state)}${matchweekContext(state)}`;
+    }
+    // v1.9 Slice 2: last week has settled and this one is not open yet, so the
+    // week's results are the screen — then that week's finished rows.
+    const results = resultsModeFor(state);
+    if (results) {
+      // Every league's card, not just this one's: fetch any week not yet held.
+      for (const { code, period } of resultsSnapshot().missing) requestResultsRound(code, period);
+      const ids = roundIds(results.round);
+      return `${installNotice()}${invite}
+        ${head(state.name, pickActionSummary([], { published: false }), [])}
+        ${matchweekContext(state)}
+        <div data-results-mode="${escapeHTML(String(results.period))}">${yourResultsBlock(resultsSnapshot().cards)}</div>
+        <h3 class="md-subhead">${escapeHTML(weekWording(results.period))} · your picks</h3>
+        <div class="pick-list" data-pick-list>${
+          ids.map((id) => pickRow({ id, fixture: fixtureById(id) }, { expanded: expandedPickId === id })).join("")
+        }</div>
+        ${scorecardLinks(ids)}`;
     }
     return `${installNotice()}${invite}
       ${head(state.name, pickActionSummary([], { published: false }), [])}
@@ -3245,12 +3444,37 @@ function picksView() {
   }
 
   const slots = matchweekSlots(plan);
-  return `${installNotice()}${invite}
-    ${head(state.name, pickActionSummary(slots), [pickListState(slots), pickDeadlineLine(slots)])}
+  // The fixture list is what turns ids into rows. Still on its way, the rows it
+  // owes are skeletons and the count above them is unknown, not zero; never
+  // arriving, the screen says so once.
+  const unresolved = slots.some((slot) => !slot.fixture);
+  if (unresolved && slots.every((slot) => !slot.fixture) && (fixturesStatus === "failed"
+    || (fixturesStatus === "loading" && picksLoadTimedOut))) {
+    return failed(state.name, matchweekContext(state));
+  }
+  if (unresolved && fixturesStatus === "loading") {
+    const shape = weekShapeFor(activeLeague);
+    const finished = shape && shape.period === String(state.currentPeriod) ? shape.rows : [];
+    return `${installNotice()}${invite}
+    ${head(state.name, null, [])}
     ${matchweekContext(state)}
+    <div class="pick-list" data-pick-list aria-busy="true">${
+      slots.map((slot, i) => (slot.fixture
+        ? pickRow(slot, { expanded: expandedPickId === String(slot.id) })
+        : pickRowSkeleton(!!finished[i]))).join("")
+    }</div>`;
+  }
+  const summary = pickActionSummary(slots);
+  const lines = [pickListState(slots), pickDeadlineLine(slots)];
+  if (!unresolved) rememberWeekShape(activeLeague, state.currentPeriod, slots, summary, lines.filter(Boolean).join(" \u00b7 "));
+  return `${installNotice()}${invite}
+    ${head(state.name, summary, lines)}
+    ${matchweekContext(state)}
+    ${resultsSlimLink(state)}
     <div class="pick-list" data-pick-list>${
       slots.map((slot) => pickRow(slot, { expanded: expandedPickId === String(slot.id) })).join("")
     }</div>
+    ${scorecardLinks(slots.map((slot) => slot.id))}
     ${sharePromptHtml(state, slots)}
     ${pickShareRow(state)}`;
 }
@@ -3429,6 +3653,17 @@ function leagueCompetitionNames(state) {
     ? state.competitions
     : [state?.competition || DEFAULT_COMPETITION];
   return codes.map((code) => competitionMeta(code).name).join(" + ");
+}
+
+/**
+ * Who leads a week still in progress: everyone level on the top score, joined
+ * as the winners are ("A & B"), so a tie is never broken by alphabet.
+ */
+function weekLeaders(round) {
+  const table = round?.table || [];
+  const pts = table[0]?.pts ?? 0;
+  const names = table.filter((row) => (row.pts ?? 0) === pts).map((row) => row.nick).filter(Boolean).join(" & ");
+  return { names, pts };
 }
 
 function winnerNames(round) {
@@ -4153,7 +4388,9 @@ function roundTableHtml(round) {
       // The Season table's shape: the arrow FOLLOWS the name, in the slot at
       // the end of the player cell. Leading it made a left gutter that pushed
       // every name out of line and read as the row's most important fact.
-      return `<tr><td class="player-cell"><span class="player-name">${ranks.get(row.uid) ?? index + 1}. ${escapeHTML(row.nick)}${medal}</span>${move}</td><td>${row.pts}</td><td class="col-exact">${row.exact}</td></tr>`;
+      // v1.9: the viewer's own row is marked, so a results card that opens
+      // this week's table lands with them findable at a glance.
+      return `<tr${row.uid === uid() ? ' class="is-you"' : ""}><td class="player-cell"><span class="player-name">${ranks.get(row.uid) ?? index + 1}. ${escapeHTML(row.nick)}${medal}</span>${move}</td><td>${row.pts}</td><td class="col-exact">${row.exact}</td></tr>`;
     }).join("")}</tbody></table>`;
 }
 
@@ -4827,13 +5064,20 @@ function drawCardCellSplit(ctx, y, height) {
   ctx.fillRect(CARD_COL.split, y, 2, height);
 }
 
-function drawCardTableHead(ctx, y) {
+/**
+ * Whether any row moved. A MOVE heading over a column of nothing (no
+ * comparison yet) or of dashes only (nobody moved) is a column with nothing
+ * to say, so the card leaves it out — on every page alike.
+ */
+const cardHasMovement = (rows) => (rows || []).some((row) => row.movement != null && Number(row.movement) !== 0);
+
+function drawCardTableHead(ctx, y, { move = true } = {}) {
   ctx.fillStyle = CARD.muted;
   ctx.font = cardFont(800, 22);
   ctx.fillText("PLAYER", CARD_COL.name, y + 36);
   // Centred on its own column, over the markers it names.
   ctx.textAlign = "center";
-  ctx.fillText("MOVE", CARD_COL.move, y + 36);
+  if (move) ctx.fillText("MOVE", CARD_COL.move, y + 36);
   ctx.textAlign = "right";
   ctx.fillText("EXACT", CARD_COL.exact, y + 36);
   ctx.fillText("PTS", CARD_COL.pts, y + 36);
@@ -4971,7 +5215,8 @@ function weeklyCardModel(state, round) {
   // "Started" means something has actually settled. Until then there are no
   // settled points to lead on.
   const started = status.terminal > 0;
-  const leader = started ? ((round.table || [])[0] || null) : null;
+  const leaders = started ? weekLeaders(round) : null;
+  const weekCaps = /\d/.test(week) ? week.toUpperCase() : "WEEK";
   return {
     league: state.name,
     // The honest state, not a claim of finality (M9).
@@ -4980,14 +5225,18 @@ function weeklyCardModel(state, round) {
     // before a ball has settled is not a smaller lie than crowning a champion:
     // the order at 0-0-0 is alphabetical, and the card would be inventing a
     // story out of a tie-break.
+    //
+    // A winner is named only once the week is complete; until then the box
+    // says "AS IT STANDS" and who is leading — never "winner" mid-week.
+    // The week is the league's own wording (Matchweek N / Week N).
     heroEyebrow: final
-      ? (champions.length > 1 ? "JOINT MATCHWEEK CHAMPIONS" : "MATCHWEEK CHAMPION")
-      : started ? "LEADING ON SETTLED POINTS" : "NOT STARTED",
-    heroName: final ? (names || "Nobody") : started ? (leader?.nick || "Nobody") : "",
+      ? (champions.length > 1 ? `JOINT ${weekCaps} WINNERS` : `${weekCaps} WINNER`)
+      : started ? "AS IT STANDS" : "NOT STARTED",
+    heroName: final ? (names || "Nobody") : started ? (leaders.names || "Nobody") : "",
     heroLine: final
-      ? `${week} champion · ${pts} pts`
+      ? `${pts} pts`
       : started
-        ? `${status.label} · ${leader?.pts ?? 0} pts`
+        ? `Leading ${week} · ${leaders.pts} pts`
         : status.label,
     podium: groups,
     rows: (round.table || []).map((row, index) => ({
@@ -5025,10 +5274,14 @@ function weeklyCardPages(state, round) {
 function drawWeeklyPage(model, hero, m, page) {
     const { canvas, ctx } = cardCanvas(m.contentHeight);
     drawCardHeader(ctx, model.league, model.headline, cardPageLabel(page, m.pages));
-    const y = cardTableTop(CARD_HEAD_H + CARD_GAP + hero + CARD_GAP, m.tableHeight);
+    // The table sits directly under the highlight box. Centring it in the
+    // leftover height opened a large empty band between the two on any table
+    // shorter than a page; the spare room now falls below the footer instead.
+    const y = cardTableTop(CARD_HEAD_H + CARD_GAP + hero + CARD_GAP, m.tableHeight, 0);
     const top = y + CARD_TABLE_HEAD_H;
+    const move = cardHasMovement(model.rows);
     drawCardHero(ctx, CARD_HEAD_H + CARD_GAP, model, hero);
-    drawCardTableHead(ctx, y);
+    drawCardTableHead(ctx, y, { move });
     const rows = cardPageRows(model.rows, page, m);
     rows.forEach((row, index) => {
       const rowTop = top + index * m.rowH;
@@ -5045,7 +5298,7 @@ function drawWeeklyPage(model, hero, m, page) {
       // Same MOVE column as the season card, in the same place, so the two
       // exports are read the same way.
       ctx.textAlign = "center";
-      drawCardMovement(ctx, CARD_COL.move, baseline, row.movement, m.second);
+      if (move) drawCardMovement(ctx, CARD_COL.move, baseline, row.movement, m.second);
       ctx.textAlign = "left";
       ctx.textAlign = "right";
       ctx.fillStyle = CARD.muted;
@@ -5168,9 +5421,10 @@ function drawSeasonPage(model, m, page) {
     drawCardHeader(ctx, model.league, model.headline, cardPageLabel(page, m.pages));
     const y = cardTableTop(CARD_HEAD_H + CARD_GAP, m.tableHeight, CARD_TABLE_LEAD);
     const top = y + CARD_TABLE_HEAD_H;
+    const move = cardHasMovement(model.rows);
     // The headings are repeated on every page, so a page read on its own is
     // still a table rather than a list of numbers.
-    drawCardTableHead(ctx, y);
+    drawCardTableHead(ctx, y, { move });
     const rows = cardPageRows(model.rows, page, m);
     rows.forEach((row, index) => {
       const rowTop = top + index * m.rowH;
@@ -5247,7 +5501,7 @@ function weeklyCardCaption(state, round) {
   const competition = leagueCompetitionNames(state);
   const week = round.matchday != null ? `Matchweek ${round.matchday}` : periodLabel(round.period);
   const status = weeklyShareStatus(round);
-  const leader = (round.table || [])[0] || null;
+  const leaders = weekLeaders(round);
   // Nothing settled is not the same as something settled, and neither is the
   // same as finished. Saying "nothing settled yet" after two results is as
   // wrong as naming a winner before any.
@@ -5257,7 +5511,7 @@ function weeklyCardCaption(state, round) {
       ? `published — nothing settled yet`
       // TERMINAL, not settled: a void is finished and scored nothing, so calling
       // it settled would credit a game nobody got points for.
-      : `after ${status.terminal} of ${status.total} fixtures${leader ? `, ${leader.nick} leading on ${leader.pts}` : ""}`;
+      : `after ${status.terminal} of ${status.total} fixtures${leaders.names ? `, ${leaders.names} leading on ${leaders.pts}` : ""}`;
   return `🏆 ${competition} ${week}: ${lead}. Think you can call it? Join ${state.name} with code ${state.code}: ${inviteLinkFor(state.code)}`;
 }
 
@@ -6476,6 +6730,9 @@ function scrollAppToTop() {
 // opening the wrong league — which is worse than opening nothing.
 
 const NOTIFY_PAYLOAD_VERSION = 1;
+// v1.9 Slice 2: {v:2,k:"reveal",t} and {v:2,k:"results",d}. A build that predates
+// it sees an unknown version and opens My Picks, which is the agreed fallback.
+const NOTIFY_MATCHDAY_VERSION = 2;
 
 /**
  * The routing block, or null.
@@ -6487,10 +6744,16 @@ const NOTIFY_PAYLOAD_VERSION = 1;
 function readNotificationRoute(data) {
   const route = data?.po ?? data?.notification?.data?.po ?? null;
   const block = typeof route === "string" ? safeParseJSON(route) : route;
-  if (!block || Number(block.v) !== NOTIFY_PAYLOAD_VERSION) return null;
+  if (!block) return null;
+  // v1.9 Slice 2: a reveal or a day's results. The same route a link carries,
+  // so a tap and a shared link land on the same screen by the same path.
+  if (Number(block.v) === NOTIFY_MATCHDAY_VERSION) return matchdayRouteFromBlock(block);
+  if (Number(block.v) !== NOTIFY_PAYLOAD_VERSION) return null;
   const fixtureId = block.f == null ? "" : String(block.f);
   const league = block.l == null ? "" : String(block.l).toUpperCase();
-  if (!fixtureId || !league) return null;
+  if (!league) return null;
+  // A league with no fixture is a week-level notice ("Matchweek 13 is set"):
+  // that league's My Picks, with no card to open.
   return { fixtureId, league };
 }
 
@@ -6511,11 +6774,13 @@ function safeParseJSON(value) {
  */
 async function openNotificationTarget(route) {
   if (!route) { currentView = "picks"; render({ scrollTop: true }); return "fallback:no-route"; }
+  if (MATCHDAY_VIEWS.includes(route.view)) return `matchday:${await followLinkRoute(route)}`;
   const { fixtureId, league } = route;
   if (leagueCodes.includes(league) && activeLeague !== league) {
     setActiveLeague(league, false);
   }
   await navigateToView("picks");
+  if (!fixtureId) return leagueCodes.includes(league) ? "opened:league" : "fallback:unknown-league";
   const match = fixtureById(fixtureId);
   if (!match) return "fallback:unknown-fixture";
   render();
@@ -6538,6 +6803,1003 @@ async function openNotificationTarget(route) {
 const cssEscape = (value) => (window.CSS?.escape
   ? window.CSS.escape(String(value))
   : String(value).replace(/[\u0022\u005C]/g, "\\$&"));
+
+// --- v1.9 Slice 2 · Matchday comes alive ----------------------------------------
+//
+// Three screens that sit ON My Picks — the tab bar stays where it is — and are
+// reached three ways that all end in followLinkRoute: an alert tap, a link, and
+// a button inside the app (so a web player, who gets no alerts, still has them).
+//
+//   reveal     /reveal-slot's answer for one kick-off slot. Nothing is drawn
+//              from any cache: the server refuses (409) before the slot is
+//              sealed and locked, and a refusal or a failure is the failure
+//              card, never somebody's pick from memory.
+//   scorecard  one UK day: that day's table, then every match and every pick.
+//              Drawn from the round reads the League tab already makes — the
+//              same server gate, the same points.
+//   results    "Your results": each league's latest settled week, from the same
+//              round reads plus the season table this device already holds.
+
+const MATCHDAY_VIEWS = ["reveal", "scorecard", "results"];
+const UK_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+/** Rows a list shows before "+ N more" — the reveal's server cap, and the scorecard's. */
+const MATCHDAY_ROWS_SHOWN = 8;
+/** How long "Week 13 results ›" stays on My Picks once the next week is open. */
+const RESULTS_LINK_MS = 24 * 60 * 60 * 1000;
+const RESULTS_LINK_SEEN = "prem_oracle_results_link_seen";
+
+function matchdayRouteFromBlock(block) {
+  if (block?.k === "reveal") {
+    const t = Number(block.t);
+    return Number.isSafeInteger(t) && t > 0 ? { view: "reveal", t } : null;
+  }
+  if (block?.k === "results") {
+    const d = String(block.d ?? "");
+    return UK_DATE_RE.test(d) ? { view: "scorecard", d } : null;
+  }
+  return null;
+}
+
+/** `?view=reveal&t=…`, `?view=scorecard&d=…` or `?view=results`, or null. */
+function matchdayRouteFromSearch(search) {
+  let params;
+  try { params = new URLSearchParams(search || ""); } catch { return null; }
+  const view = String(params.get("view") || "").toLowerCase();
+  if (view === "reveal") return matchdayRouteFromBlock({ k: "reveal", t: params.get("t") });
+  if (view === "scorecard") return matchdayRouteFromBlock({ k: "results", d: params.get("d") });
+  if (view === "results") return { view: "results" };
+  return null;
+}
+
+// --- dates, in the league's own clock -----------------------------------------
+
+/** "2026-11-28" for an instant, on the UK calendar. */
+function ukDateOf(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  const parts = Object.fromEntries(new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Europe/London", year: "numeric", month: "2-digit", day: "2-digit",
+  }).formatToParts(date).map((part) => [part.type, part.value]));
+  return `${parts.year}-${parts.month}-${parts.day}`;
+}
+
+const ukNoon = (day) => new Date(`${day}T12:00:00Z`);
+/** "Saturday" */
+const ukWeekday = (day) => new Intl.DateTimeFormat("en-GB", { weekday: "long", timeZone: "UTC" }).format(ukNoon(day));
+/** "Sat 28 Nov" */
+const ukShortDate = (day) => new Intl.DateTimeFormat("en-GB", {
+  weekday: "short", day: "numeric", month: "short", timeZone: "UTC",
+}).format(ukNoon(day)).replace(",", "");
+/** "15:00" */
+const ukClock = (ms) => new Intl.DateTimeFormat("en-GB", {
+  hour: "2-digit", minute: "2-digit", timeZone: "Europe/London",
+}).format(new Date(ms));
+
+/** The week before this one: a matchweek number, or the previous Tuesday's window. */
+function previousPeriod(period) {
+  if (period == null) return null;
+  if (isWindowKey(period)) {
+    const tuesday = new Date(`${String(period).slice(1)}T12:00:00Z`);
+    return `w${new Date(tuesday.getTime() - 7 * 86400000).toISOString().slice(0, 10)}`;
+  }
+  const n = Number(period);
+  return Number.isInteger(n) && n > 1 ? String(n - 1) : null;
+}
+
+/** "Matchweek 13" in a Premier League league, "Week 13" in a mixed one — the existing rule. */
+const weekWording = (period) => periodLabel(period);
+
+const leagueStateFor = (code) =>
+  (leagueState?.code === code && !leagueState.error ? leagueState : null)
+  || (leagueStates[code] && !leagueStates[code].error ? leagueStates[code] : null);
+
+// --- rounds -------------------------------------------------------------------
+
+/** One league's week, fresh where possible and this device's copy where not. */
+async function loadMatchdayRound(code, period) {
+  try {
+    const round = await fetchState(roundStatePath(code, period));
+    cacheRoundState(code, period, round);
+    return round;
+  } catch {
+    return cachedRoundState(code, period);
+  }
+}
+
+/** A week that has been published and has finished — the only kind with results. */
+/** The published week's fixture ids, in the host's order. */
+const roundIds = (round) => [...(slateIdsOf(round) || [])];
+
+const roundSettled = (round) => !!(round && !round.error && round.complete && roundIds(round).length);
+
+// --- the one place a pick becomes a pill --------------------------------------
+
+/**
+ * The Slice 1 pill, for anybody's pick. Points are the server's where it sent
+ * them (every scorecard row) and scorePickLocal's for the viewer's own rows.
+ */
+function pointsPill({ none, pts, exact }) {
+  if (none) return `<span class="pick-pill pick-pill-none">No pick</span>`;
+  if (pts == null) return "";
+  if (exact) return `<span class="pick-pill pick-pill-exact">+${pts} exact</span>`;
+  return pts > 0
+    ? `<span class="pick-pill pick-pill-result">+${pts}</span>`
+    : `<span class="pick-pill pick-pill-miss">0</span>`;
+}
+
+const pointsWords = (pts) => `${pts} point${pts === 1 ? "" : "s"}`;
+
+/** One person's line: name (YOU), their pick or "No pick", and the pill. */
+function matchdayRow(row, { extra = false, pill = true } = {}) {
+  const pick = row.none ? "No pick" : `${row.p1}-${row.p2}`;
+  const spoken = `${row.you ? "You" : row.nick}, ${row.none ? "no pick" : `picked ${pick}`}${
+    pill && row.none ? ", 0 points" : pill && row.pts != null ? `, ${pointsWords(row.pts)}${row.exact ? ", exact score" : ""}` : ""}`;
+  return `<li class="md-row${row.you ? " is-you" : ""}${row.none ? " is-none" : ""}${extra ? " is-extra" : ""}" aria-label="${escapeHTML(spoken)}">
+    <span class="md-nick" aria-hidden="true">${escapeHTML(row.nick)}${row.you ? ` <em class="md-you">YOU</em>` : ""}</span>
+    <span class="md-pick${row.none ? " is-none" : ""}" aria-hidden="true">${row.none ? "No pick" : escapeHTML(pick)}</span>
+    ${pill ? `<span class="md-pill" aria-hidden="true">${row.none
+    // "No pick" is already said in the pick column; on a finished match it scored an honest 0.
+    ? `<span class="pick-pill pick-pill-none">0</span>` : pointsPill(row)}</span>` : ""}
+  </li>`;
+}
+
+/** The viewer first, then the top mates, then "+ N more" that opens in place. */
+function matchdayRowList(rows, key, { pill = true, shown = MATCHDAY_ROWS_SHOWN } = {}) {
+  const you = rows.filter((row) => row.you);
+  const mates = rows.filter((row) => !row.you);
+  const extra = Math.max(0, mates.length - shown);
+  return `<ul class="md-rows" data-md-rows="${escapeHTML(key)}">${
+    [...you.map((row) => matchdayRow(row, { pill })),
+      ...mates.map((row, i) => matchdayRow(row, { pill, extra: i >= shown }))].join("")
+  }</ul>${extra ? `<button type="button" class="md-more" data-md-more="${escapeHTML(key)}">+ ${extra} more mate${extra === 1 ? "" : "s"}</button>` : ""}`;
+}
+
+// --- the screen ---------------------------------------------------------------
+
+let matchdayScreen = null;
+let matchdayGeneration = 0;
+
+async function openMatchdayScreen(route) {
+  const screen = { ...route, status: "loading", id: ++matchdayGeneration, openedAt: clockMs() };
+  matchdayScreen = screen;
+  // v1.9 build 39: the tab change is STARTED, not awaited first. Its tail warms
+  // every other league's /state and fetches missing fixture lists (Championship
+  // included) — seconds on a phone — and a scorecard drawn from the device copy
+  // must never wait for any of it. currentView is set synchronously inside, so
+  // the screen below renders on My Picks as before.
+  const navigated = navigateToView("picks");
+  appScroller()?.scrollTo({ top: 0 });
+  await loadMatchdayScreen(screen);
+  await navigated;
+}
+
+function closeMatchdayScreen() {
+  matchdayScreen = null;
+  render({ scrollTop: true });
+}
+
+async function loadMatchdayScreen(screen) {
+  try {
+    if (screen.view === "reveal") await loadRevealScreen(screen);
+    else if (screen.view === "scorecard") await loadScorecardScreen(screen);
+    else await loadResultsScreen(screen);
+  } catch {
+    screen.status = "failed";
+  }
+  if (screen === matchdayScreen) {
+    render();
+    if (screen.view === "scorecard") {
+      screen.paintedView = matchdayScreenView();
+      noteScorecardOpen(screen);
+      // The final paint: whatever settles afterwards (a quiet refresh, other
+      // leagues, the banner) — the same screen, or a repaint if it changed.
+      screen.settling?.then((repainted) => noteScorecardFinal(screen, repainted));
+    }
+  }
+}
+
+// --- v1.9 build 38: how long a scorecard takes to show -------------------------
+//
+// Tap to first content, the last ten opens, kept in memory only and shown in
+// the diagnostics the viewer copies from Profile. No uid, no league, no date.
+const clockMs = () => (typeof performance !== "undefined" && performance.now ? performance.now() : Date.now());
+const scorecardOpens = [];
+
+function noteScorecardOpen(screen) {
+  if (screen.status !== "ready" || !Number.isFinite(screen.openedAt)) return;
+  const entry = { ms: Math.max(0, Math.round(clockMs() - screen.openedAt)), from: screen.from || "network", final: null };
+  screen.openEntry = entry;
+  scorecardOpens.push(entry);
+  if (scorecardOpens.length > 10) scorecardOpens.shift();
+}
+
+/** When everything behind the first paint has landed: repainted, or not. */
+function noteScorecardFinal(screen, repainted) {
+  const entry = screen.openEntry;
+  if (!entry || !Number.isFinite(screen.openedAt)) return;
+  entry.final = { ms: Math.max(0, Math.round(clockMs() - screen.openedAt)), from: repainted ? "network" : "unchanged" };
+}
+
+function scorecardOpenLines() {
+  if (!scorecardOpens.length) return [];
+  return ["", "scorecard opens — first paint / final paint, ms from tap (newest last):",
+    ...scorecardOpens.map((entry) => `  first ${entry.ms} ms ${entry.from}` +
+      (entry.final ? `  ·  final ${entry.final.ms} ms ${entry.final.from}` : "  ·  final pending"))];
+}
+
+function matchdayScreenView() {
+  const screen = matchdayScreen;
+  const back = (label = "My Picks", attr = "data-md-close") =>
+    `<button type="button" class="md-back" ${attr}>‹ ${escapeHTML(label)}</button>`;
+  if (screen.status === "loading") {
+    return `${back()}<div class="section-head"><div><span class="eyebrow">${escapeHTML(matchweekLeagueName())}</span>
+      <h2>${screen.view === "results" ? "Your results" : screen.view === "scorecard" ? "Scorecard" : "Mates' picks"}</h2>
+      ${pickSummarySkeleton(null)}</div></div>
+      <div class="pick-list" aria-busy="true">${Array(PICK_SKELETON_ROWS).fill(0).map(() => pickRowSkeleton()).join("")}</div>`;
+  }
+  if (screen.status === "failed") return `${back()}${picksLoadFailedCard()}`;
+  if (screen.view === "reveal") return revealScreenView(screen, back);
+  if (screen.view === "scorecard") return scorecardScreenView(screen, back);
+  return `${back()}${yourResultsBlock(resultsSnapshot().cards, { heading: true })}`;
+}
+
+// --- P2 / P3 · the reveal -----------------------------------------------------
+
+async function loadRevealScreen(screen) {
+  // No cache, by design: before the server says so, nobody's pick exists here.
+  const data = await api(`/reveal-slot?uid=${encodeURIComponent(uid())}&t=${encodeURIComponent(screen.t)}`);
+  if (screen !== matchdayScreen) return;
+  screen.data = data;
+  screen.status = "ready";
+  // The share is drawn from this answer and nothing else, and only exists
+  // because the server's lock check just passed for this session.
+  screen.shareable = true;
+  const pairs = revealPairs(data);
+  if (pairs.length === 1) screen.pair = pairs[0].key;
+}
+
+function revealPairs(data) {
+  const pairs = [];
+  for (const league of data?.leagues || []) {
+    for (const fixture of league.fixtures || []) {
+      pairs.push({ key: `${league.code}|${fixture.id}`, league, fixture });
+    }
+  }
+  return pairs;
+}
+
+function revealScreenView(screen, back) {
+  const pairs = revealPairs(screen.data);
+  const locked = screen.data?.lockAt ? `Picks locked at ${ukClock(Date.parse(screen.data.lockAt))}` : "Picks locked";
+  if (!pairs.length) {
+    return `${back()}<div class="section-head"><div><span class="eyebrow">Just kicked off</span><h2>Mates' picks</h2>
+      <p class="pick-summary">${escapeHTML(locked)}</p></div></div>
+      <div class="launch-card"><strong>Nothing to reveal in your leagues.</strong></div>`;
+  }
+  const open = screen.pair && pairs.find((pair) => pair.key === screen.pair);
+  if (open) {
+    return `${pairs.length > 1 ? back("All kick-offs", "data-reveal-hub") : back()}${revealCardView(open, locked, screen)}`;
+  }
+  // F3: grouped by LEAGUE, so one fixture in two leagues is plainly two cards.
+  const groups = (screen.data.leagues || []).filter((league) => league.fixtures?.length).map((league) =>
+    `<section class="md-league" data-reveal-league="${escapeHTML(league.code)}">
+      <h3 class="md-league-head">${escapeHTML(league.name || league.code)}<span> · ${escapeHTML(league.weekLabel || "")}</span></h3>
+      ${league.fixtures.map((fixture) => `<button type="button" class="md-hub-row" data-reveal-pair="${escapeHTML(`${league.code}|${fixture.id}`)}"
+        aria-label="${escapeHTML(`${fixture.player1} against ${fixture.player2}, see picks`)}">
+        <span class="pick-row-match" aria-hidden="true">${teamBadge(fixture.player1)}<span class="pick-row-v">v</span>${teamBadge(fixture.player2)}</span>
+        <span class="md-see" aria-hidden="true">See ›</span>
+      </button>`).join("")}
+    </section>`).join("");
+  return `${back()}<div class="section-head"><div><span class="eyebrow">Just kicked off</span><h2>Mates' picks</h2>
+    <p class="pick-summary">${escapeHTML(locked)}</p></div></div>${groups}`;
+}
+
+function revealCardView({ league, fixture }, locked, screen) {
+  const rows = (fixture.rows || []).map((row) => ({ ...row, none: !!row.noPick }));
+  const more = Number(fixture.more) || 0;
+  return `<div class="section-head"><div>
+      <span class="eyebrow">${escapeHTML(league.name || league.code)} · ${escapeHTML(league.weekLabel || "")}</span>
+      <h2 class="md-fixture-title"><span class="pick-row-match" aria-hidden="true">${teamBadge(fixture.player1)}<span class="pick-row-v">v</span>${teamBadge(fixture.player2)}</span>
+        <span class="sr-only">${escapeHTML(`${fixture.player1} against ${fixture.player2}`)}</span></h2>
+      <p class="pick-summary">${escapeHTML(locked)}</p></div></div>
+    <ul class="md-rows is-all" data-reveal-rows>${rows.map((row) => matchdayRow(row, { pill: false })).join("")}</ul>
+    ${more ? `<p class="md-more-note">+ ${more} more mate${more === 1 ? "" : "s"}</p>` : ""}
+    <button type="button" class="secondary wide md-share" data-reveal-share="${escapeHTML(`${league.code}|${fixture.id}`)}"${
+      screen.shareable ? "" : " disabled"}>Share picks</button>
+    ${alertOffer("reveal")}`;
+}
+
+// --- D · the day's scorecard ----------------------------------------------------
+
+/**
+ * The leagues with games on this UK day, from what each league has published —
+ * never the competition calendar. One period per league: a day sits in one week.
+ */
+function scorecardLeagues(day) {
+  const out = [];
+  for (const code of [...leagueCodes].sort()) {
+    const state = leagueStateFor(code);
+    if (!state) continue;
+    const ids = (state.lineupFixtureIds || []).map(String).filter((id) => {
+      const match = fixtureById(id);
+      return match && ukDateOf(match.startAt) === day && !isVoidFixture(match) && !isPostponed(match);
+    });
+    if (!ids.length) continue;
+    const first = fixtureById(ids[0]);
+    const period = state.mixed ? windowKeyFor(first.startAt) : (first.matchday == null ? null : String(first.matchday));
+    if (period == null) continue;
+    out.push({ code, name: state.name || leagueNames[code] || code, period, ids });
+  }
+  return out;
+}
+
+/**
+ * v1.9 build 38: a settled day is immutable, so the device's own copy of the
+ * week is enough to draw it. A day counts as fully settled in that copy when
+ * every one of the league's fixtures that day is marked settled or void there.
+ */
+function dayFullySettled(round, league) {
+  if (!round || round.error || !Array.isArray(round.reveal)) return false;
+  const entries = new Map(round.reveal.map((entry) => [String(entry.id), entry]));
+  return (league?.ids || []).length > 0 && league.ids.every((id) => {
+    const entry = entries.get(String(id));
+    return !!entry && (entry.settled === true || entry.voided === true) && Array.isArray(entry.picks);
+  });
+}
+
+const usableRound = (round) => !!(round && !round.error && round.reveal);
+
+/**
+ * Draws from the device copy at once when it has the chosen league's week,
+ * and waits only for that one league otherwise. Everything else — other
+ * leagues' chips, the week-complete banner, a quiet refresh of a day that was
+ * not fully settled when saved — lands afterwards and repaints only if the
+ * screen actually changed.
+ */
+async function loadScorecardScreen(screen) {
+  // Missing fixture lists (a second competition, the Championship) are STARTED
+  // here and awaited only when no league can be placed on this day without
+  // them — a cold install. A day the device already knows draws now.
+  const fixturesLanded = Promise.resolve().then(() => loadFixturesForLeagues()).catch(() => {});
+  let leagues = scorecardLeagues(screen.d);
+  if (!leagues.length) {
+    await fixturesLanded;
+    leagues = scorecardLeagues(screen.d);
+  }
+  screen.leagues = leagues;
+  if (!leagues.length) { screen.status = "empty"; return; }
+  if (!leagues.some((league) => league.code === screen.league)) {
+    // The league on screen if it played that day; otherwise the reminders'
+    // own rule, the lowest code.
+    screen.league = (leagues.find((league) => league.code === activeLeague) || leagues[0]).code;
+  }
+  screen.rounds = {};
+  const stale = [];
+  for (const league of leagues) {
+    const copy = cachedRoundState(league.code, league.period);
+    if (usableRound(copy)) screen.rounds[league.code] = copy;
+    if (!dayFullySettled(copy, league)) stale.push(league);
+  }
+  const fetches = new Map(stale.map((league) => [league.code, loadMatchdayRound(league.code, league.period).then((round) => {
+    if (usableRound(round)) screen.rounds[league.code] = round;
+  }).catch(() => {})]));
+  // Where the first paint came from, for the diagnostics timer.
+  if (!usableRound(screen.rounds[screen.league])) {
+    screen.from = "network";
+    await fetches.get(screen.league);
+  } else {
+    screen.from = fetches.has(screen.league) ? "device+refresh" : "device";
+  }
+  screen.status = usableRound(screen.rounds[screen.league]) ? "ready" : "failed";
+  // The rest never holds the screen up. A fixture list that lands late may
+  // place another league on this day: its chip and week join the screen.
+  const lateLeagues = fixturesLanded.then(async () => {
+    const more = scorecardLeagues(screen.d).filter((league) => !screen.leagues.some((known) => known.code === league.code));
+    if (!more.length) return;
+    screen.leagues = [...screen.leagues, ...more].sort((a, b) => (a.code < b.code ? -1 : 1));
+    await Promise.all(more.map(async (league) => {
+      const copy = cachedRoundState(league.code, league.period);
+      const round = dayFullySettled(copy, league) ? copy : await loadMatchdayRound(league.code, league.period).catch(() => null);
+      if (usableRound(round)) screen.rounds[league.code] = round;
+    }));
+  });
+  screen.settling = Promise.all([...fetches.values(), ensureResultsRounds().catch(() => 0), lateLeagues]).then(() => {
+    if (screen !== matchdayScreen || screen.status !== "ready") return false;
+    const view = matchdayScreenView();
+    if (view === screen.paintedView) return false;
+    render();
+    screen.paintedView = view;
+    return true;
+  });
+}
+
+/** The day, worked out from one league's round: who scored what, match by match. */
+function scorecardModel(screen) {
+  const league = (screen.leagues || []).find((entry) => entry.code === screen.league);
+  const round = screen.rounds?.[screen.league];
+  if (!league || !round) return null;
+  const me = uid();
+  const entries = new Map((round.reveal || []).map((entry) => [String(entry.id), entry]));
+  const ids = [...league.ids].sort((a, b) => byKickoffAsc(fixtureById(a), fixtureById(b)));
+  const totals = new Map();
+  const matches = ids.map((id) => {
+    const entry = entries.get(id);
+    const fixture = fixtureById(id);
+    const rows = (entry?.revealed ? entry.picks || [] : []).map((pick) => ({ ...pick, you: pick.uid === me }));
+    for (const row of rows) {
+      const total = totals.get(row.uid) || { uid: row.uid, nick: row.nick, you: row.you, pts: 0, exact: 0 };
+      total.pts += entry.settled ? Number(row.pts || 0) : 0;
+      total.exact += entry.settled && row.exact ? 1 : 0;
+      totals.set(row.uid, total);
+    }
+    // F1: the viewer first, then the mates by what that match earned them.
+    rows.sort((a, b) => (a.you === b.you ? 0 : a.you ? -1 : 1)
+      || (Number(b.pts ?? -1) - Number(a.pts ?? -1))
+      || String(a.nick || "").localeCompare(String(b.nick || "")));
+    return { id, fixture, entry, settled: !!entry?.settled, rows };
+  });
+  const table = [...totals.values()].sort((a, b) => b.pts - a.pts || String(a.nick).localeCompare(String(b.nick)));
+  const ranks = sharedRankByUid(table);
+  table.forEach((row) => { row.rank = ranks.get(row.uid); });
+  const lastDay = roundIds(round).map((id) => ukDateOf(fixtureById(id)?.startAt)).filter(Boolean).sort().pop();
+  return { league, round, matches, table, weekComplete: roundSettled(round) && lastDay === screen.d };
+}
+
+function scorecardScreenView(screen, back) {
+  const title = `${ukWeekday(screen.d)}'s scorecard`;
+  if (screen.status === "empty") {
+    return `${back()}<div class="section-head"><div><span class="eyebrow">${escapeHTML(ukShortDate(screen.d))}</span><h2>${escapeHTML(title)}</h2></div></div>
+      <div class="launch-card"><strong>No games in your leagues that day.</strong></div>`;
+  }
+  const model = scorecardModel(screen);
+  if (!model) return `${back()}${picksLoadFailedCard()}`;
+  const week = weekWording(model.league.period);
+  const chips = screen.leagues.length > 1
+    ? `<div class="md-chips" role="group" aria-label="League">${screen.leagues.map((league) =>
+      `<button type="button" class="md-chip${league.code === screen.league ? " is-on" : ""}" data-scorecard-league="${escapeHTML(league.code)}"
+        aria-pressed="${league.code === screen.league ? "true" : "false"}">${escapeHTML(league.name)}</button>`).join("")}</div>`
+    : "";
+  const tableRows = model.table.map((row) => ({ ...row, none: false, p1: null, p2: null }));
+  const dayTable = `<section class="md-section"><h3 class="md-subhead">Today's table</h3>
+    <ol class="md-rows md-table" data-md-rows="table">${
+      [...tableRows.filter((row) => row.you), ...tableRows.filter((row) => !row.you)]
+        .map((row, i) => ({ row, extra: !row.you && i > MATCHDAY_ROWS_SHOWN - (tableRows.some((r) => r.you) ? 0 : 1) }))
+        .sort((a, b) => a.row.rank - b.row.rank || (a.row.you ? -1 : b.row.you ? 1 : 0) || String(a.row.nick).localeCompare(String(b.row.nick)))
+        .map(({ row }, i) => dayTableRow(row, i >= MATCHDAY_ROWS_SHOWN && !row.you)).join("")
+    }</ol>${dayTableMore(tableRows)}</section>`;
+  const matches = model.matches.map((match) => scorecardMatch(match)).join("");
+  return `${back()}
+    ${model.weekComplete ? weekCompleteBanner(model) : ""}
+    <div class="section-head"><div><span class="eyebrow">${escapeHTML(`${ukShortDate(screen.d)} · ${week}`)}</span>
+      <h2>${escapeHTML(title)}</h2></div></div>
+    ${chips}${dayTable}${matches}
+    <button type="button" class="secondary wide md-share" data-scorecard-share>Share scorecard</button>
+    ${alertOffer("results")}`;
+}
+
+function dayTableRow(row, extra) {
+  const spoken = `${ordinal(row.rank)}, ${row.you ? "you" : row.nick}, ${pointsWords(row.pts)}`;
+  return `<li class="md-row${row.you ? " is-you" : ""}${extra ? " is-extra" : ""}" aria-label="${escapeHTML(spoken)}">
+    <span class="md-rank" aria-hidden="true">${row.rank}</span>
+    <span class="md-nick" aria-hidden="true">${escapeHTML(row.nick)}${row.you ? ` <em class="md-you">YOU</em>` : ""}</span>
+    <span class="md-pill" aria-hidden="true"><span class="pick-pill ${row.pts > 0 ? "pick-pill-result" : "pick-pill-miss"}">${row.pts > 0 ? `+${row.pts}` : "0"}</span></span>
+  </li>`;
+}
+
+function dayTableMore(rows) {
+  const hidden = rows.filter((row, i) => !row.you && i >= MATCHDAY_ROWS_SHOWN).length;
+  return hidden ? `<button type="button" class="md-more" data-md-more="table">+ ${hidden} more mate${hidden === 1 ? "" : "s"}</button>` : "";
+}
+
+function scorecardMatch(match) {
+  const { fixture, entry } = match;
+  if (!fixture) return "";
+  const score = entry?.settled && entry.result
+    ? `<span class="md-score">${entry.result.p1}-${entry.result.p2}</span><span class="pick-row-caption">FT</span>`
+    : `<span class="pick-row-word">${entry?.voided ? "Void" : "Pending"}</span>`;
+  const spoken = `${fixture.player1} ${entry?.result ? `${entry.result.p1}, ${fixture.player2} ${entry.result.p2}, full time` : `against ${fixture.player2}`}`;
+  return `<section class="md-section md-match" data-scorecard-match="${escapeHTML(match.id)}">
+    <h3 class="md-match-head" aria-label="${escapeHTML(spoken)}"><span aria-hidden="true">${teamBadge(fixture.player1)}</span>
+      <span class="md-match-score" aria-hidden="true">${score}</span><span aria-hidden="true">${teamBadge(fixture.player2)}</span></h3>
+    ${matchdayRowList(match.rows, match.id, { pill: match.settled })}
+  </section>`;
+}
+
+function weekCompleteBanner(model) {
+  const { cards } = resultsSnapshot();
+  const summary = resultsSummary(cards);
+  const pts = summary.leagues ? summary.pts : Number((model.round.table || []).find((row) => row.uid === uid())?.pts || 0);
+  const won = summary.leagues ? summary.won : ((model.round.winners || []).includes(uid()) ? 1 : 0);
+  const label = `${weekWording(model.league.period)} complete`.toUpperCase();
+  return `<button type="button" class="md-banner" data-open-results>
+    <span class="md-banner-title">${escapeHTML(label)}</span>
+    <span>${escapeHTML(`+${pts} pts · ${won} week${won === 1 ? "" : "s"} won`)}</span>
+    <span>Your weekly and season places · See ›</span>
+  </button>`;
+}
+
+// --- D · Your results ---------------------------------------------------------
+
+/** Each league's latest settled week, from rounds this device already holds. */
+function resultsSnapshot() {
+  const me = uid();
+  const cards = [];
+  const missing = [];
+  for (const code of leagueCodes) {
+    const state = leagueStateFor(code);
+    const period = previousPeriod(state?.currentPeriod);
+    if (!state || period == null) continue;
+    const round = cachedRoundState(code, period);
+    if (!round) { missing.push({ code, period }); continue; }
+    if (!roundSettled(round)) continue;
+    const card = resultsCard(state, round, period, me);
+    if (card) cards.push(card);
+  }
+  return { cards, missing };
+}
+
+/** Fetches whatever resultsSnapshot could not answer from this device. */
+async function ensureResultsRounds() {
+  const { missing } = resultsSnapshot();
+  await Promise.all(missing.map(({ code, period }) => loadMatchdayRound(code, period)));
+  return missing.length;
+}
+
+async function loadResultsScreen(screen) {
+  await ensureResultsRounds();
+  screen.status = resultsSnapshot().cards.length ? "ready" : "failed";
+}
+
+/**
+ * One league's card. Points and places are the server's tables; the season
+ * movement is P4's rule — the season rank now against the rank on season
+ * points less this week's, both by shared rank.
+ */
+function resultsCard(state, round, period, me) {
+  const weekRow = (round.table || []).find((row) => row.uid === me);
+  if (!weekRow) return null;
+  const weekPts = new Map((round.table || []).map((row) => [row.uid, Number(row.pts || 0)]));
+  const season = state.table || [];
+  const seasonRank = sharedRankByUid(season).get(me) ?? null;
+  const before = sharedRankByUid(season.map((row) => ({ uid: row.uid, pts: Number(row.pts || 0) - (weekPts.get(row.uid) || 0) })));
+  const previous = before.get(me);
+  const exactIds = new Set();
+  for (const entry of round.reveal || []) {
+    if (entry.settled && (entry.picks || []).some((pick) => pick.uid === me && pick.exact)) exactIds.add(String(entry.id));
+  }
+  return {
+    code: state.code,
+    name: state.name || leagueNames[state.code] || state.code,
+    period,
+    label: weekWording(period),
+    weekPts: Number(weekRow.pts || 0),
+    weekRank: sharedRankByUid(round.table).get(me),
+    winner: (round.winners || []).includes(me),
+    seasonRank,
+    seasonMove: seasonRank != null && previous != null ? previous - seasonRank : null,
+    exactIds,
+  };
+}
+
+function resultsSummary(cards) {
+  const exact = new Set();
+  for (const card of cards) for (const id of card.exactIds) exact.add(id);
+  return {
+    leagues: cards.length,
+    pts: cards.reduce((sum, card) => sum + card.weekPts, 0),
+    exact: exact.size,
+    won: cards.filter((card) => card.winner).length,
+  };
+}
+
+/** The season ▲/▼/– the League tab draws, through the same movementMark. */
+function resultsMoveBadge(move) {
+  const mark = movementMark(move);
+  return `<span class="movement movement-${mark.dir}">${mark.glyph}${mark.magnitude ? mark.magnitude : ""}</span>`;
+}
+
+function yourResultsBlock(cards, { heading = false } = {}) {
+  if (!cards.length) return "";
+  const s = resultsSummary(cards);
+  const label = cards.find((card) => card.code === activeLeague)?.label || cards[0].label;
+  const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+  const line = `+${s.pts} pts across ${plural(s.leagues, "league")} · ${plural(s.exact, "exact score")} · ${plural(s.won, "week")} won`;
+  return `<section class="results-block" data-your-results aria-label="Your results">
+    <div class="results-summary">
+      <span class="eyebrow">${escapeHTML(label)} · settled</span>
+      ${heading ? "<h2>Your results</h2>" : "<h3>Your results</h3>"}
+      <p>${escapeHTML(line)}</p>
+    </div>
+    ${cards.map((card) => `<button type="button" class="results-league" data-results-league="${escapeHTML(card.code)}" data-results-period="${escapeHTML(card.period)}"
+      aria-label="${escapeHTML(`${card.name}: this week ${ordinal(card.weekRank)} with ${pointsWords(card.weekPts)}${card.winner ? ", week winner" : ""}; season ${card.seasonRank == null ? "unranked" : ordinal(card.seasonRank)}, ${movementMark(card.seasonMove || 0).label.toLowerCase()}. Open the table`)}">
+      <span class="results-league-name" aria-hidden="true">${escapeHTML(card.name)}${card.winner ? ` <span class="results-winner">WEEK WINNER</span>` : ""}</span>
+      <span class="results-league-line" aria-hidden="true">This week ${ordinal(card.weekRank)} · +${card.weekPts}</span>
+      <span class="results-league-line" aria-hidden="true">Season ${card.seasonRank == null ? "–" : ordinal(card.seasonRank)} ${resultsMoveBadge(card.seasonMove || 0)}</span>
+      <span class="results-go" aria-hidden="true">›</span>
+    </button>`).join("")}
+  </section>`;
+}
+
+/** A results card opens that league's table on that week, Season one tap away. */
+async function openResultsLeague(code, period) {
+  matchdayScreen = null;
+  if (leagueCodes.includes(code) && activeLeague !== code) setActiveLeague(code, false);
+  leagueTab = "matchday";
+  selectedPeriod = period;
+  roundState = cachedRoundState(code, period);
+  await navigateToView("league");
+}
+
+// --- My Picks: results mode, and the slim link ------------------------------
+
+/**
+ * Results mode: the league's latest week has settled and the next is not yet
+ * open. Everyone gets it, alert on or off, web or iOS. The moment the next week
+ * opens, picks win.
+ */
+function resultsModeFor(state) {
+  if (!state || matchweekSlate(state) || !state.awaitingPublish) return null;
+  const period = previousPeriod(state.currentPeriod);
+  if (period == null) return null;
+  const round = cachedRoundState(state.code, period);
+  if (!round) { requestResultsRound(state.code, period); return null; }
+  return roundSettled(round) ? { period, round } : null;
+}
+
+const resultsRoundFlights = new Set();
+function requestResultsRound(code, period) {
+  const key = `${code}:${period}`;
+  if (!API || resultsRoundFlights.has(key)) return;
+  resultsRoundFlights.add(key);
+  loadMatchdayRound(code, period).then((round) => { if (round) render(); }).catch(() => {});
+}
+
+function resultsLinkSeenAt(code, period) {
+  const key = `${RESULTS_LINK_SEEN}:${code}:${period}`;
+  try {
+    const seen = Number(localStorage.getItem(key));
+    if (Number.isFinite(seen) && seen > 0) return seen;
+    const now = Date.now();
+    localStorage.setItem(key, String(now));
+    return now;
+  } catch {
+    return Date.now();
+  }
+}
+
+/**
+ * "Week 13 results ›" for a day after the next week opens, then gone. Timed
+ * from the moment this device first showed it, so a week published days before
+ * the last one settled still gets its day.
+ */
+function resultsSlimLink(state) {
+  const period = previousPeriod(state?.currentPeriod);
+  if (period == null) return "";
+  const round = cachedRoundState(state.code, period);
+  if (!roundSettled(round)) { if (!round) requestResultsRound(state.code, period); return ""; }
+  if (Date.now() - resultsLinkSeenAt(state.code, period) > RESULTS_LINK_MS) return "";
+  return `<button type="button" class="results-link" data-open-results>${escapeHTML(weekWording(period))} results ›</button>`;
+}
+
+/**
+ * "Saturday's scorecard ›" under the rows, for every day in them whose games
+ * have all finished — so the scorecard is a tap away without an alert.
+ */
+function scorecardLinks(ids) {
+  const days = new Map();
+  for (const id of ids || []) {
+    const match = fixtureById(id);
+    if (!match || isVoidFixture(match) || isPostponed(match)) continue;
+    const day = ukDateOf(match.startAt);
+    if (!day) continue;
+    const settled = !!finalScore(match);
+    days.set(day, (days.get(day) ?? true) && settled);
+  }
+  const done = [...days].filter(([, settled]) => settled).map(([day]) => day).sort();
+  if (!done.length) return "";
+  prefetchScorecards(done);
+  return `<div class="scorecard-links">${done.map((day) =>
+    `<button type="button" class="results-link" data-open-scorecard="${escapeHTML(day)}">${escapeHTML(ukWeekday(day))}'s scorecard ›</button>`).join("")}</div>`;
+}
+
+/**
+ * v1.9 build 38: My Picks has drawn a link to a settled day, so the scorecard
+ * behind it is fetched quietly — once per league+day per session, after the
+ * paint, and not at all when the device copy already holds that day settled.
+ */
+const scorecardPrefetched = new Set();
+
+function prefetchScorecards(days) {
+  const wanted = [];
+  for (const day of days) {
+    for (const league of scorecardLeagues(day)) {
+      const key = `${league.code}:${day}`;
+      if (scorecardPrefetched.has(key)) continue;
+      scorecardPrefetched.add(key);
+      if (dayFullySettled(cachedRoundState(league.code, league.period), league)) continue;
+      wanted.push(league);
+    }
+  }
+  if (!wanted.length || !API) return;
+  setTimeout(() => {
+    const periods = new Set();
+    for (const league of wanted) {
+      const once = `${league.code}:${league.period}`;
+      if (periods.has(once)) continue;               // two days of one week: one request
+      periods.add(once);
+      loadMatchdayRound(league.code, league.period).catch(() => {});
+    }
+  }, 600);
+}
+
+// --- shares, drawn only from what the screen holds ---------------------------
+
+function shareScorecardNow() {
+  const screen = matchdayScreen;
+  const model = screen?.view === "scorecard" && screen.status === "ready" ? scorecardModel(screen) : null;
+  if (!model) return;
+  const top = model.table.filter((row) => row.pts > 0 && row.pts === model.table[0]?.pts);
+  const day = ukWeekday(screen.d).toUpperCase();
+  const card = {
+    league: model.league.name,
+    headline: `${ukWeekday(screen.d)}'s scorecard · ${ukShortDate(screen.d)}`,
+    // The day's own honour: "TUESDAY'S TOP SCORER" / "2 pts". No week label —
+    // the headline already names the day and date.
+    heroEyebrow: top.length > 1 ? `${day}'S JOINT TOP SCORERS` : `${day}'S TOP SCORER`,
+    heroName: top.map((row) => row.nick).join(" & ") || "Nobody",
+    heroLine: `${top[0]?.pts ?? 0} pts`,
+    podium: [],
+    rows: model.table.map((row) => ({ rank: row.rank, nick: row.nick, pts: row.pts, exact: row.exact, movement: null, place: null })),
+    code: model.league.code,
+    link: inviteLinkFor(model.league.code),
+  };
+  const { hero, m } = weeklyCardGeometry(card.rows.length);
+  const plan = { pages: m.pages, rows: card.rows.length, page: (page) => drawWeeklyPage(card, hero, m, page) };
+  const stem = `prem-oracle-scorecard-${screen.d}`;
+  const nameFor = (index) => (plan.pages > 1 ? `${stem}-${index + 1}-of-${plan.pages}.png` : `${stem}.png`);
+  const title = `${model.league.name} · ${ukWeekday(screen.d)}'s scorecard`;
+  const text = `${title} — join league ${model.league.code}: ${card.link}`;
+  if (plan.pages === 1) { shareCardFile([cardPng(plan.page(0), nameFor(0))], { title, text }); return; }
+  const at = () => (typeof performance !== "undefined" ? performance.now() : Date.now());
+  sharePagesSequentially(plan, { nameFor, title, text, rows: plan.rows, startedAt: at(), at });
+}
+
+function shareRevealNow(key) {
+  const screen = matchdayScreen;
+  // Only an answer this session's /reveal-slot gave, for a pair it named.
+  if (screen?.view !== "reveal" || !screen.shareable) return;
+  const pair = revealPairs(screen.data).find((entry) => entry.key === key);
+  if (!pair) return;
+  const canvas = drawRevealCard(pair);
+  const title = `${pair.league.name} · ${pair.fixture.player1} v ${pair.fixture.player2} picks`;
+  const text = `${title} — join league ${pair.league.code}: ${inviteLinkFor(pair.league.code)}`;
+  shareCardFile([cardPng(canvas, `prem-oracle-picks-${pair.fixture.id}.png`)], { title, text });
+}
+
+function drawRevealCard({ league, fixture }) {
+  const rows = (fixture.rows || []).slice(0, MATCHDAY_ROWS_SHOWN);
+  const more = Number(fixture.more) || 0;
+  const titleH = 110;
+  const bodyH = titleH + rows.length * CARD_ROW_H + (more ? 64 : 0);
+  const contentHeight = CARD_HEAD_H + CARD_GAP + bodyH + CARD_GAP + CARD_FOOT_H;
+  const { canvas, ctx } = cardCanvas(contentHeight);
+  drawCardHeader(ctx, league.name || league.code, `${league.weekLabel || ""} · picks locked`);
+  let y = CARD_HEAD_H + CARD_GAP;
+  drawFitted(ctx, `${fixture.player1} v ${fixture.player2}`, CARD_PAD, y + 64, CARD_W - CARD_PAD * 2, { max: 52, min: 30 });
+  y += titleH;
+  rows.forEach((row, index) => {
+    ctx.fillStyle = index % 2 ? CARD.rowAlt : CARD.row;
+    ctx.fillRect(CARD_PAD, y, CARD_W - CARD_PAD * 2, CARD_ROW_H - 4);
+    const baseline = y + CARD_ROW_H / 2 + 12;
+    drawFitted(ctx, row.you ? `${row.nick} (you)` : row.nick, CARD_PAD + 24, baseline, CARD_W - CARD_PAD * 2 - 260,
+      { max: 36, min: CARD_TYPE_FLOOR, colour: row.you ? CARD.green : CARD.ink });
+    ctx.textAlign = "right";
+    ctx.fillStyle = row.noPick ? CARD.muted : CARD.green;
+    ctx.font = cardFont(900, 38);
+    ctx.fillText(row.noPick ? "No pick" : `${row.p1}-${row.p2}`, CARD_W - CARD_PAD - 24, baseline);
+    ctx.textAlign = "left";
+    y += CARD_ROW_H;
+  });
+  if (more) {
+    ctx.fillStyle = CARD.muted;
+    ctx.font = cardFont(800, 28);
+    ctx.fillText(`+ ${more} more mate${more === 1 ? "" : "s"}`, CARD_PAD + 24, y + 44);
+    y += 64;
+  }
+  drawCardFooter(ctx, y + CARD_GAP, { code: league.code, link: inviteLinkFor(league.code) });
+  return canvas;
+}
+
+// --- Matchday alerts: the two switches and the one-time offers ---------------
+//
+// Both default OFF and live with the notification prefs on the server, offers
+// included, so a reinstall or a restore keeps them. Reminder consent is never
+// read here: turning one of these on asks iOS on that tap if it has never been
+// asked, and does nothing else to the reminders.
+
+// v1.9 build 37: what THIS DEVICE chose is what the boxes show. `updatedAt`
+// is when it last chose (its own clock); `dirty` means the server has not yet
+// acknowledged that choice. Every save sends the whole state, one at a time
+// (latest wins), and no answer or GET older than the device's own choice can
+// untick a box. Offers only ever go false -> true.
+const ALERT_PREFS_BLANK = { reveal: false, results: false, offers: { reveal: false, results: false }, loaded: false, updatedAt: 0, dirty: false };
+let alertPrefs = { ...ALERT_PREFS_BLANK, ...(readJSON(STORAGE.alertPrefs, null) || {}) };
+let alertPrefsRev = 0;          // bumped on every local change
+let alertPrefsSync = null;      // the one save in flight, if any
+let alertPrefsAgain = false;    // a change arrived while it was in flight
+
+function storeAlertPrefs() {
+  try { localStorage.setItem(STORAGE.alertPrefs, JSON.stringify(alertPrefs)); } catch { /* memory still holds it */ }
+}
+
+const mergedOffers = (mine, theirs) => ({
+  reveal: mine?.reveal === true || theirs?.reveal === true,
+  results: mine?.results === true || theirs?.results === true,
+});
+
+/** Adopt the server's choice (it is at least as new as ours). */
+function applyAlertPrefs(answer) {
+  alertPrefs = {
+    reveal: answer?.reveal === true,
+    results: answer?.results === true,
+    offers: mergedOffers(alertPrefs.offers, answer?.offers),
+    loaded: true,
+    updatedAt: Number(answer?.updatedAt) || 0,
+    dirty: false,
+  };
+  storeAlertPrefs();
+}
+
+/** A local change: shown at once, saved in order. */
+function changeAlertPrefs(change) {
+  alertPrefs = { ...alertPrefs, ...change, dirty: true };
+  alertPrefsRev += 1;
+  storeAlertPrefs();
+  syncAlertCheckboxes();
+  return syncAlertPrefs();
+}
+
+/** Send the whole state; one request in flight; repeat while newer changes wait. */
+function syncAlertPrefs() {
+  if (!API) return Promise.resolve();
+  if (alertPrefsSync) { alertPrefsAgain = true; return alertPrefsSync; }
+  alertPrefsSync = (async () => {
+    try {
+      do {
+        alertPrefsAgain = false;
+        const rev = alertPrefsRev;
+        // Never chosen on this device: send only the offers, so a dismissal
+        // cannot switch off an alert another device turned on.
+        const body = { uid: uid(), offers: { ...alertPrefs.offers } };
+        if (alertPrefs.updatedAt > 0) Object.assign(body, { reveal: alertPrefs.reveal, results: alertPrefs.results, updatedAt: alertPrefs.updatedAt });
+        let answer;
+        try { answer = await api("/notification-prefs", body); } catch { return; } // stays dirty; retried on next open or reconnect
+        if (rev !== alertPrefsRev) continue;           // a newer local choice is queued: it wins
+        if (answer?.stale || !(alertPrefs.updatedAt > 0)) applyAlertPrefs(answer); // another device chose later
+        else alertPrefs = { ...alertPrefs, offers: mergedOffers(alertPrefs.offers, answer?.offers), loaded: true, dirty: false };
+        storeAlertPrefs();
+        syncAlertCheckboxes();
+      } while (alertPrefsAgain);
+    } finally {
+      alertPrefsSync = null;
+    }
+  })();
+  return alertPrefsSync;
+}
+
+// Ticked offline: saved the moment the connection is back.
+if (typeof window !== "undefined" && window.addEventListener) {
+  window.addEventListener("online", () => { if (alertPrefs.dirty) syncAlertPrefs(); });
+}
+
+async function loadAlertPrefs() {
+  if (!API || !isNativeApp()) return;
+  if (alertPrefs.dirty) { await syncAlertPrefs(); return; } // an unsaved choice is sent, not overwritten
+  const rev = alertPrefsRev;
+  try {
+    const answer = await api(`/notification-prefs?uid=${encodeURIComponent(uid())}`);
+    if (rev !== alertPrefsRev || alertPrefs.dirty || alertPrefsSync) return; // chosen meanwhile: ours wins
+    if ((Number(answer?.updatedAt) || 0) >= (alertPrefs.updatedAt || 0)) applyAlertPrefs(answer);
+    else { alertPrefs = { ...alertPrefs, offers: mergedOffers(alertPrefs.offers, answer?.offers), loaded: true }; storeAlertPrefs(); }
+    syncAlertCheckboxes();
+  } catch {
+    // Unknown is shown as what this device last knew; offers stay hidden until known.
+  }
+}
+
+const pushPlugin = () => window.capacitorPushNotifications?.PushNotifications || window.Capacitor?.Plugins?.PushNotifications || null;
+
+async function pushPermission() {
+  const push = pushPlugin();
+  if (!isNativeApp() || !push) return null;
+  try { return (await push.checkPermissions()).receive || null; } catch { return null; }
+}
+
+/** Granted, asking iOS first if it has never been asked. Never asks twice. */
+async function ensurePushPermission() {
+  const push = pushPlugin();
+  if (!push) return false;
+  try {
+    let permission = (await push.checkPermissions()).receive;
+    if (permission === "prompt" || permission === "prompt-with-rationale") {
+      permission = (await push.requestPermissions()).receive;
+    }
+    if (permission !== "granted") return false;
+    await push.register();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function setAlertPref(kind, on) {
+  if (!["reveal", "results"].includes(kind)) return false;
+  if (on && !(await ensurePushPermission())) {
+    syncAlertCheckboxes();
+    renderNotificationsDenied(await pushPermission());
+    return false;
+  }
+  // Strictly later than any choice this device already knows of.
+  changeAlertPrefs({ [kind]: !!on, updatedAt: Math.max(Date.now(), (alertPrefs.updatedAt || 0) + 1) });
+  return true;
+}
+
+/** Turn on OR ×: either way the offer is done, everywhere this account signs in. */
+async function retireAlertOffer(kind) {
+  document.querySelectorAll(`[data-alert-offer="${kind}"]`).forEach((node) => node.remove());
+  await changeAlertPrefs({ offers: { ...alertPrefs.offers, [kind]: true } });
+}
+
+const ALERT_OFFER_COPY = {
+  reveal: "Get this the moment picks lock?",
+  results: "Get the scorecard after every matchday?",
+};
+
+/** Native only, once the server has said what is set, and never when already on. */
+function alertOffer(kind) {
+  if (!isNativeApp() || !alertPrefs.loaded || alertPrefs[kind] || alertPrefs.offers?.[kind]) return "";
+  return `<div class="alert-offer" data-alert-offer="${kind}" role="group" aria-label="Matchday alert">
+    <p>${escapeHTML(ALERT_OFFER_COPY[kind])}</p>
+    <button type="button" class="primary" data-alert-offer-on="${kind}">Turn on</button>
+    <button type="button" class="alert-offer-dismiss" data-alert-offer-dismiss="${kind}" aria-label="Dismiss">×</button>
+  </div>`;
+}
+
+const ALERT_SWITCHES = [
+  { kind: "reveal", label: "Mates' picks revealed", sub: "One alert per kick-off time, after picks lock" },
+  { kind: "results", label: "Matchday results", sub: "Scorecard after your last game each day" },
+];
+
+async function renderMatchdayAlerts() {
+  const wrap = document.getElementById("matchdayAlerts");
+  const list = document.getElementById("matchdayAlertsList");
+  if (!wrap || !list) return;
+  if (!isNativeApp()) { wrap.hidden = true; return; }
+  wrap.hidden = false;
+  list.innerHTML = ALERT_SWITCHES.map((entry) => `<label class="notif-row notif-row-sub">
+    <span><span class="notif-label">${escapeHTML(entry.label)}</span><small>${escapeHTML(entry.sub)}</small></span>
+    <input type="checkbox" data-alert-pref="${entry.kind}"${alertPrefs[entry.kind] ? " checked" : ""}>
+  </label>`).join("");
+  renderNotificationsDenied(await pushPermission());
+  loadAlertPrefs();
+}
+
+function syncAlertCheckboxes() {
+  document.querySelectorAll("[data-alert-pref]").forEach((box) => { box.checked = !!alertPrefs[box.dataset.alertPref]; });
+}
+
+/** Denied in iOS Settings: say so, offer the way there, and disable every box. */
+function renderNotificationsDenied(permission) {
+  const denied = permission === "denied";
+  const note = document.getElementById("notificationsDenied");
+  if (note) note.hidden = !denied;
+  document.querySelectorAll("[data-alert-pref], [data-notif-competition]").forEach((box) => { box.disabled = denied; });
+}
+
+function openIosSettings() {
+  // UIApplication.openSettingsURLString — the app's own page in Settings.
+  try { window.location.href = "app-settings:"; } catch { /* nothing else to offer */ }
+}
 
 
 /**
@@ -7106,6 +8368,7 @@ function diagnosticsText() {
     `rootFont ${report.rootFontPx}px  native ${report.native}`,
     ...matchweekMismatchLines(),
     ...weeklyFinalMismatchLines(),
+    ...scorecardOpenLines(),
   ];
   // Times are milliseconds from the physical pointerdown, which is where a slow
   // tap actually begins — not where a handler eventually hears about it.
@@ -7332,8 +8595,46 @@ document.addEventListener("click", async (event) => {
   // that opens the heaviest screen in the app, is exactly when it is not.
   const joinNotice = event.target.closest("[data-open-join]");
   if (joinNotice) { openJoinSheet(joinNotice.dataset.openJoin); return; }
+  if (event.target.closest("[data-retry-picks]")) {
+    if (matchdayScreen) { matchdayScreen.status = "loading"; render(); loadMatchdayScreen(matchdayScreen); return; }
+    retryPicksLoad();
+    return;
+  }
+  // v1.9 Slice 2 — the matchday screens. The shares stay synchronous to the
+  // tap, like every other share in the app.
+  if (event.target.closest("[data-md-close]")) { closeMatchdayScreen(); return; }
+  if (event.target.closest("[data-reveal-hub]") && matchdayScreen) { matchdayScreen.pair = null; render({ scrollTop: true }); return; }
+  const revealPair = event.target.closest("[data-reveal-pair]");
+  if (revealPair && matchdayScreen) { matchdayScreen.pair = revealPair.dataset.revealPair; render({ scrollTop: true }); return; }
+  const revealShare = event.target.closest("[data-reveal-share]");
+  if (revealShare) { shareRevealNow(revealShare.dataset.revealShare); return; }
+  if (event.target.closest("[data-scorecard-share]")) { shareScorecardNow(); return; }
+  const scorecardLeague = event.target.closest("[data-scorecard-league]");
+  if (scorecardLeague && matchdayScreen) { matchdayScreen.league = scorecardLeague.dataset.scorecardLeague; render(); return; }
+  const mdMore = event.target.closest("[data-md-more]");
+  if (mdMore) {
+    const list = mdMore.parentElement?.querySelector(`[data-md-rows="${cssEscape(mdMore.dataset.mdMore)}"]`);
+    if (list) { list.classList.add("is-all"); mdMore.remove(); }
+    return;
+  }
+  if (event.target.closest("[data-open-results]")) { openMatchdayScreen({ view: "results" }); return; }
+  const openScorecard = event.target.closest("[data-open-scorecard]");
+  if (openScorecard) { openMatchdayScreen({ view: "scorecard", d: openScorecard.dataset.openScorecard }); return; }
+  const resultsLeague = event.target.closest("[data-results-league]");
+  if (resultsLeague) { openResultsLeague(resultsLeague.dataset.resultsLeague, resultsLeague.dataset.resultsPeriod); return; }
+  const offerOn = event.target.closest("[data-alert-offer-on]");
+  if (offerOn) {
+    const kind = offerOn.dataset.alertOfferOn;
+    setAlertPref(kind, true).finally(() => retireAlertOffer(kind));
+    return;
+  }
+  const offerOff = event.target.closest("[data-alert-offer-dismiss]");
+  if (offerOff) { retireAlertOffer(offerOff.dataset.alertOfferDismiss); return; }
+  if (event.target.closest("[data-open-ios-settings]")) { openIosSettings(); return; }
   const nav = event.target.closest("[data-view]");
   if (nav) {
+    // A tab tap always lands on that tab itself, never on a matchday screen.
+    matchdayScreen = null;
     // The onboarding CTA lands on the League tab with the wizard already open.
     if (nav.hasAttribute("data-launch-create")) openWizard();
     navigateToView(nav.dataset.view);
@@ -7742,6 +9043,8 @@ document.addEventListener("change", (event) => {
     if (confirmSingle.checked) wizard.error = "";
     return;
   }
+  const alertBox = event.target.closest("[data-alert-pref]");
+  if (alertBox) { setAlertPref(alertBox.dataset.alertPref, alertBox.checked); return; }
   const toggle = event.target.closest("[data-notif-competition]");
   if (!toggle) return;
   const code = toggle.dataset.notifCompetition;
@@ -8012,6 +9315,7 @@ document.getElementById("notifyDialog").addEventListener("click", (event) => {
 document.getElementById("profileButton").addEventListener("click", () => {
   document.getElementById("playerName").value = playerName;
   renderNotificationPrefs();
+  renderMatchdayAlerts();
   // Later recovery access lives here, behind the avatar — and it opens with
   // the code NOT on screen. It is shown only on an explicit tap.
   resetProfileRecovery();
@@ -8317,28 +9621,88 @@ function leagueCodeFromUrl(url) {
   }
 }
 
-// Open the join flow for an invite code arriving after launch (native deep link).
-async function openInviteFlow(code) {
-  if (!code || leagueCodes.includes(code)) return;
-  inviteCode = code;
-  await navigateToView("league");
+/* --- v1.9 §1: one router from a link to a screen ---------------------------
+ *
+ * Every link the app is handed — an invite on a cold or warm launch, and from
+ * the reveal alerts a notification tap — is decided here, once. It only ever
+ * READS a link: identity, recovery and picks are never written from one, and a
+ * league is never joined without the viewer's own tap on the join sheet.
+ */
+
+/** What a link asks for — a league and the screen to open it on — or null. */
+function linkRoute(url) {
+  let search = "";
+  try { search = new URL(url, location.href).search; } catch { return null; }
+  // v1.9 Slice 2: a matchday screen names no league — the screen itself works
+  // out which of the viewer's leagues it covers, from the server's answer.
+  const matchday = matchdayRouteFromSearch(search);
+  if (matchday) return matchday;
+  const league = leagueCodeFromUrl(url);
+  if (!league) return null;
+  return { league, view: requestedView(search) || "picks" };
+}
+
+/**
+ * Take the viewer where a route points, and say which way it went.
+ *
+ *   "member"  a league they play: switched to, on its My Picks (or the view
+ *             the link named) — the same safe path a league pill takes
+ *   "invite"  a league they don't: the one-step join sheet, over whatever is
+ *             on screen. An unknown or deleted code is the sheet's to explain
+ *             ("League not found"), exactly as it is on the web.
+ */
+async function followLinkRoute(route) {
+  if (!route) return "none";
+  if (MATCHDAY_VIEWS.includes(route.view)) {
+    await openMatchdayScreen(route);
+    return "matchday";
+  }
+  const { league, view } = route;
+  if (leagueCodes.includes(league)) {
+    if (activeLeague !== league) setActiveLeague(league);
+    await navigateToView(view);
+    return "member";
+  }
+  inviteCode = league;
+  const dialog = document.getElementById("joinDialog");
+  if (API && !(dialog?.open && joinSheetCode === league)) openJoinSheet(league);
+  render();
+  return "invite";
+}
+
+// The link this page last followed. A cold launch can hand the same link over
+// twice — as the launch URL and as a retained appUrlOpen — and a webview reload
+// asks for the launch URL again; neither may route twice.
+const LAST_LINK_KEY = "prem_oracle_last_link";
+const LINK_REPEAT_MS = 3000;
+let lastLink = { url: "", at: 0 };
+
+function followIncomingLink(url, { launch = false } = {}) {
+  const route = linkRoute(url);
+  if (!route) return Promise.resolve("none");
+  let followed = "";
+  try { followed = sessionStorage.getItem(LAST_LINK_KEY) || ""; } catch { /* private mode */ }
+  if (launch && followed === url) return Promise.resolve("repeat");
+  if (url === lastLink.url && Date.now() - lastLink.at < LINK_REPEAT_MS) return Promise.resolve("repeat");
+  lastLink = { url, at: Date.now() };
+  try { sessionStorage.setItem(LAST_LINK_KEY, url); } catch { /* private mode */ }
+  return followLinkRoute(route);
 }
 
 // Native universal links (applinks:abigwood.github.io) arrive through the
 // Capacitor App plugin rather than location.search, because the webview runs at
-// capacitor://localhost. Route them into the same invite flow as the web build.
+// capacitor://localhost. SceneDelegate hands both paths to Capacitor's proxy: a
+// warm link arrives as appUrlOpen, and a cold launch — whose link reached the
+// scene before this page existed — is read back with getLaunchUrl. The web build
+// reads its own location.search at launch and does not come through here.
 async function setupNativeUniversalLinks() {
   const cap = window.Capacitor;
   const app = window.capacitorApp?.App || cap?.Plugins?.App;
   if (!cap?.isNativePlatform?.() || !app) return;
   try {
-    await app.addListener("appUrlOpen", (data) => {
-      const code = leagueCodeFromUrl(data?.url || "");
-      if (code) openInviteFlow(code);
-    });
+    await app.addListener("appUrlOpen", (data) => followIncomingLink(data?.url || ""));
     const launch = await app.getLaunchUrl?.();
-    const launchCode = leagueCodeFromUrl(launch?.url || "");
-    if (launchCode) openInviteFlow(launchCode);
+    if (launch?.url) await followIncomingLink(launch.url, { launch: true });
   } catch {
     // Deep-link routing is best-effort; the code can still be typed manually.
   }
@@ -8355,6 +9719,16 @@ hydrateCachedLeague();
 // half again as large — and until this call existed the app showed an empty
 // content area for the whole of it.
 render();
+
+// v1.9 §2: the first load gets a deadline, so a hung request ends in an honest
+// message rather than a skeleton that never resolves.
+armPicksLoadTimeout();
+
+// v1.9 §1: a link that launched the app is followed now, not after identity
+// settles — otherwise a cold launch from an invite stands on the last league
+// for the whole of /me. Its first await yields, so the script below has run
+// before any of it acts; the stored league list is what membership is read from.
+setupNativeUniversalLinks();
 
 /**
  * Restores the league, the week it was on, and that week's table TOGETHER.
@@ -8404,7 +9778,10 @@ Promise.all([loadFixtures(), hydrateIdentity()]).then(() => {
   // The switch renders; without one, the ordinary first paint does.
   if (linked) setActiveLeague(linked);
   else render();
-  if (joinInvite && API) openJoinSheet(joinInvite);
+  // v1.9 §1: a native link can have opened this sheet already, before identity
+  // settled; opening it again would clear a name the viewer is typing.
+  const sheetOpen = document.getElementById("joinDialog")?.open && joinSheetCode === joinInvite;
+  if (joinInvite && API && !sheetOpen) openJoinSheet(joinInvite);
   // A cold launch onto My Picks owes the same one revalidation an entry does.
   // Without this the screen could stand on a cache captured before kick-off
   // and never ask for the picks that have since been revealed.
@@ -8416,7 +9793,12 @@ Promise.all([loadFixtures(), hydrateIdentity()]).then(() => {
   // save it again. Sent once per name, not on every launch.
   if (playerName && localStorage.getItem(STORAGE.syncedName) !== playerName) syncProfileName();
   setupNativePushNotifications();
-  setupNativeUniversalLinks();
+  // v1.9 Slice 2: what the two matchday switches are set to, for the offers.
+  loadAlertPrefs();
+  // The web reads a matchday link off its own URL; native links arrive through
+  // setupNativeUniversalLinks above.
+  const matchdayLink = isNativeApp() ? null : matchdayRouteFromSearch(location.search);
+  if (matchdayLink) openMatchdayScreen(matchdayLink);
   // No league refresh here: hydrateIdentity() owns startup's single refresh and
   // has already run by this point. A second one would be a duplicate, not a
   // safety net.

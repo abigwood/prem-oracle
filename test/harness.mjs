@@ -56,6 +56,8 @@ export function constOf(name) {
  * localStorage, team badges — is stubbed, so a test failure is about the logic
  * under test and not about the browser it usually runs in.
  */
+const ALWAYS = ["PICK_SKELETON_ROWS", "pickRowSkeleton", "pickSummarySkeleton", "picksLoadFailedCard", "scorePickLocal"];
+
 export function load(names, stubs = {}) {
   const sandbox = {
     picks: {},
@@ -74,6 +76,19 @@ export function load(names, stubs = {}) {
     sharePromptHtml: () => "",
     fixtureRevealSection: () => "",
     pickRevealSection: () => "",
+    // v1.9: the first load has resolved and a finished row carries no pick
+    // line, unless a test lifts the real ones (week_load_and_outcome.test.mjs).
+    fixturesStatus: "ready",
+    picksLoadPhase: () => "ready",
+    pickRowOutcome: () => "",
+    weekShapeFor: () => null,
+    rememberWeekShape: () => {},
+    // v1.9 Slice 2: no matchday screen open, no results mode, no slim link and
+    // no scorecard links, unless a test lifts the real ones (matchday.test.mjs).
+    matchdayScreen: null,
+    resultsModeFor: () => null,
+    resultsSlimLink: () => "",
+    scorecardLinks: () => "",
     isLeagueHost: () => false,
     slateForPeriod: () => null,
     currentPeriodKey: () => null,
@@ -92,6 +107,14 @@ export function load(names, stubs = {}) {
     // the test outside. Publishing it makes both work.
     vm.runInContext(`${src}\nglobalThis[${JSON.stringify(name)}] = ${name};`,
       sandbox, { filename: `app.js:${name}` });
+  }
+  // Pure helpers every My Picks paint can reach since v1.9 — the skeleton and
+  // failure pieces, and the scoring port a finished row's spoken name uses —
+  // lifted for real unless the test lifted or stubbed them itself.
+  for (const name of ALWAYS) {
+    if (names.includes(name) || name in stubs) continue;
+    const src = APP.includes(`function ${name}(`) ? sourceOf(name) : constOf(name);
+    vm.runInContext(`${src}\nglobalThis[${JSON.stringify(name)}] = ${name};`, sandbox, { filename: `app.js:${name}` });
   }
   sandbox.evalIn = (expression) => vm.runInContext(expression, sandbox);
   return sandbox;

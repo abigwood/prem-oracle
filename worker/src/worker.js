@@ -34,6 +34,9 @@ import {
   reconcileSlate,
   refreshSnapshot,
   earliestUnplayedPeriod,
+  fixtureLockMs,
+  pickValid,
+  scorePick,
   roundComplete,
   roundStatus,
   roundWinners,
@@ -49,8 +52,16 @@ import {
   validateSlate,
 } from "./logic.js";
 import { apnsConfigured, sendPush } from "./apns.js";
+import { mergeWeather, withoutWeather, weatherConfigured, weatherKey, weatherPass, isDailyPassTick } from "./weather.js";
 import { NotifyLedger, utcDay } from "./notify/ledger.js";
 import { LeagueRegistrar } from "./league_registrar.js";
+import { PrefsStore, applyPrefs } from "./prefs_store.js";
+import {
+  RevealSlot, PLAN_AHEAD_MS, REVEAL_EXPIRY_MS, RESULTS_EXPIRY_MS,
+  slotName, dayName, revealKey, resultsAlertKey, revealCollapseId, resultsCollapseId,
+  revealPayload, resultsPayload, packAlertJobs,
+  ukDate, previousUkDate, resultsDeadlineMs,
+} from "./reveal.js";
 import {
   dueFixtures, planWindow, slateFixtureKey, slateFixturePrefix,
 } from "./notify/planner.js";
@@ -159,6 +170,8 @@ function fixtureRevision(list) {
     bite(String(match.status || ""));
     bite(String(match.startAt || ""));
     bite(String(match.result ? match.result.join("-") : ""));
+    // A new forecast is a changed answer, so it moves the ETag too.
+    if (match.weather) bite(`${match.weather.temp}${match.weather.icon}${match.weather.at}`);
   }
   return (hash >>> 0).toString(36);
 }
@@ -290,28 +303,29 @@ async function updateCustomMixIndex(env, code, member) {
 
 // Sends one alert to a specific set of members. Everything league-scoped rides
 // the existing APNs path and the existing push:<uid> token records.
-async function pushToUids(env, uids, message) {
+async function pushToUids(env, uids, message, route = null) {
   if (!apnsConfigured(env) || !uids?.length) return 0;
   // A plain string is the body on its own; an object carries a title too, which
   // is what lets an amendment announce itself as "Line-up updated" rather than
   // arriving as another anonymous line of text.
   const alert = typeof message === "string" ? message : { title: message.title, body: message.body };
-  const payload = { aps: { alert, sound: "default" } };
+  // A league code rides privately in `po` so the tap opens that league's My
+  // Picks; it is never rendered. No `f`: builds up to 35 read it as no route
+  // and open My Picks as they always have.
+  const payload = { aps: { alert, sound: "default" }, ...(route ? { po: route } : {}) };
   let sent = 0;
   await Promise.all([...new Set(uids)].map(async (uid) => {
     const record = await kvGet(env, `push:${uid}`);
     if (!record?.token) return;
     try {
       const response = await sendPush(record.token, payload, env);
-      if (response.status === 410) await env.KV.delete(`push:${uid}`);
+      if (response.status === 410) await dropPushToken(env, uid, record.token);
       else sent++;
     } catch { /* transient APNs failure; retried on the next cron tick */ }
   }));
   return sent;
 }
 
-const hostNick = (memberList, league) =>
-  memberList.find((member) => member.uid === league.owner)?.nick || "Your host";
 
 export function mergeResultOverlay(match, overlay) {
   if (!overlay) return match;
@@ -340,7 +354,15 @@ async function fixtures(env, competition = DEFAULT_COMPETITION, fresh = false) {
   if (!response.ok) throw new Error(`fixture fetch ${response.status}`);
   const body = await response.json();
   const resultStore = await currentResults(env, code);
-  cache.list = (body.fixtures || []).map((match) => mergeResultOverlay(match, resultStore[match.id]));
+  // v1.9 §B: stored WeatherKit forecasts ride on the fixture objects the client
+  // already fetches. One read of weather:<COMP> per cache refresh — the same
+  // cadence as the results read above, never per request and never per user —
+  // and none at all while the feature's secrets are absent.
+  const weatherStore = weatherConfigured(env) ? await kvGet(env, weatherKey(code)) : null;
+  cache.list = mergeWeather(
+    (body.fixtures || []).map((match) => mergeResultOverlay(match, resultStore[match.id])),
+    weatherStore,
+  );
   cache.intel = {
     teams: body.teams && typeof body.teams === "object" ? body.teams : {},
     modelVersion: body.modelVersion || null,
@@ -408,7 +430,10 @@ async function getFixtures(env, request) {
   if (requested && !isCompetition(requested)) return json({ error: "unknown competition" }, 400, env);
   const competition = normaliseCompetition(requested);
   const fresh = url.searchParams.get("refresh") === "1";
-  const list = await fixtures(env, competition, fresh);
+  // v1.9: forecasts only to a client that shows Apple's attribution (?wx=1).
+  const attributes = url.searchParams.get("wx") === "1";
+  const cached = await fixtures(env, competition, fresh);
+  const list = attributes ? cached : withoutWeather(cached);
   const cache = cacheFor(competition);
   const revision = fixtureRevision(list);
   // 467KB was re-downloaded on every launch and every three-minute tick,
@@ -767,11 +792,6 @@ async function setCustomMix(env, body) {
  * official matchweek. If the week ordering isn't to hand the date range is
  * still true, so it falls back to that rather than to "Week null".
  */
-const periodLabelFor = (league, period, weekNo = null) => {
-  if (!isMixedLeague(league)) return `Matchweek ${period}`;
-  return weekNo == null ? `your week of ${windowLabel(period)}` : `Week ${weekNo}`;
-};
-
 const periodTitleFor = (league, period, weekNo = null) => {
   if (!isMixedLeague(league)) return `Matchweek ${period}`;
   return weekNo == null ? `Your week of ${windowLabel(period)}` : `Week ${weekNo}`;
@@ -833,12 +853,8 @@ async function publishSlate(env, league, period, { fixtureIds, mode, ruleSource,
   if (!announce) return { published: true, slate };
   const memberList = await members(env, league);
   const audience = memberList.filter((member) => member.uid !== setBy).map((member) => member.uid);
-  const label = periodLabelFor(league, period, weekNo);
-  const who = setBy ? hostNick(memberList, league) : league.name;
-  const body = setBy
-    ? `${who} has set ${fixtureIds.length} fixtures for ${label}. Make your picks!`
-    : `${fixtureIds.length} fixtures are live for ${label} in ${league.name}. Make your picks!`;
-  await pushToUids(env, audience, body);
+  await pushToUids(env, audience,
+    weekSetMessage(periodTitleFor(league, period, weekNo), fixtureIds.length), leagueRoute(code));
   return { published: true, slate };
 }
 
@@ -887,10 +903,26 @@ async function amendSlate(env, league, period, { fixtureIds, mode, setBy, pool, 
     code,
     period,
     memberList.filter((member) => member.uid !== setBy).map((member) => member.uid),
-    { title: "Line-up updated", body: `${league.name}: ${describeDelta(delta)} — update your picks before kick-off.` }
+    { title: "Line-up updated", body: `Your league: ${describeDelta(delta)} — update your picks before kick-off.` },
+    leagueRoute(code),
   );
   return { amended: true, slate: next, delta, lockAt: slateLockAt(next, pool), weekNo };
 }
+
+/**
+ * v1.9 §E — what a "the week is set" alert says, on every publish path.
+ *
+ * The lock screen says "Your league", never the name somebody gave it (the D2
+ * rule reminders already follow); the code travels privately in `po.l`.
+ */
+export function weekSetMessage(periodTitle, count) {
+  return {
+    title: "Your league",
+    body: `${periodTitle} is set — ${count} ${count === 1 ? "fixture is" : "fixtures are"} open. Get your picks in!`,
+  };
+}
+
+export const leagueRoute = (code) => ({ v: 1, l: String(code) });
 
 /** "2 fixtures added, 1 removed" — the delta as a member reads it. */
 function describeDelta(delta) {
@@ -1126,7 +1158,7 @@ async function deleteAccount(env, body) {
 
   // 5 · Only now erase the credential, push token and user record.
   if (recovery) await env.KV.delete(`recovery:${recovery}`);
-  await env.KV.delete(`push:${uid}`);
+  await erasePushRecord(env, uid);
   await env.KV.delete(`user:${uid}`);
 
   // 6 · Both sides done — clear the intent, then notify any new hosts.
@@ -2106,45 +2138,142 @@ async function savePushToken(env, body) {
   const token = String(body.token || "").trim();
   if (!uid || !token) return json({ error: "uid and token required" }, 400, env);
   await ensureUser(env, uid, body.nickname);
+  const platform = String(body.platform || "ios").slice(0, 20);
+  if (env.PREFS_STORE) {
+    await prefsStoreClient(env, uid).call("token", { token, platform });
+    return json({ ok: true }, 200, env);
+  }
   const existing = await kvGet(env, `push:${uid}`);
   await kvPut(env, `push:${uid}`, {
+    ...preferenceFields(existing),
     token,
-    platform: String(body.platform || "ios").slice(0, 20),
-    // Re-registering a device must not silently un-mute a competition.
-    mute: Array.isArray(existing?.mute) ? existing.mute : [],
+    platform,
     updatedAt: Date.now(),
   });
   return json({ ok: true }, 200, env);
 }
 
+/**
+ * One RPC to the uid's PrefsStore — the single, ordered writer of push:<uid>.
+ * Without the binding (rollback) every caller below falls back to direct KV.
+ */
+export function prefsStoreClient(env, uid) {
+  const stub = env.PREFS_STORE.get(env.PREFS_STORE.idFromName(uid));
+  return {
+    async call(op, args = {}) {
+      const response = await stub.fetch("https://prefs-store/rpc", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ uid, op, ...args }),
+      });
+      if (!response.ok) throw new Error(`prefs-store ${op} failed: ${response.status}`);
+      return response.json();
+    },
+  };
+}
+
+/** APNs said 410 for this token: forget the token, keep every choice. */
+async function dropPushToken(env, uid, token) {
+  if (env.PREFS_STORE) { await prefsStoreClient(env, uid).call("dropToken", { token: token || null }); return; }
+  await env.KV.delete(`push:${uid}`);
+}
+
+async function erasePushRecord(env, uid) {
+  if (env.PREFS_STORE) await prefsStoreClient(env, uid).call("erase");
+  await env.KV.delete(`push:${uid}`);
+}
+
+/**
+ * Everything on push:<uid> that is a CHOICE rather than a device fact.
+ * Re-registering a device must never silently un-mute a competition, switch an
+ * alert off, or bring back an offer the player already answered.
+ */
+function preferenceFields(record) {
+  const out = { mute: Array.isArray(record?.mute) ? record.mute : [] };
+  if (record?.reveal === true) out.reveal = true;
+  if (record?.results === true) out.results = true;
+  const offers = {};
+  if (record?.offers?.reveal === true) offers.reveal = true;
+  if (record?.offers?.results === true) offers.results = true;
+  if (Object.keys(offers).length) out.offers = offers;
+  if (Number.isFinite(record?.choiceAt)) out.choiceAt = record.choiceAt;
+  return out;
+}
+
+/** The prefs answer, GET and POST alike. Absent means off. */
+function prefsBody(env, uid, record) {
+  return {
+    uid,
+    registered: !!record?.token,
+    mute: Array.isArray(record?.mute) ? record.mute : [],
+    reveal: record?.reveal === true,
+    results: record?.results === true,
+    offers: { reveal: record?.offers?.reveal === true, results: record?.offers?.results === true },
+    // When the reveal/results choice was last made (client clock, clamped).
+    // A client never lets an answer older than its own latest choice untick a box.
+    updatedAt: Number.isFinite(record?.choiceAt) ? record.choiceAt : 0,
+    competitions: COMPETITION_CODES
+      .filter((code) => competitionConfigured(env, code))
+      .map((code) => ({ code, name: COMPETITIONS[code].name })),
+  };
+}
+
 // Per-competition notification preferences. Midweek Champions League nights and
 // Saturday Championship cards must never erode the Premier League core, so a
 // member can mute a whole competition without losing the others.
+//
+// v1.9: two independent, default-off alerts ride the same record — `reveal`
+// (mates' picks revealed) and `results` (matchday results) — plus the one-time
+// in-context offers, stored here so an answer survives a reinstall or restore.
+// Reminder consent is never read or written by either.
 async function setNotificationPrefs(env, body) {
   const uid = String(body.uid || "").trim();
   if (!uid) return json({ error: "uid required" }, 400, env);
-  if (!Array.isArray(body.mute)) return json({ error: "mute must be an array of competition codes" }, 400, env);
-  const unknown = body.mute.filter((code) => !isCompetition(code));
-  if (unknown.length) return json({ error: `unknown competition: ${unknown[0]}` }, 400, env);
-  const record = await kvGet(env, `push:${uid}`);
-  if (!record) return json({ error: "no push registration for this device" }, 404, env);
-  const mute = [...new Set(body.mute)];
-  await kvPut(env, `push:${uid}`, { ...record, mute, updatedAt: Date.now() });
-  return json({ ok: true, uid, mute }, 200, env);
+  const has = (key) => Object.prototype.hasOwnProperty.call(body, key) && body[key] !== undefined;
+  if (!["mute", "reveal", "results", "offers"].some(has)) {
+    return json({ error: "nothing to change: send mute, reveal, results or offers" }, 400, env);
+  }
+  if (has("mute")) {
+    if (!Array.isArray(body.mute)) return json({ error: "mute must be an array of competition codes" }, 400, env);
+    const unknown = body.mute.filter((code) => !isCompetition(code));
+    if (unknown.length) return json({ error: `unknown competition: ${unknown[0]}` }, 400, env);
+  }
+  for (const key of ["reveal", "results"]) {
+    if (has(key) && typeof body[key] !== "boolean") return json({ error: `${key} must be true or false` }, 400, env);
+  }
+  if (has("updatedAt") && (typeof body.updatedAt !== "number" || !Number.isFinite(body.updatedAt))) {
+    return json({ error: "updatedAt must be a number (ms)" }, 400, env);
+  }
+  if (has("offers")) {
+    const offers = body.offers;
+    if (!offers || typeof offers !== "object" || Array.isArray(offers)
+      || Object.entries(offers).some(([k, v]) => !["reveal", "results"].includes(k) || typeof v !== "boolean")
+      || !Object.values(offers).some((v) => v === true) && !has("reveal") && !has("results") && !has("mute")) {
+      return json({ error: "offers may only mark reveal or results as answered (true)" }, 400, env);
+    }
+  }
+  // A record without a token is created on purpose: a choice made before APNs
+  // registration (or on the web) must still be there when the token arrives.
+  const change = {};
+  for (const key of ["mute", "reveal", "results", "offers", "updatedAt"]) if (has(key)) change[key] = body[key];
+  if (env.PREFS_STORE) {
+    const { record, stale } = await prefsStoreClient(env, uid).call("prefs", { body: change });
+    return json({ ok: true, stale: !!stale, ...prefsBody(env, uid, record) }, 200, env);
+  }
+  // Rollback path only (no PREFS_STORE binding): best-effort read-modify-write.
+  const existing = (await kvGet(env, `push:${uid}`)) || {};
+  const { record: next, stale } = applyPrefs({ ...existing, ...preferenceFields(existing) }, change);
+  await kvPut(env, `push:${uid}`, next);
+  return json({ ok: true, stale, ...prefsBody(env, uid, next) }, 200, env);
 }
 
 async function getNotificationPrefs(env, url) {
   const uid = url.searchParams.get("uid") || "";
   if (!uid) return json({ error: "uid required" }, 400, env);
-  const record = await kvGet(env, `push:${uid}`);
-  return json({
-    uid,
-    registered: !!record?.token,
-    mute: Array.isArray(record?.mute) ? record.mute : [],
-    competitions: COMPETITION_CODES
-      .filter((code) => competitionConfigured(env, code))
-      .map((code) => ({ code, name: COMPETITIONS[code].name })),
-  }, 200, env);
+  const record = env.PREFS_STORE
+    ? (await prefsStoreClient(env, uid).call("get")).record
+    : await kvGet(env, `push:${uid}`);
+  return json(prefsBody(env, uid, record), 200, env, { "cache-control": "private, no-store" });
 }
 
 // Migration control surface. Secret-gated, and deliberately not wired to any
@@ -2315,6 +2444,38 @@ async function pickerPreload(env, league, period, pool, stored) {
   };
 }
 
+// --- v1.9 build 38: the settled-week cache ------------------------------------
+//
+// One KV record per league+week, written only once the week is complete. It
+// holds the computed week WITH the reveal, so it is server-side data only: the
+// member check runs on every request and the reveal is sent to members alone,
+// `private, no-store`. Never the Cache API — that keys on the URL, uid and all.
+
+const ROUND_CACHE_VERSION = 1;
+const ROUND_CACHE_TTL_S = 7 * 24 * 60 * 60;
+const roundCacheKey = (code, period) => `roundcache:${code}:${period}`;
+
+/** Everything a settled week's answer is computed from, apart from picks (locked). */
+export function roundFingerprint(period, roundFixtures, slate, memberList) {
+  return JSON.stringify([
+    String(period),
+    (roundFixtures || []).map((match) => [String(match.id), normaliseResult(match) || null, !!isVoided(match),
+      String(match.status || ""), match.lockAt || match.startAt || null]),
+    slate ? [slate.status || null, slate.version ?? null, (slate.fixtureIds || []).map(String)] : null,
+    (memberList || []).map((member) => [member.uid, member.since || 0]).sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)),
+  ]);
+}
+
+/** Every { uid, nick } in a week's answer gets the member's CURRENT name. */
+export function relabelNicks(value, nicks) {
+  if (Array.isArray(value)) return value.map((entry) => relabelNicks(entry, nicks));
+  if (!value || typeof value !== "object") return value;
+  const out = {};
+  for (const [key, entry] of Object.entries(value)) out[key] = relabelNicks(entry, nicks);
+  if (typeof out.uid === "string" && "nick" in out && nicks.has(out.uid)) out.nick = nicks.get(out.uid);
+  return out;
+}
+
 async function state(env, url) {
   // ONE timestamp for the whole response. Gating fixture A at 14:59:59 and
   // fixture B at 15:00:00 inside the same answer would make the reveal depend
@@ -2328,13 +2489,20 @@ async function state(env, url) {
   const mixed = isMixedLeague(league);
   const plan = leagueFixturePlan(league);
   const keyOf = leaguePeriodOf(league);
-  // Each competition's fixtures already carry their own results, so the union
-  // below is a union of results:PL and results:ELC by construction.
-  const matchList = await leagueFixtures(env, league);
-  const memberList = await members(env, league);
-  const byPeriod = poolByPeriod(matchList, league);
   const periodParam = url.searchParams.get("period") ?? url.searchParams.get("md");
   const roundOnly = periodParam != null && String(periodParam).trim() !== "";
+  const roundPeriod = roundOnly ? String(periodParam).trim() : null;
+  // Each competition's fixtures already carry their own results, so the union
+  // below is a union of results:PL and results:ELC by construction.
+  // v1.9 build 38: the independent reads go out together rather than one after
+  // another — and a round request also fetches its cached settled week.
+  const [matchList, memberList, roundStored, roundCached] = await Promise.all([
+    leagueFixtures(env, league),
+    members(env, league),
+    roundOnly && slateAware(league) ? kvGet(env, slateKey(code, roundPeriod)) : null,
+    roundOnly ? kvGet(env, roundCacheKey(code, roundPeriod)) : null,
+  ]);
+  const byPeriod = poolByPeriod(matchList, league);
 
   const asCompleted = (list) => list
     .map((match) => ({
@@ -2351,18 +2519,10 @@ async function state(env, url) {
   // every fixture in the season — 932 on a mixed league — to answer a question
   // about six of them, which is most of a 1,000-subrequest budget spent on
   // rows that get thrown away.
-  const roundPeriod = roundOnly ? String(periodParam).trim() : null;
-  const roundStored = roundOnly && slateAware(league)
-    ? await kvGet(env, slateKey(code, roundPeriod))
-    : null;
   const roundSlate = isPublishedSlate(roundStored) ? roundStored : null;
   const roundPool = roundOnly ? (byPeriod.get(roundPeriod) || []) : [];
   const roundFixtures = roundOnly ? slateFixtures(roundSlate, roundPool) : [];
 
-  const pickIds = roundOnly
-    ? [...new Set([...roundFixtures, ...roundPool].map((match) => match.id))]
-    : matchList.map((match) => match.id);
-  const picks = await allPicks(env, pickIds);
   const completed = asCompleted(roundOnly ? roundPool : matchList);
 
   const rule = leagueWeeklyRule(league);
@@ -2396,11 +2556,29 @@ async function state(env, url) {
      * and it never turns a legacy call into a 403.
      */
     const viewerIsMember = !!viewer && memberList.some((member) => member.uid === viewer);
+    // A settled week is served from its cached record when nothing it was
+    // computed from has changed since. The fingerprint is recomputed from this
+    // request's own reads, so a corrected result, an amended slate, or anyone
+    // joining, leaving or being removed recomputes the week. Names are never
+    // taken from the record: serveRound puts the live ones back.
+    const fingerprint = roundFingerprint(period, roundFixtures, slate, memberList);
+    const serveRound = (body) => {
+      const nicks = new Map(memberList.map((member) => [member.uid, member.nick]));
+      const { reveal, ...open } = relabelNicks(body, nicks);
+      const live = { ...open, code, name: league.name, owner: league.owner, ...identity };
+      return viewerIsMember
+        ? json({ ...live, ...(reveal ? { reveal } : {}) }, 200, env, { "cache-control": "private, no-store" })
+        : json(live, 200, env);
+    };
+    if (roundCached?.v === ROUND_CACHE_VERSION && roundCached.fp === fingerprint && roundCached.body) {
+      return serveRound(roundCached.body);
+    }
+    const picks = await allPicks(env, [...new Set([...roundFixtures, ...pool].map((match) => match.id))]);
     const scoped = applySlates(completed.filter((match) => match.period === period),
       slate ? { [period]: slate } : {});
     // Ordered by the full tie-break, ranked on points alone — see withSharedRank.
     const table = withSharedRank(computeTable(memberList, scoped, picks));
-    return json({
+    const body = {
       code,
       name: league.name,
       owner: league.owner,
@@ -2423,7 +2601,9 @@ async function state(env, url) {
       // is no longer in it, and never was is the same answer. Anyone else is
       // simply not sent the field — `includePicks` below is the second lock on
       // the same door, so a mistake here still cannot serialize a prediction.
-      ...(viewerIsMember ? {
+      // Built for every request now (it is only ever SENT to a member — see
+      // serveRound), so the cached week can answer members and non-members.
+      ...({
         reveal: buildRoundReveal({
           fixtures: roundFixtures,
           picksByMatch: picks,
@@ -2431,13 +2611,23 @@ async function state(env, url) {
           serverNow,
           includePicks: true,
         }),
-      } : {}),
+      }),
       // Only the answer that actually carries other people's predictions is
       // withheld from shared caches. A response without the field is the same
       // public round data it has always been, with the headers it always had.
-    }, 200, env, viewerIsMember ? { "cache-control": "private, no-store" } : {});
+    };
+    if (body.complete === true) {
+      // Settled: immutable until something in the fingerprint changes.
+      try {
+        await env.KV.put(roundCacheKey(code, period),
+          JSON.stringify({ v: ROUND_CACHE_VERSION, fp: fingerprint, body }),
+          { expirationTtl: ROUND_CACHE_TTL_S });
+      } catch { /* the next request simply computes it again */ }
+    }
+    return serveRound(body);
   }
 
+  const picks = await allPicks(env, matchList.map((match) => match.id));
   const slates = slateAware(league) ? await readSlates(env, code) : {};
   const scopedFixtures = applySlates(matchList.map((match) => ({ ...match, period: keyOf(match) })), slates);
   const scopedCompleted = applySlates(completed, slates);
@@ -2633,7 +2823,7 @@ async function notifyKickoffs(env) {
     await Promise.all(audience.map(async ({ uid, token }) => {
       try {
         const response = await sendPush(token, payload, env);
-        if (response.status === 410) await env.KV.delete(`push:${uid}`);
+        if (response.status === 410) await dropPushToken(env, uid, token);
       } catch { /* transient APNs failure; retried next cron tick */ }
     }));
     await env.KV.put(`notified:${match.id}`, "1", { expirationTtl: NOTIFIED_TTL_S });
@@ -2692,7 +2882,8 @@ function notifyDeps(env, nowMs) {
     readPicks: async (fixtureId) => (await kvGet(env, `picks:${fixtureId}`)) || {},
     readSlate: (code, period) => kvGet(env, slateKey(code, period)),
     readPush: (uid) => kvGet(env, `push:${uid}`),
-    dropPushToken: (uid) => env.KV.delete(`push:${uid}`),
+    dropPushToken: (uid, token) => dropPushToken(env, uid, token),
+    revealSlot: (name) => revealClient(env, name),
     isMember: async (code, uid) => !!(await kvGet(env, leagueMemberKey(code, uid))),
     /**
      * The whole membership graph, in bounded pages, ONCE per planning window.
@@ -2758,7 +2949,6 @@ async function planKickoffReminders(env, nowMs = Date.now()) {
 const FALLBACK_LEAD_MS = 24 * 60 * 60 * 1000;
 const SLATE_NOTICE_TTL_S = 60 * 24 * 60 * 60;
 const PODIUM_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000;
-const PLACE_EMOJI = { gold: "🏆", silver: "🥈", bronze: "🥉" };
 
 const kickoffMs = (match) => Date.parse(match.startAt || match.lockAt) || Infinity;
 const byKickoff = (a, b) => kickoffMs(a) - kickoffMs(b) || String(a.id).localeCompare(String(b.id));
@@ -2797,11 +2987,11 @@ function relevantPeriods(byPeriod, nowMs) {
  * goes through here, so "we already told them" is one rule rather than one per
  * call site — which is what makes a cron tick that runs twice harmless.
  */
-async function pushOnce(env, pushType, leagueId, periodKey, uids, body) {
+async function pushOnce(env, pushType, leagueId, periodKey, uids, body, route = null) {
   const key = `notified:${pushType}:${leagueId}:${periodKey}`;
   if (await env.KV.get(key)) return false;
   await env.KV.put(key, "1", { expirationTtl: SLATE_NOTICE_TTL_S });
-  await pushToUids(env, uids, body);
+  await pushToUids(env, uids, body, route);
   return true;
 }
 
@@ -2813,11 +3003,12 @@ async function pushOnce(env, pushType, leagueId, periodKey, uids, body) {
  * window and has no number to give, so naming one would be a lie.
  */
 async function remindHost(env, league, period, weekNo = null) {
+  // v1.9: the lock screen says "your league", never the name (the §E rule).
   const body = isMixedLeague(league)
-    ? `Set this week's fixtures for ${league.name}`
+    ? "Set this week's fixtures for your league"
     : `Matchweek ${period} is open — set your fixtures`;
   void weekNo;   // the mixed copy deliberately says "this week", not a number
-  await pushOnce(env, "slate-open", league.code, period, [league.owner], body);
+  await pushOnce(env, "slate-open", league.code, period, [league.owner], body, leagueRoute(league.code));
 }
 
 /**
@@ -2865,7 +3056,7 @@ async function autoPublish(env, league, period, pool, weekNo = null) {
   });
   if (!result.published) return result;
   await pushOnce(env, "slate-published", league.code, period, (await members(env, league)).map((member) => member.uid),
-    `${selection.fixtureIds.length} fixtures are live for ${periodLabelFor(league, period, weekNo)} in ${league.name}. Make your picks!`);
+    weekSetMessage(periodTitleFor(league, period, weekNo), selection.fixtureIds.length), leagueRoute(league.code));
   return result;
 }
 
@@ -2910,7 +3101,7 @@ async function applyFallback(env, league, period, roundFixtures, weekNo = null) 
   if (!result.published) return result;
   const memberList = await members(env, league);
   await pushOnce(env, "auto-published", league.code, period, memberList.map((member) => member.uid),
-    `${periodTitleFor(league, period, weekNo)} in ${league.name} is set — ${selection.fixtureIds.length} fixtures are open. Get your picks in!`);
+    weekSetMessage(periodTitleFor(league, period, weekNo), selection.fixtureIds.length), leagueRoute(league.code));
   return result;
 }
 
@@ -2938,7 +3129,18 @@ async function reconcilePostponements(env, league, slate, period, roundFixtures,
   const gone = change.dropped.map((id) => fixtureLabel(byId.get(id))).join(", ");
   const memberList = await members(env, league);
   await pushToUids(env, memberList.map((member) => member.uid),
-    `${gone} was postponed and no longer counts in ${league.name}. ${periodTitleFor(league, period, weekNo)} now scores ${change.fixtureIds.length} fixtures.`);
+    postponedMessage(gone, periodTitleFor(league, period, weekNo), change.fixtureIds.length), leagueRoute(league.code));
+}
+
+/**
+ * v1.9: a postponement, as the lock screen says it — "Your league", never the
+ * league's own name (the §E rule); the code rides privately in `po.l`.
+ */
+export function postponedMessage(gone, periodTitle, count) {
+  return {
+    title: "Your league",
+    body: `${gone} was postponed and no longer counts. ${periodTitle} now scores ${count} ${count === 1 ? "fixture" : "fixtures"}.`,
+  };
 }
 
 /**
@@ -3020,8 +3222,15 @@ function periodIsOpen(period, nowMs, firstKickoffMs) {
   return opens == null || nowMs >= opens;
 }
 
-const podiumMessage = (league, matchweek, podium) =>
-  `Matchweek ${matchweek} podium in ${league.name}: ${podium.map((entry) => `${PLACE_EMOJI[entry.place]} ${entry.nick} ${entry.pts}`).join(" · ")}`;
+/**
+ * v1.9: the podium on the lock screen names nobody — not the league ("Your
+ * league") and not the mates on it, nor their points. Who made it is in the
+ * app, one tap away.
+ */
+export const podiumMessage = (matchweek) => ({
+  title: "Your league",
+  body: `Matchweek ${matchweek} is settled. See who made the podium.`,
+});
 
 // One podium announcement per league per matchweek, on the existing APNs path.
 // The whole sweep is skipped unless the settled-fixture count has moved since
@@ -3063,7 +3272,7 @@ async function podiumAnnouncements(env) {
       const podium = computePodium(memberList, target.roundFixtures, picks);
       await env.KV.put(noticeKey, "1", { expirationTtl: SLATE_NOTICE_TTL_S });
       if (!podium.length) continue;
-      await pushToUids(env, memberList.map((member) => member.uid), podiumMessage(league, target.matchweek, podium));
+      await pushToUids(env, memberList.map((member) => member.uid), podiumMessage(target.matchweek), leagueRoute(league.code));
     }
   }
   await kvPut(env, "sweep:settled", settled);
@@ -3110,6 +3319,396 @@ async function autoSettle(env) {
   return outcomes;
 }
 
+// ---------------------------------------------------------------------------
+// v1.9 Slice 2 — "Matchday comes alive": reveal alerts, the reveal endpoint and
+// the matchday-results alert. Everything here is OFF unless the REVEAL_SLOT
+// Durable Object binding exists (and the queue it shares with reminders), so
+// this code can land and be reviewed before anything is enabled.
+// ---------------------------------------------------------------------------
+
+const revealEnabled = (env) => !!(env.REVEAL_SLOT && env.NOTIFY_QUEUE);
+
+const isPostponed = (match) => String(match?.status || "").toLowerCase() === "postponed";
+
+/** One RPC to one RevealSlot instance, named by slot or by UK day. */
+export function revealClient(env, name) {
+  const stub = env.REVEAL_SLOT.get(env.REVEAL_SLOT.idFromName(name));
+  return {
+    async call(op, args = {}) {
+      const response = await stub.fetch("https://reveal-slot/rpc", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ op, ...args }),
+      });
+      if (!response.ok) throw new Error(`reveal-slot ${op} failed: ${response.status}`);
+      return response.json();
+    },
+  };
+}
+
+/**
+ * The planner, in the existing cron. Arms one alarm per kick-off slot whose
+ * lock is inside the next 30 minutes and that some published slate lists.
+ * Reads: the cached fixture feed and one slatefx list per due fixture.
+ */
+export async function planRevealSlots(env, nowMs = Date.now()) {
+  if (!revealEnabled(env)) return { slots: 0 };
+  const due = new Map();
+  for (const match of await allFixtures(env)) {
+    const lockMs = fixtureLockMs(match);
+    if (lockMs == null || lockMs <= nowMs || lockMs > nowMs + PLAN_AHEAD_MS) continue;
+    if (isVoided(match) || isPostponed(match)) continue;
+    if (!(await leaguesForFixture(env, match.id)).length) continue;
+    if (!due.has(lockMs)) due.set(lockMs, []);
+    due.get(lockMs).push(String(match.id));
+  }
+  for (const [slotMs, fixtureIds] of due) {
+    await revealClient(env, slotName(slotMs)).call("arm", { slotMs, fixtureIds });
+  }
+  return { slots: due.size };
+}
+
+/**
+ * CONFIRM — the only definition of "the server confirmed the lock". Every
+ * check must pass for a fixture × league pair to be sealed; a read that fails
+ * throws, and the alarm turns that into silence forever.
+ *   (a) the server clock is at or past the slot (checked by the alarm too)
+ *   (b) the fixture's CURRENT lock still equals the slot — a moved kick-off is
+ *       dropped here and re-planned under its new time
+ *   (c) matchLocked(): no further pick can be accepted
+ *   (d) not postponed, not void
+ *   (e) the slate is still published and still lists it
+ */
+async function confirmRevealSlot(env, slot, now) {
+  const reasons = [];
+  if (now < slot.slotMs) return { pairs: [], reason: "before-lock" };
+  // The live feed, not the isolate's cached copy: a kick-off moved in the last
+  // minute must be seen.
+  const byId = new Map((await allFixtures(env, true)).map((m) => [String(m.id), m]));
+  const slates = new Map();
+  const pairs = [];
+  for (const id of slot.fixtures) {
+    const match = byId.get(String(id));
+    if (!match) { reasons.push(`${id}:missing`); continue; }
+    if (fixtureLockMs(match) !== slot.slotMs) { reasons.push(`${id}:moved`); continue; }
+    if (!matchLocked(match, now)) { reasons.push(`${id}:not-locked`); continue; }
+    if (isVoided(match) || isPostponed(match)) { reasons.push(`${id}:void-or-postponed`); continue; }
+    for (const { code, period } of await leaguesForFixture(env, id)) {
+      const key = `${code}|${period}`;
+      if (!slates.has(key)) slates.set(key, await kvGet(env, slateKey(code, period)));
+      const slate = slates.get(key);
+      if (!isPublishedSlate(slate)) { reasons.push(`${id}:${code}:unpublished`); continue; }
+      if (!(slate.fixtureIds || []).map(String).includes(String(id))) { reasons.push(`${id}:${code}:amended-out`); continue; }
+      pairs.push({ code, period: String(period), fixtureId: String(id) });
+    }
+  }
+  return { pairs, reason: pairs.length ? null : (reasons.join(",") || "nothing-listed").slice(0, 200) };
+}
+
+/**
+ * FAN OUT — one job entry per opted-in player per slot, however many leagues
+ * and fixtures they have in it. Reads: one league record and one member list
+ * per sealed league, one member row per member, one push:<uid> per distinct
+ * member. No KV writes: claims live in the slot's own SQLite.
+ */
+async function fanOutReveal(env, seal) {
+  if (!apnsConfigured(env)) return { recipients: 0 };
+  const byCode = new Map();
+  for (const pair of seal.pairs) {
+    if (!byCode.has(pair.code)) byCode.set(pair.code, new Set());
+    byCode.get(pair.code).add(pair.fixtureId);
+  }
+  const byUid = new Map();
+  for (const [code, fixtureIds] of byCode) {
+    const league = await kvGet(env, `league:${code}`);
+    if (!league) continue;
+    for (const member of await members(env, league)) {
+      if (member.since && member.since > seal.slotMs) continue;   // joined after lock
+      if (!byUid.has(member.uid)) byUid.set(member.uid, { fixtures: new Set(), codes: new Set() });
+      const entry = byUid.get(member.uid);
+      for (const id of fixtureIds) entry.fixtures.add(id);
+      entry.codes.add(code);
+    }
+  }
+  const recipients = [];
+  for (const [uid, entry] of [...byUid].sort((a, b) => a[0].localeCompare(b[0]))) {
+    const push = await kvGet(env, `push:${uid}`);
+    if (!push?.token || push.reveal !== true) continue;           // default off
+    recipients.push({ uid, fixtures: entry.fixtures.size, codes: [...entry.codes].sort() });
+  }
+  const client = revealClient(env, slotName(seal.slotMs));
+  const pending = new Set(await client.call("pending", { keys: recipients.map((r) => revealKey(r.uid, seal.slotMs)) }));
+  const owed = recipients.filter((r) => pending.has(revealKey(r.uid, seal.slotMs)));
+  const jobs = packAlertJobs({ v: 2, kind: "reveal", t: seal.slotMs, sealedAt: seal.sealedAt }, owed);
+  for (const job of jobs) await env.NOTIFY_QUEUE.send(job);
+  return { recipients: owed.length, jobs: jobs.length };
+}
+
+RevealSlot.handlers = {
+  confirm: (env, slot, now) => confirmRevealSlot(env, slot, now),
+  fanOut: (env, seal) => fanOutReveal(env, seal),
+};
+
+/**
+ * Deliver one reveal or results job. Same shape as the reminder consumer:
+ * claim first (one DO call), re-check everything per recipient on fresh reads,
+ * send, record (one DO call). A key already sent is never granted again, so a
+ * redelivered or retried message cannot send twice; the collapse id covers
+ * the one window where APNs accepted and the record did not land.
+ */
+export async function deliverAlertJob(job, env, deps) {
+  const now = deps.now();
+  const reveal = job.kind === "reveal";
+  const recipients = job.recipients || [];
+  const stats = { sent: 0, dropped: 0, failed: 0, held: 0 };
+  if (!recipients.length || !["reveal", "results"].includes(job.kind)) return { ack: true, stats };
+  const expiresAt = reveal ? Number(job.sealedAt) + REVEAL_EXPIRY_MS : Number(job.deadline);
+  if (!Number.isFinite(expiresAt) || now >= expiresAt) {
+    stats.dropped = recipients.length;
+    return { ack: true, stats };                     // stale: drop, never send
+  }
+  const keyOf = (r) => (reveal ? revealKey(r.uid, job.t) : resultsAlertKey(r.uid, job.d));
+  const client = deps.revealSlot(reveal ? slotName(job.t) : dayName(job.d));
+  const { granted, held } = await client.call("claim", { keys: recipients.map(keyOf), now });
+  stats.held = held.length;
+  let ack = held.length === 0;
+  const gens = new Map(granted.map((g) => [g.key, g.gen]));
+  const outcomes = [];
+  const flag = reveal ? "reveal" : "results";
+  for (const r of recipients) {
+    const key = keyOf(r);
+    if (!gens.has(key)) continue;
+    const gen = gens.get(key);
+    const drop = (reason) => { outcomes.push({ key, gen, result: "dropped", reason }); stats.dropped++; };
+    const push = await deps.readPush(r.uid);
+    if (!push?.token) { drop("no-token"); continue; }
+    if (push[flag] !== true) { drop("off"); continue; }
+    let member = false;
+    for (const code of r.codes || []) {
+      if (await deps.isMember(code, r.uid)) { member = true; break; }
+    }
+    if (!member) { drop("not-member"); continue; }
+    const payload = reveal
+      ? revealPayload({ slotMs: job.t, fixtures: r.fixtures })
+      : resultsPayload({ date: job.d, pts: r.pts, matches: r.matches, weekLabel: r.weekLabel || null });
+    const expiration = reveal ? expiresAt : Math.min(expiresAt, now + RESULTS_EXPIRY_MS);
+    try {
+      const response = await deps.sendPush(push.token, payload, env, {
+        collapseId: reveal ? revealCollapseId(job.t) : resultsCollapseId(job.d),
+        expiration: Math.floor(expiration / 1000),
+      });
+      if (response.status === 410) { await deps.dropPushToken(r.uid, push.token); drop("unregistered"); continue; }
+      if (response.ok) { outcomes.push({ key, gen, result: "sent" }); stats.sent++; continue; }
+    } catch { /* transient; retried */ }
+    outcomes.push({ key, gen, result: "failed" });
+    stats.failed++;
+    ack = false;
+  }
+  if (outcomes.length) await client.call("record", { outcomes, now });
+  return { ack, stats };
+}
+
+/**
+ * MATCHDAY RESULTS — after settlement, once per UK day per player.
+ *
+ * Confirmed by SETTLEMENT, never by the clock: a player is owed the alert only
+ * when every one of their fixtures that day (across all their leagues,
+ * postponed and void excluded) has a result. The day instance remembers the
+ * settled count it last saw, so a tick on which nothing new settled costs one
+ * DO call and no member reads.
+ */
+export async function planMatchdayResults(env, nowMs = Date.now()) {
+  if (!revealEnabled(env) || !apnsConfigured(env)) return { days: 0 };
+  const today = ukDate(nowMs);
+  const dates = [today, previousUkDate(today)].filter((d) => nowMs <= resultsDeadlineMs(d));
+  const all = await allFixtures(env);
+  const outcome = { days: 0, recipients: 0 };
+  for (const d of dates) {
+    const dayFixtures = all.filter((m) => {
+      const lockMs = fixtureLockMs(m);
+      return lockMs != null && ukDate(lockMs) === d && !isVoided(m) && !isPostponed(m);
+    });
+    const settled = dayFixtures.filter((m) => normaliseResult(m)).length;
+    if (!settled) continue;
+    const client = revealClient(env, dayName(d));
+    const { changed } = await client.call("dayCheck", { settled });
+    if (!changed) continue;
+    outcome.days++;
+    outcome.recipients += await sendDayResults(env, d, dayFixtures, nowMs, client);
+    await client.call("daySeen", { settled });
+  }
+  return outcome;
+}
+
+async function sendDayResults(env, d, dayFixtures, nowMs, client) {
+  const fixtureById = new Map(dayFixtures.map((m) => [String(m.id), m]));
+  const byCode = new Map();
+  for (const match of dayFixtures) {
+    for (const { code, period } of await leaguesForFixture(env, match.id)) {
+      if (!byCode.has(code)) byCode.set(code, []);
+      byCode.get(code).push({ id: String(match.id), period: String(period) });
+    }
+  }
+  const leagues = new Map();
+  const byUid = new Map();
+  for (const [code, entries] of [...byCode].sort((a, b) => a[0].localeCompare(b[0]))) {
+    const league = await kvGet(env, `league:${code}`);
+    if (!league) continue;
+    const listed = [];
+    const slates = new Map();
+    for (const entry of entries) {
+      if (!slates.has(entry.period)) slates.set(entry.period, await readPublishedSlate(env, code, entry.period));
+      const slate = slates.get(entry.period);
+      // The index is a hint; the slate is the authority.
+      if (slate && (slate.fixtureIds || []).map(String).includes(entry.id)) listed.push(entry);
+    }
+    if (!listed.length) continue;
+    leagues.set(code, { league, slates, listed });
+    for (const member of await members(env, league)) {
+      for (const entry of listed) {
+        const lockMs = fixtureLockMs(fixtureById.get(entry.id));
+        if (member.since && member.since > lockMs) continue;
+        if (!byUid.has(member.uid)) byUid.set(member.uid, { fixtures: new Set(), codes: new Map() });
+        const mine = byUid.get(member.uid);
+        mine.fixtures.add(entry.id);
+        mine.codes.set(code, entry.period);
+      }
+    }
+  }
+  // Settled across EVERY league: one unsettled fixture anywhere holds the alert.
+  const complete = [...byUid].filter(([, mine]) =>
+    [...mine.fixtures].every((id) => normaliseResult(fixtureById.get(id))));
+  if (!complete.length) return 0;
+  const pending = new Set(await client.call("pending", { keys: complete.map(([uid]) => resultsAlertKey(uid, d)) }));
+  const picks = new Map();
+  const weekDone = new Map();
+  const weekLabelOf = async (code, period) => {
+    const key = `${code}|${period}`;
+    if (!weekDone.has(key)) {
+      const { league, slates } = leagues.get(code);
+      const byPeriod = poolByPeriod(await leagueFixtures(env, league), league);
+      const round = slateFixtures(slates.get(period), byPeriod.get(period) || []);
+      weekDone.set(key, roundComplete(round)
+        ? periodTitleFor(league, period, weekNumberOf(period, orderedPeriods(byPeriod)))
+        : null);
+    }
+    return weekDone.get(key);
+  };
+  const recipients = [];
+  for (const [uid, mine] of complete) {
+    if (!pending.has(resultsAlertKey(uid, d))) continue;
+    const push = await kvGet(env, `push:${uid}`);
+    if (!push?.token || push.results !== true) continue;          // default off
+    let pts = 0;
+    for (const id of mine.fixtures) {
+      if (!picks.has(id)) picks.set(id, (await kvGet(env, `picks:${id}`)) || {});
+      const match = fixtureById.get(id);
+      const raw = picks.get(id)[uid];
+      const pick = pickValid(raw, fixtureLockMs(match)) ? raw : null;
+      pts += scorePick(pick, normaliseResult(match)).pts;
+    }
+    // The week-complete variant: every league of theirs that played today has
+    // its whole week settled now. Labelled by the lowest code, as reminders are.
+    const codes = [...mine.codes.keys()].sort();
+    const labels = [];
+    for (const code of codes) labels.push(await weekLabelOf(code, mine.codes.get(code)));
+    const weekLabel = labels.every(Boolean) ? labels[0] : null;
+    recipients.push({ uid, pts, matches: mine.fixtures.size, weekLabel, codes });
+  }
+  const jobs = packAlertJobs({ v: 2, kind: "results", d, deadline: resultsDeadlineMs(d) }, recipients);
+  for (const job of jobs) await env.NOTIFY_QUEUE.send(job);
+  return recipients.length;
+}
+
+/**
+ * GET /reveal-slot?uid=&t=<slotMs> — the reveal hub and cards.
+ *
+ * Refuses before the seal AND before the lock, so it never depends on the push
+ * having been sent; membership is re-read on every call; nothing is cached.
+ */
+async function revealSlot(env, url) {
+  const viewer = String(url.searchParams.get("uid") || "").trim();
+  const t = Number(url.searchParams.get("t"));
+  if (!viewer || !Number.isSafeInteger(t) || t <= 0) return json({ error: "uid and t required" }, 400, env);
+  const noStore = { "cache-control": "private, no-store" };
+  const locked = () => json({ locked: false }, 409, env, noStore);
+  if (!env.REVEAL_SLOT) return locked();
+  const serverNow = Date.now();
+  const seal = await revealClient(env, slotName(t)).call("seal");
+  if (!seal?.sealed || serverNow < seal.slotMs) return locked();
+  const lockMs = seal.slotMs;
+  const byCode = new Map();
+  for (const pair of seal.pairs || []) {
+    if (!byCode.has(pair.code)) byCode.set(pair.code, []);
+    byCode.get(pair.code).push(pair);
+  }
+  const picks = new Map();
+  const leagues = [];
+  for (const code of [...byCode.keys()].sort()) {
+    const league = await kvGet(env, `league:${code}`);
+    if (!league) continue;
+    const memberList = await members(env, league);
+    if (!memberList.some((m) => m.uid === viewer)) continue;       // current members only
+    const eligible = memberList.filter((m) => !m.since || lockMs >= m.since);
+    const pairs = byCode.get(code);
+    const period = pairs[0].period;
+    const matchList = await leagueFixtures(env, league);
+    const byPeriod = poolByPeriod(matchList, league);
+    const weekNo = weekNumberOf(period, orderedPeriods(byPeriod));
+    const fixtureRows = [];
+    for (const pair of pairs) {
+      const match = matchList.find((m) => String(m.id) === pair.fixtureId);
+      if (!match) continue;
+      if (!picks.has(pair.fixtureId)) picks.set(pair.fixtureId, (await kvGet(env, `picks:${pair.fixtureId}`)) || {});
+      const stored = picks.get(pair.fixtureId);
+      const rows = eligible.map((member) => {
+        const raw = stored[member.uid];
+        const pick = pickValid(raw, lockMs) ? raw : null;
+        return {
+          uid: member.uid, nick: member.nick, you: member.uid === viewer,
+          p1: pick ? pick.p1 : null, p2: pick ? pick.p2 : null, noPick: !pick,
+        };
+      }).sort((a, b) => (b.you - a.you) || a.nick.localeCompare(b.nick));
+      fixtureRows.push({
+        id: pair.fixtureId, player1: match.player1, player2: match.player2, startAt: match.startAt,
+        total: rows.length, more: Math.max(0, rows.length - 8), rows: rows.slice(0, 8),
+      });
+    }
+    if (!fixtureRows.length) continue;
+    leagues.push({
+      code, name: league.name, mixed: isMixedLeague(league), period,
+      weekLabel: periodTitleFor(league, period, weekNo), fixtures: fixtureRows,
+    });
+  }
+  return json({
+    t: lockMs,
+    lockAt: new Date(lockMs).toISOString(),
+    sealedAt: new Date(seal.sealedAt).toISOString(),
+    leagues,
+  }, 200, env, noStore);
+}
+
+/**
+ * v1.9 §B: the once-a-day WeatherKit pass, on the 06:00 UK tick only. Every
+ * other tick returns before reading anything; with the secrets absent, so does
+ * this one. Failures are swallowed — a missed forecast is no pill, and the
+ * next chance is the next pass, never a retry.
+ */
+export async function dailyWeather(env, nowMs, options = {}) {
+  if (!weatherConfigured(env) || !isDailyPassTick(nowMs)) return null;
+  try {
+    const lists = {};
+    for (const code of COMPETITION_CODES) {
+      if (competitionConfigured(env, code)) lists[code] = await fixtures(env, code);
+    }
+    const stats = await weatherPass(env, lists, nowMs, options);
+    for (const code of stats.changed) clearFixtureCache(code);
+    return stats;
+  } catch {
+    return null;
+  }
+}
+
 export default {
   async scheduled(event, env, ctx) {
     // Cron events carry the moment they were meant to fire. Using it rather than
@@ -3118,9 +3717,12 @@ export default {
     // One or the other, never both: the D2 planner replaces the broadcast the
     // moment its infrastructure exists, and nothing changes until it does.
     ctx.waitUntil(notifyEnabled(env) ? planKickoffReminders(env, nowMs) : notifyKickoffs(env));
-    ctx.waitUntil(autoSettle(env));
+    // The results alert is confirmed by settlement, so it runs after it.
+    ctx.waitUntil(autoSettle(env).then(() => planMatchdayResults(env, nowMs)));
+    ctx.waitUntil(planRevealSlots(env, nowMs));
     ctx.waitUntil(weeklyLoop(env, nowMs));
     ctx.waitUntil(podiumAnnouncements(env));
+    ctx.waitUntil(dailyWeather(env, nowMs));
   },
   async fetch(request, env) {
     if (request.method === "OPTIONS") return applyCors(new Response(null, { headers: cors(env) }), env, request);
@@ -3140,8 +3742,10 @@ export default {
       try {
         // Cloudflare's own delivery counter: attempt 1 is a first delivery,
         // anything higher is a retry and draws from the retry read pool.
-        const { ack } = await deliverJob(message.body, env, deps,
-          { attempt: message.attempts ?? 1 });
+        // v1.9: reveal and results jobs carry a kind; reminder jobs do not.
+        const { ack } = message.body?.kind
+          ? await deliverAlertJob(message.body, env, deps)
+          : await deliverJob(message.body, env, deps, { attempt: message.attempts ?? 1 });
         if (ack) message.ack();
         else message.retry({ delaySeconds: NOTIFY_RETRY_DELAY_S });
       } catch {
@@ -3154,6 +3758,8 @@ export default {
 
 export { NotifyLedger };
 export { LeagueRegistrar };
+export { RevealSlot };
+export { PrefsStore };
 
 async function route(request, env) {
   const url = new URL(request.url);
@@ -3166,6 +3772,7 @@ async function route(request, env) {
       if (path === "/fixtures") return await getFixtures(env, request);
       if (path === "/picks") return await getUserPicks(env, url);
       if (path === "/notification-prefs") return await getNotificationPrefs(env, url);
+      if (path === "/reveal-slot") return await revealSlot(env, url);
       if (path === "/state") return await state(env, url);
       if (path === "/stats") return await stats(env, url);
       if (path.startsWith("/ics/")) return await fixtureIcs(env, url, path);

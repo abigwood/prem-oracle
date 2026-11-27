@@ -13,7 +13,7 @@
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" href="icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
-  <link rel="stylesheet" href="styles.css?v=20261125c">
+  <link rel="stylesheet" href="styles.css?v=20261126d">
 </head>
 <body>
   <header class="app-header">
@@ -57,6 +57,14 @@
         <span class="eyebrow">Notifications</span>
         <p class="notif-hint">Kick-off reminders, per competition.</p>
         <div id="notificationPrefsList"></div>
+      </div>
+      <div id="matchdayAlerts" class="notif-prefs" hidden>
+        <span class="eyebrow">Matchday alerts</span>
+        <div id="notificationsDenied" class="notif-denied" role="status" hidden>
+          <p>Notifications are off for Prem Oracle in your iPhone Settings, so no reminders or alerts can reach you.</p>
+          <button class="secondary" type="button" data-open-ios-settings>Open iPhone Settings</button>
+        </div>
+        <div id="matchdayAlertsList"></div>
       </div>
       <div id="profileRecovery" class="profile-recovery">
         <span class="eyebrow">Account recovery</span>
@@ -150,6 +158,6 @@
   <script src="vendor/capacitor/share.js" defer></script>
   <script src="vendor/capacitor/filesystem.js" defer></script>
   <script src="vendor/capacitor/in-app-review.js" defer></script>
-  <script src="app.js?v=20261125c" defer></script>
+  <script src="app.js?v=20261126d" defer></script>
 </body>
 </html>

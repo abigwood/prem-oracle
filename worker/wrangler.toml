@@ -33,6 +33,25 @@ new_sqlite_classes = ["NotifyLedger"]
 tag = "v2"
 new_sqlite_classes = ["LeagueRegistrar"]
 
+# v1.9 Slice 2. The RevealSlot Durable Object — one instance per kick-off slot
+# (`slot:<slotMs>`) and one per UK day (`day:<ukDate>`), each with its own
+# alarm, seal and idempotency claims (rv:<uid>:<slotMs>, mr:<uid>:<ukDate>).
+# A third migration adds the class; the binding below reaches it. Rolling back
+# is deleting the binding and redeploying: the cron then plans no reveal slots,
+# sends no reveal or results alerts, and /reveal-slot answers 409.
+[[migrations]]
+tag = "v3"
+new_sqlite_classes = ["RevealSlot"]
+
+# v1.9 build 37. The PrefsStore Durable Object — one instance per uid, the
+# single ordered writer of push:<uid> (token, mute, reveal/results, offers). It
+# mirrors the whole record to KV after every write, so every reader is
+# unchanged. Rolling back is deleting the binding and redeploying: writes then
+# fall back to the direct KV read-modify-write of build 36.
+[[migrations]]
+tag = "v4"
+new_sqlite_classes = ["PrefsStore"]
+
 # ---------------------------------------------------------------------------
 # B2 ACTIVATION. These three blocks are the whole switch: with them the cron
 # plans into the queue and the consumer delivers; without them the same code
@@ -49,6 +68,16 @@ class_name = "NotifyLedger"
 [[durable_objects.bindings]]
 name = "LEAGUE_REGISTRAR"
 class_name = "LeagueRegistrar"
+
+# v1.9 Slice 2. Absent -> no reveal/results alerts, /reveal-slot is 409.
+[[durable_objects.bindings]]
+name = "REVEAL_SLOT"
+class_name = "RevealSlot"
+
+# v1.9 build 37. Absent -> prefs/token writes use direct KV (build 36 behaviour).
+[[durable_objects.bindings]]
+name = "PREFS_STORE"
+class_name = "PrefsStore"
 
 [[queues.producers]]
 binding = "NOTIFY_QUEUE"

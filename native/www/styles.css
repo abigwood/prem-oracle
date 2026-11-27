@@ -331,6 +331,10 @@ main {
   text-transform: uppercase;
 }
 .weather-pill { border-color: #cde7d6; background: #f0faf1; }
+/* Apple's official Apple Weather mark (WeatherKit attribution resources), at
+   its native 77x14 with 2x/3x sources, linking to the legal attribution page. */
+.weather-attribution { display: inline-flex; align-self: center; line-height: 0; }
+.weather-attribution img { display: block; width: 77px; height: 14px; }
 .venue-pill {
   min-width: 0;
   overflow: hidden;
@@ -2247,6 +2251,72 @@ body.picker-open { overflow: hidden; }
   .pick-row-match { gap: 8px; }
   .pick-row-saved { right: 10px; }
 }
+/* --- v1.9 §3: your pick and its points on a finished row --------------------
+   A second grid row under the score and "FT", right-aligned with them and
+   spanning the whole row, so it has the width a 320pt phone does not give the
+   score column. Contrast: exact #0B6B3A on #DFF7E9 5.9:1, result #420A42 on
+   #EFE6F3 12.8:1, miss/no pick #5A6478 on #EEF0F3 5.2:1. */
+.pick-row .pick-row-head { row-gap: 2px; }
+.pick-row-outcome {
+  grid-column: 1 / -1;
+  justify-self: end;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+  line-height: 1.2;
+}
+.pick-row-you { font-size: .7rem; font-weight: 800; color: var(--muted); font-variant-numeric: tabular-nums; }
+.pick-pill {
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: .68rem;
+  font-weight: 900;
+  font-variant-numeric: tabular-nums;
+}
+.pick-pill-exact { background: #DFF7E9; color: #0B6B3A; }
+.pick-pill-result { background: #EFE6F3; color: #420A42; }
+.pick-pill-miss,
+.pick-pill-none { background: #EEF0F3; color: #5A6478; }
+
+/* --- v1.9 §2: the shape of the week while it loads --------------------------
+   Built inside the real row's own grid, so the row that replaces a skeleton
+   lands exactly where it stood. Grey shapes only: no words to be wrong. */
+.pick-row-skeleton .pick-row-head { cursor: default; }
+.skeleton-bar,
+.skeleton-circle { display: block; background: #e6eaf0; }
+.skeleton-bar { height: .7rem; border-radius: 6px; }
+.skeleton-date { width: 3.4rem; height: .62rem; }
+.skeleton-time { width: 2.4rem; height: .8rem; }
+.skeleton-circle { flex: none; width: 40px; height: 40px; border-radius: 50%; }
+.pick-row-skeleton .pick-row-v { visibility: hidden; }
+.skeleton-score { width: 2.6rem; height: 1.3rem; }
+/* The pick line's own height: a pill is .68rem type at 1.2 plus 2px padding top and bottom. */
+.skeleton-outcome { width: 5.6rem; height: calc(.68rem * 1.2 + 4px); border-radius: 999px; }
+/* Remembered header words as grey bars: the text keeps its line breaks and is
+   never seen. clone gives every wrapped line its own rounded bar. */
+.skeleton-text {
+  color: transparent;
+  background: #e6eaf0;
+  border-radius: 6px;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+  user-select: none;
+}
+.pick-skeleton-lines { display: flex; flex-direction: column; gap: 6px; padding-top: 2px; }
+.skeleton-line { width: 13rem; max-width: 100%; }
+.skeleton-line-short { width: 8.5rem; }
+.pick-row-skeleton,
+.pick-skeleton-lines .skeleton-bar,
+.skeleton-text { animation: view-pulse 1.1s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) {
+  .pick-row-skeleton,
+  .pick-skeleton-lines .skeleton-bar,
+  .skeleton-text { animation: none; opacity: .8; }
+}
+.picks-load-failed strong { display: block; margin-bottom: 4px; font-size: .95rem; font-weight: 900; color: var(--ink); }
+.picks-load-failed .primary { margin-top: 14px; }
+
 /* The week's own share control sits under the list it exports. */
 .pick-share { display: flex; justify-content: flex-end; margin-top: 12px; }
 
@@ -2364,3 +2434,122 @@ body.picker-open { overflow: hidden; }
    place so nothing moves under a finger when it arrives, and plainly cannot be
    pressed — an icon that looks ready before it is would be worse than absent. */
 .share-icon[disabled] { color: var(--muted); cursor: default; opacity: .55; }
+
+/* --- v1.9 F5: a finished row sits a step darker than the page ------------- */
+/* #ECEFF4 against the #F5F7FB page; the muted lines darken to #475569 so the
+   date, FT and "You x-y" keep 6.6:1 on the grey (#64748B would be 4.1:1). Ink
+   is 14.3:1, and the pills carry their own grounds (5.2:1 and up). */
+.pick-row.is-finished { background: #ECEFF4; border-color: #DCE1E8; }
+.pick-row.is-finished .pick-row-date,
+.pick-row.is-finished .pick-row-caption,
+.pick-row.is-finished .pick-row-word,
+.pick-row.is-finished .pick-row-you { color: #475569; }
+
+/* --- v1.9 Slice 2: the matchday screens ------------------------------------ */
+.md-back {
+  display: inline-flex; align-items: center; min-height: 44px; margin: 0 0 2px; padding: 0 4px 0 0;
+  border: 0; background: none; color: var(--purple); font-size: .9rem; font-weight: 900;
+}
+.md-league { margin-top: 16px; }
+.md-league-head { margin: 0 0 8px; font-size: .95rem; font-weight: 900; color: var(--ink); }
+.md-league-head span { color: var(--muted); font-weight: 800; }
+.md-hub-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%;
+  min-height: 56px; margin-top: 6px; padding: 8px 14px; border: 1px solid var(--line); border-radius: 12px;
+  background: var(--white); color: var(--ink);
+}
+.md-see { font-size: .85rem; font-weight: 900; color: var(--purple); white-space: nowrap; }
+.md-fixture-title { display: flex; align-items: center; }
+.md-section { margin-top: 18px; }
+.md-subhead { margin: 18px 0 8px; font-size: .9rem; font-weight: 900; color: var(--ink); }
+.md-section .md-subhead { margin-top: 0; }
+.md-rows { margin: 8px 0 0; padding: 0; list-style: none; }
+.md-rows:not(.is-all) .md-row.is-extra { display: none; }
+.md-row {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 10px;
+  min-height: 40px; padding: 6px 10px; border-radius: 9px; font-size: .86rem;
+}
+.md-table .md-row { grid-template-columns: 2ch minmax(0, 1fr) auto; }
+.md-row + .md-row { margin-top: 3px; }
+.md-row:nth-child(odd) { background: var(--white); }
+.md-row.is-you { background: var(--purple-soft); }
+.md-row.is-you .md-nick { color: var(--purple); font-weight: 900; }
+.md-rank { font-weight: 900; color: var(--muted); font-variant-numeric: tabular-nums; }
+.md-nick { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 800; color: var(--ink); }
+.md-you {
+  margin-left: 4px; padding: 1px 6px; border-radius: 999px; background: var(--purple); color: var(--white);
+  font-size: .62rem; font-style: normal; font-weight: 900; letter-spacing: .06em;
+}
+.md-pick { font-weight: 900; font-variant-numeric: tabular-nums; color: var(--ink); white-space: nowrap; }
+.md-pick.is-none { color: #5A6478; font-weight: 800; }
+.md-pill { display: flex; justify-content: flex-end; white-space: nowrap; }
+.md-more {
+  min-height: 40px; margin-top: 4px; padding: 0 10px; border: 0; background: none;
+  color: var(--purple); font-size: .84rem; font-weight: 900;
+}
+.md-more-note { margin: 6px 10px 0; color: var(--muted); font-size: .84rem; font-weight: 800; }
+.md-match-head {
+  display: flex; align-items: center; justify-content: center; gap: 12px; margin: 0;
+  padding: 10px; border: 1px solid #DCE1E8; border-radius: 12px; background: #ECEFF4;
+}
+.md-match-score { display: flex; flex-direction: column; align-items: center; min-width: 52px; }
+.md-match-head .pick-row-caption, .md-match-head .pick-row-word { color: #475569; }
+.md-score { font-size: 1.2rem; font-weight: 900; color: var(--ink); font-variant-numeric: tabular-nums; }
+.md-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.md-chip {
+  min-height: 36px; padding: 0 12px; border: 1px solid var(--line); border-radius: 999px;
+  background: var(--white); color: var(--ink); font-size: .8rem; font-weight: 800;
+}
+.md-chip.is-on { border-color: var(--purple); background: var(--purple); color: var(--white); }
+.md-share { margin-top: 18px; }
+.md-share:disabled { opacity: .5; }
+.md-banner {
+  display: flex; flex-direction: column; gap: 2px; width: 100%; margin: 6px 0 4px; padding: 12px 14px;
+  border: 0; border-radius: 14px; background: var(--purple); color: var(--white); text-align: left;
+  font-size: .82rem; font-weight: 800;
+}
+.md-banner-title { color: var(--grass); font-size: .74rem; font-weight: 900; letter-spacing: .08em; }
+
+.results-block { margin-top: 12px; }
+.results-summary {
+  padding: 14px 16px; border-radius: 16px; background: var(--purple); color: var(--white);
+}
+.results-summary .eyebrow { color: var(--grass); }
+.results-summary h2, .results-summary h3 { margin: 2px 0 4px; color: var(--white); }
+.results-summary p { margin: 0; font-size: .86rem; font-weight: 800; }
+.results-league {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 10px; width: 100%;
+  margin-top: 8px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 14px;
+  background: var(--white); color: var(--ink); text-align: left;
+}
+.results-league > span:not(.results-go) { grid-column: 1; }
+.results-league-name { font-size: .92rem; font-weight: 900; overflow-wrap: anywhere; }
+.results-league-line { font-size: .82rem; font-weight: 800; color: #475569; }
+.results-go { grid-column: 2; grid-row: 1 / span 3; align-self: center; font-size: 1.2rem; font-weight: 900; color: var(--purple); }
+.results-winner {
+  display: inline-block; margin-left: 4px; padding: 1px 7px; border-radius: 999px; background: #DFF7E9;
+  color: #0B6B3A; font-size: .62rem; font-weight: 900; letter-spacing: .06em; vertical-align: 1px;
+}
+.results-link {
+  display: block; min-height: 40px; margin: 8px 0 0; padding: 0; border: 0; background: none;
+  color: var(--purple); font-size: .88rem; font-weight: 900; text-align: left;
+}
+.scorecard-links { margin-top: 6px; }
+
+.alert-offer {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 10px;
+  margin-top: 16px; padding: 12px 12px 12px 14px; border: 1px solid var(--line); border-radius: 14px; background: var(--white);
+}
+.alert-offer p { margin: 0; font-size: .86rem; font-weight: 800; color: var(--ink); }
+.alert-offer .primary { width: auto; min-height: 40px; margin: 0; padding: 0 14px; }
+.alert-offer-dismiss {
+  width: 40px; height: 40px; border: 0; border-radius: 50%; background: none; color: var(--muted);
+  font-size: 1.3rem; font-weight: 900;
+}
+.notif-row-sub > span { display: flex; flex-direction: column; gap: 2px; }
+.notif-row-sub small { font-size: .74rem; font-weight: 700; color: var(--muted); }
+.notif-denied { margin: 8px 0 4px; }
+.notif-denied p { margin: 0 0 8px; font-size: .8rem; font-weight: 700; color: var(--ink); line-height: 1.45; }
+.notif-row input:disabled { opacity: .45; }
+.round-standings tr.is-you td { background: var(--purple-soft); }
+.round-standings tr.is-you .player-name { color: var(--purple); font-weight: 900; }

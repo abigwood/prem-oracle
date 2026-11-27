@@ -140,7 +140,7 @@ test("§2 · creation failure stays on confirm, shows the error, surfaces no rec
 
 test("§3 · invite links open the one-step join sheet, not Manage leagues", () => {
   // The launch decision opens the join sheet for an invite to a league not joined.
-  assert.match(APP, /if \(joinInvite && API\) openJoinSheet\(joinInvite\)/);
+  assert.match(APP, /if \(joinInvite && API && !sheetOpen\) openJoinSheet\(joinInvite\)/);
   // The join sheet's submit path never toggles the management surface.
   assert.ok(!sourceOf("submitJoinSheet").includes("leagueManageOpen"));
   assert.ok(!sourceOf("openJoinSheet").includes("leagueManageOpen"));

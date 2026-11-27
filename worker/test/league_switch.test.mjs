@@ -47,6 +47,8 @@ function loaders({ delays = {}, roundDelays = {}, fail = false, cachedLeagues = 
     let expandedPickId = null;
     let selectedPeriod = null, leagueTab = "matchday", leagueStates = { ...cachedLeagues };
     let leagueStateRequest = 0, roundStateRequest = 0;
+    // v1.9 §2: which leagues the server has answered for, and which failed.
+    const confirmedLeagues = new Set(), leagueLoadFailed = new Set();
     let navGeneration = 0;
     let currentView = "league";
     const API = "https://worker.test";

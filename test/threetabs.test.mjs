@@ -98,7 +98,7 @@ test("T2 · notifications still open the fixture on My Picks", () => {
   assert.match(open, /currentView = "picks";/, "the no-route fallback still lands somewhere");
   assert.ok(!open.includes('"today"'), "a notification can still reach Next");
   // The payload contract itself is untouched.
-  const box = load(["readNotificationRoute", "safeParseJSON", "NOTIFY_PAYLOAD_VERSION"], {});
+  const box = load(["readNotificationRoute", "safeParseJSON", "NOTIFY_PAYLOAD_VERSION", "NOTIFY_MATCHDAY_VERSION", "UK_DATE_RE", "matchdayRouteFromBlock"], {});
   assert.deepEqual(JSON.parse(JSON.stringify(
     box.readNotificationRoute({ po: { v: 1, f: "m1", l: "aaa" } }))),
     { fixtureId: "m1", league: "AAA" });
@@ -572,7 +572,7 @@ test("C1 · a linked membership is selected before My Picks renders", () => {
   // v1.8 Slice A: a NON-member invite opens the one-step join sheet instead of
   // routing to the League tab.
   assert.match(body, /const joinInvite = inviteCode && !leagueCodes\.includes\(inviteCode\) \? inviteCode : null;/);
-  assert.match(body, /if \(joinInvite && API\) openJoinSheet\(joinInvite\);/);
+  assert.match(body, /if \(joinInvite && API && !sheetOpen\) openJoinSheet\(joinInvite\);/);
   assert.ok(!body.includes('currentView = "league"'), "a non-member invite still routes to the League tab");
 });
 

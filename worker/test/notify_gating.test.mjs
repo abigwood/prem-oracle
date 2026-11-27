@@ -23,8 +23,10 @@ test("X1 · without the bindings the cron does exactly what it does today", asyn
   const env = {};   // no NOTIFY_QUEUE, no NOTIFY_LEDGER, no APNs secrets
   const ctx = { waitUntil: (p) => calls.push(p) };
   await worker.scheduled({ scheduledTime: Date.now() }, env, ctx);
-  // Four background jobs as before, and none of them throws on a bare env.
-  assert.equal(calls.length, 4);
+  // Four background jobs as before, plus v1.9's reveal planner (a no-op without
+  // REVEAL_SLOT) and weather pass (a no-op without its secrets), and none of
+  // them throws on a bare env.
+  assert.equal(calls.length, 6);
   await Promise.all(calls.map((p) => Promise.resolve(p).catch(() => null)));
 });
 
@@ -80,8 +82,11 @@ test("B2 · the reviewed bindings are configured, and named exactly", () => {
   // LeagueRegistrar — and nothing else; a second producer would be a second
   // name for the same switch, and a second consumer would double every delivery.
   assert.equal((active.match(/name = "NOTIFY_LEDGER"\nclass_name = "NotifyLedger"/g) || []).length, 1);
-  assert.equal(active.match(/\[\[durable_objects\.bindings\]\]/g).length, 2);
+  // v1.9 Slice 2 adds a third — RevealSlot — and build 37 a fourth — PrefsStore.
+  assert.equal(active.match(/\[\[durable_objects\.bindings\]\]/g).length, 4);
+  assert.match(active, /name = "PREFS_STORE"\nclass_name = "PrefsStore"/);
   assert.match(active, /name = "LEAGUE_REGISTRAR"\nclass_name = "LeagueRegistrar"/);
+  assert.match(active, /name = "REVEAL_SLOT"\nclass_name = "RevealSlot"/);
   assert.equal(active.match(/\[\[queues\.producers\]\]/g).length, 1);
   assert.equal(active.match(/\[\[queues\.consumers\]\]/g).length, 1);
   // The names the code gates on are the names configured.
@@ -111,9 +116,11 @@ test("B2 · activation adds a binding, never a second migration", () => {
   const active = directives();
   assert.match(active, /\[\[migrations\]\]/);
   assert.match(active, /new_sqlite_classes = \["NotifyLedger"\]/);
-  // v1 (NotifyLedger) and v2 (LeagueRegistrar) — the only two, both additive.
-  assert.equal(active.match(/\[\[migrations\]\]/g).length, 2);
-  assert.equal(active.match(/^tag = /gm).length, 2);
+  // v1 (NotifyLedger), v2 (LeagueRegistrar), v3 (RevealSlot), v4 (PrefsStore) — all additive.
+  assert.equal(active.match(/\[\[migrations\]\]/g).length, 4);
+  assert.equal(active.match(/^tag = /gm).length, 4);
+  assert.match(active, /tag = "v4"\nnew_sqlite_classes = \["PrefsStore"\]/);
+  assert.match(active, /tag = "v3"\nnew_sqlite_classes = \["RevealSlot"\]/);
   assert.match(active, /tag = "v1"/, "the applied migration tag changed");
   assert.match(active, /tag = "v2"\nnew_sqlite_classes = \["LeagueRegistrar"\]/);
   // Nothing may be renamed or deleted: those are the migration verbs that
